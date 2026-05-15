@@ -17,6 +17,7 @@ the corresponding `followup.txt`, not here.
 | 003 | recent-repo-state    | 2026-05-15 | 4        | closed         | 87070cf        |
 | 004 | path-a-batch-2       | 2026-05-15 | 7        | closed         | 5916a53        |
 | 005 | path-a-batch-3       | 2026-05-15 | 5        | closed         | a126761        |
+| 006 | followup-on-005      | 2026-05-15 | 3        | closed         | 3981d96        |
 
 ---
 
