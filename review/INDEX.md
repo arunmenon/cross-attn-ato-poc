@@ -14,7 +14,7 @@ the corresponding `followup.txt`, not here.
 |-----|----------------------|------------|----------|----------------|----------------|
 | 001 | plan-and-scaffold    | 2026-05-15 | 6        | partial-closed | b903809        |
 | 002 | followup-on-001      | 2026-05-15 | 3        | closed         | 67ee1e7        |
-| 003 | recent-repo-state    | 2026-05-15 | 4        | closed         | <this-commit>  |
+| 003 | recent-repo-state    | 2026-05-15 | 4        | closed         | 87070cf  |
 
 ---
 
