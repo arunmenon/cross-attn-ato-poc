@@ -127,10 +127,17 @@ LABEL_LEGIT_STR = " legit"
 
 
 def get_label_token_ids(tokenizer) -> tuple[int, int]:
-    """Returns (fraud_id, legit_id) — the FIRST token of " fraud" and
-    " legit" respectively. If either tokenizes to multiple tokens, we
-    take the first one (the discriminative token); the trainers' scoring
-    code uses single-token log-prob comparison.
+    """Returns (fraud_id, legit_id) — the single token of " fraud" and
+    " legit" respectively.
+
+    Review 007 finding #4: fail fast on ALL three failure modes that
+    would silently corrupt scoring:
+
+      a. Empty encoding (tokenizer config broken).
+      b. Multi-token encoding (single-token scoring would only see the
+         first token, missing discriminative information).
+      c. Same first-token ID for both labels (score would be 0 for
+         every example → AUC = 0.5).
     """
     fraud_ids = tokenizer.encode(LABEL_FRAUD_STR, add_special_tokens=False)
     legit_ids = tokenizer.encode(LABEL_LEGIT_STR, add_special_tokens=False)
@@ -138,6 +145,21 @@ def get_label_token_ids(tokenizer) -> tuple[int, int]:
         raise ValueError(
             f"could not tokenize label strings: "
             f"fraud_ids={fraud_ids} legit_ids={legit_ids}"
+        )
+    if len(fraud_ids) != 1 or len(legit_ids) != 1:
+        raise NotImplementedError(
+            f"label strings tokenize to multi-token sequences: "
+            f"fraud_ids={fraud_ids} legit_ids={legit_ids}. "
+            f"The current scoring code is single-token only; "
+            f"implement multi-token sequence-log-prob scoring before "
+            f"running, or change LABEL_FRAUD_STR / LABEL_LEGIT_STR to "
+            f"strings the tokenizer produces as a single token each."
+        )
+    if fraud_ids[0] == legit_ids[0]:
+        raise ValueError(
+            f"' fraud' and ' legit' tokenize to the same first ID "
+            f"({fraud_ids[0]}); score would be identically zero for "
+            f"every example. Check tokenizer configuration."
         )
     return fraud_ids[0], legit_ids[0]
 

@@ -16,7 +16,20 @@ xattn:
 
 # Training
 training:
-  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-merged
+  # base_checkpoint is INTENTIONALLY OMITTED here so each trainer's
+  # per-arm default applies (review 007 finding #3 — a shared template
+  # default would route raw-Qwen arms like cpt_light/lora_text into the
+  # merged-CPT checkpoint, breaking the Stage-0 and LoRA-text baselines).
+  #
+  # Per-arm defaults applied by the trainers when this field is omitted:
+  #   cpt_light, lora_text       -> Qwen/Qwen3-8B (raw)
+  #   structured_as_text, xattn  -> /workspace/checkpoints/qwen3-8b-cpt-light-merged
+  #   event_only                 -> no LM checkpoint needed
+  #
+  # An experiment may override `training.base_checkpoint` if needed, but
+  # the launcher's per-arm sanity check (validate_config in
+  # scripts/run_next_experiment.py) rejects checkpoints that mismatch
+  # the arm's expected family.
   steps: 1500
   seq_len: 2048
   micro_batch: 4

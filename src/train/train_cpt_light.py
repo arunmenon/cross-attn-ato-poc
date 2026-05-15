@@ -68,24 +68,40 @@ def main():
         from src.tokenizer.custom_tokens import init_new_embeddings
         init_new_embeddings(model, tokenizer, old_vocab_size=old_vocab_size)
 
-    # Freeze base; LoRA layers + new token embeddings are trainable.
+    # Freeze base; LoRA + embeddings (via modules_to_save) are trainable.
     for p in model.parameters():
         p.requires_grad = False
 
-    # NOTE: input embeddings remain frozen at the base init for the new
-    # tokens (set via init_new_embeddings as the mean of existing rows).
-    # If experimentation shows the new tokens need more capacity,
-    # unfreeze model.get_input_embeddings() here. For Day-1 we trust
-    # the mean-init + LoRA-on-attention to carry the structural signal.
-
+    # Review 007 finding #1: the embedding table MUST be trainable in
+    # Stage-0. Without this, the new custom-token rows stay at their
+    # mean-init values forever and the model cannot distinguish
+    # <journey_*>, <actor_*>, <event_*>, PII, or bucket tokens at the
+    # embedding layer. `modules_to_save=["embed_tokens"]` tells PEFT to
+    # (a) unfreeze the full input-embedding module and (b) save it as
+    # part of the adapter so `merge_stage0_lora.py` consumes it.
     lora_config = LoraConfig(
         r=cfg.get("xattn", {}).get("lora_r_on_q", 16),  # reuse same r value
         lora_alpha=16, lora_dropout=0.0, bias="none",
         task_type="CAUSAL_LM",
         target_modules=CPT_LIGHT_LORA_TARGETS,
+        modules_to_save=["embed_tokens"],
     )
     model = get_peft_model(model, lora_config)
     model = model.to(device)
+
+    # Sanity check (review 007 finding #1 — fail fast if PEFT's
+    # modules_to_save name didn't match the actual Qwen3 embedding
+    # module). Without this assertion, a Stage-0 run could silently
+    # train with frozen new-token rows and the bug would propagate
+    # into the merged base.
+    input_emb = model.get_input_embeddings()
+    if not input_emb.weight.requires_grad:
+        raise RuntimeError(
+            "Stage-0 expects embed_tokens to be trainable but "
+            "input_embeddings.weight.requires_grad is False. Check that "
+            "PEFT's modules_to_save list contains the right name for "
+            "this base's embedding module (Qwen3 uses 'embed_tokens')."
+        )
 
     # Eval-mode dropout collator
     from src.train.mixers.eval_mode_dropout import EvalModeDropoutCollator

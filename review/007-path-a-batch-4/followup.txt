@@ -1,0 +1,282 @@
+Review comments 007 — follow-up
+Date: 2026-05-15
+Subject: Disposition of findings in 007-path-a-batch-4/comments.txt
+Author: scaffold maintainer
+
+Original review file:
+    review/007-path-a-batch-4/comments.txt
+
+Repo state at follow-up:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+Baseline commit:
+    484be93 (Path A Batch 4 — code under review)
+
+Summary:
+All five findings FIXED in this pass. Two were blockers (Stage-0 embed
+freeze + launcher overwriting trainer metrics); three were high-severity
+contract bugs that would have invalidated specific arms (template base
+routing + eval marker handling + structured-as-text serialization
+divergence). Each fix includes a torch-free or local verification.
+
+Disposition per finding:
+
+1. Blocker: Stage-0 freezes the new token embeddings that PLAN.md says
+   it trains.
+
+Status: FIXED.
+
+Root cause: `train_cpt_light.py` and the LoRA-bearing baselines were
+following pattern:
+    init_new_embeddings(model, tokenizer, old_vocab_size=...)
+    for p in model.parameters(): p.requires_grad = False
+    model = get_peft_model(model, lora_config)
+PEFT's default LoRA wraps only `target_modules`; the input-embedding
+table is not a target and stays frozen. New token rows initialized via
+the mean-of-old-rows trick then never differentiated.
+
+Action — three trainers + one runtime assertion:
+
+a. `src/train/train_cpt_light.py` LoraConfig now passes:
+       modules_to_save=["embed_tokens"]
+   PEFT then (a) unfreezes the input-embedding module and (b) saves it
+   as part of the adapter so `scripts/merge_stage0_lora.py` consumes it
+   when producing `qwen3-8b-cpt-light-merged`.
+
+b. `src/train/train_lora_text_only.py` does the same. This baseline
+   needs to READ the journey/actor tokens at all (otherwise the
+   comparison to CPT-light is incoherent), so embed_tokens must train
+   here too even though the LoRA target list is narrower (q_proj only).
+
+c. `src/train/train_structured_as_text.py` does the same defensively.
+   The merged Stage-0 base should already contain the trained
+   embeddings, so this is a no-op in the common case. If a future run
+   loads the merged checkpoint with a tokenizer that has extra custom
+   tokens not in the merged vocab, this path keeps them trainable
+   instead of frozen-at-mean.
+
+d. `src/train/train_cpt_light.py` adds a runtime assertion right after
+   PEFT wrap:
+       input_emb = model.get_input_embeddings()
+       if not input_emb.weight.requires_grad:
+           raise RuntimeError(
+               "Stage-0 expects embed_tokens to be trainable ..."
+           )
+   Fail-closed: if PEFT's `modules_to_save` name didn't match the actual
+   Qwen3 embedding module (some forks name it `model.embed_tokens` and
+   some `transformer.wte`), the trainer aborts before consuming GPU
+   time rather than producing a broken merged base.
+
+Verify (pod-side, since this requires the real Qwen3 tokenizer +
+PEFT + a forward pass):
+
+    python3 -c "
+    import torch
+    from transformers import AutoModelForCausalLM
+    from peft import LoraConfig, get_peft_model
+    from src.tokenizer.custom_tokens import install
+    from src.train.train_cpt_light import CPT_LIGHT_LORA_TARGETS
+
+    base = AutoModelForCausalLM.from_pretrained('Qwen/Qwen3-8B',
+        torch_dtype=torch.bfloat16, trust_remote_code=True)
+    # ... install + resize tokens ...
+    for p in base.parameters(): p.requires_grad = False
+    cfg = LoraConfig(r=16, target_modules=CPT_LIGHT_LORA_TARGETS,
+                    modules_to_save=['embed_tokens'],
+                    task_type='CAUSAL_LM')
+    model = get_peft_model(base, cfg)
+    assert model.get_input_embeddings().weight.requires_grad, \\
+        'embed_tokens not trainable'
+    print('Stage-0 embed_tokens trainable: OK')
+    "
+
+2. Blocker: The launcher overwrites x-attn gate metrics with parser
+   output that cannot parse the trainer's gate logs.
+
+Status: FIXED.
+
+Root cause: `scripts/parse_metrics.py` always wrote `metrics.json` and
+`gate_trajectory.json` from log-parsing alone. The trainer's
+authoritative versions (containing the real `max_gate_magnitude`
+computed from `gate_trajectory.json`) were silently replaced.
+
+Action: `scripts/parse_metrics.py` rewritten to MERGE with existing,
+not overwrite:
+
+  - New `_merge_metrics(parser_metrics, run_dir)` reads
+    `metrics.json` if it exists. Trainer-written fields survive; the
+    parser's fields fill in only what's missing (e.g.,
+    `train_runtime_seconds`, `n_train_loss_records`).
+  - `gate_trajectory.json`: parser only writes it if the trainer did
+    NOT (i.e., for non-xattn arms or for runs that failed before
+    end-of-training).
+
+Contract clarification: trainer-written files are canonical on
+success; parser output is best-effort fill-in. The contract is
+documented in the docstrings.
+
+Self-test added (`parse_metrics.py --self-test`):
+  - Simulates a trainer-written `metrics.json` (with
+    `max_gate_magnitude=0.18`) + `gate_trajectory.json` + a
+    log-format `train.log`.
+  - Calls `_merge_metrics` and asserts:
+      merged["max_gate_magnitude"] == 0.18 (trainer field preserved)
+      merged["n_train_loss_records"] is filled in by parser
+      gate_trajectory.json is NOT overwritten
+  - Also tests the negative case (no trainer metrics → parser writes
+    its own).
+  - Runs locally without torch.
+
+Verify (run on laptop right now):
+
+    python3 scripts/parse_metrics.py --self-test
+    # parse_metrics merge contract OK (trainer metrics survive)
+
+3. High: The shared config template routes raw-Qwen arms to the merged
+   CPT checkpoint.
+
+Status: FIXED.
+
+Action — two layers:
+
+a. `src/auto_research/experiment_template.yaml`: removed the explicit
+   `training.base_checkpoint: /workspace/.../qwen3-8b-cpt-light-merged`
+   line. Replaced with a comment block explaining the per-arm default
+   policy:
+     - cpt_light, lora_text       → Qwen/Qwen3-8B (raw)
+     - structured_as_text, xattn  → /workspace/.../qwen3-8b-cpt-light-merged
+     - event_only                 → no LM
+   Each trainer's per-arm default already implements this correctly;
+   the template was overriding incorrectly.
+
+b. `scripts/run_next_experiment.py` validate_config: added per-arm
+   sanity check on `training.base_checkpoint`:
+     - If arm ∈ {cpt_light, lora_text} and base_checkpoint contains
+       "cpt-light-merged" / "cpt_light_merged" → reject with explanation.
+     - If arm ∈ {structured_as_text, xattn} and base_checkpoint
+       startswith "Qwen/" → reject.
+   This fails fast at config-validation time, before GPU dispatch.
+
+Verify (run on laptop right now):
+
+    python3 -c "
+    import importlib.util, sys
+    sys.path.insert(0, '.')
+    spec = importlib.util.spec_from_file_location('rne', 'scripts/run_next_experiment.py')
+    rne = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rne)
+
+    bad = {'exp_id': 'e', 'arm': 'cpt_light',
+           'training': {'base_checkpoint': '/workspace/checkpoints/qwen3-8b-cpt-light-merged'},
+           'data': {}, 'eval': {}, 'rationale': ''}
+    errs = rne.validate_config(bad)
+    assert any('cannot use base_checkpoint' in e for e in errs)
+    print('cpt_light + merged-path correctly rejected')
+
+    bad2 = {'exp_id': 'e', 'arm': 'xattn',
+            'xattn': {'insertion_pattern': 'every_4', 'gate_init': 'small_0.01',
+                      'resampler_slots': 64, 'encoder': 'small_transformer',
+                      'lora_r_on_q': 16},
+            'training': {'base_checkpoint': 'Qwen/Qwen3-8B'},
+            'data': {}, 'eval': {}, 'rationale': ''}
+    errs2 = rne.validate_config(bad2)
+    assert any('should use the merged' in e for e in errs2)
+    print('xattn + raw-Qwen correctly rejected')
+
+    ok = {'exp_id': 'e', 'arm': 'cpt_light', 'training': {'steps': 1500},
+          'data': {}, 'eval': {}, 'rationale': ''}
+    assert len(rne.validate_config(ok)) == 0
+    print('cpt_light + no-base-checkpoint accepted (trainer default applies)')
+    "
+
+4. High: Eval scoring silently accepts missing or truncated verdict
+   markers and unverified label-token encodings.
+
+Status: FIXED — three sub-fixes.
+
+Action — `src/train/common.py::get_label_token_ids`:
+  - Already raises on empty encoding.
+  - NEW: raises `NotImplementedError` if either label tokenizes to
+    more than one token (the current scoring code is single-token
+    only; a multi-token Qwen3 tokenizer config would silently make
+    score = first-token-only and miss discriminative information).
+  - NEW: raises `ValueError` if the two labels share the same first
+    token (would make score = 0 for every example, AUC = 0.5).
+
+Action — `src/train/eval_runner.py::run_three_mode_eval`:
+  - NEW: per-example pre-tokenization check that the marker
+    `<risk_verdict>\\nlabel:` is present in the transformed text.
+    If absent, raises `ValueError` with the example index and mode.
+    The previous code silently skipped the truncate-at-marker step
+    and scored at the last non-pad token — which could be the
+    ground-truth label itself.
+  - NEW: per-example post-tokenization check that the decoded
+    sequence still ends at `label:`. If `max_length` truncation
+    cut off the marker (because the prefix was too long), raises
+    `ValueError` with the truncated suffix shown for debugging.
+    The previous code would score at the truncated position with
+    no warning.
+
+Verify (pod-side, since both checks fire only during a real eval pass
+with a real tokenizer):
+
+    # In a unit test on the pod after fixing pod env:
+    from src.train.common import get_label_token_ids
+    from transformers import AutoTokenizer
+    tok = AutoTokenizer.from_pretrained("Qwen/Qwen3-8B", trust_remote_code=True)
+    fraud_id, legit_id = get_label_token_ids(tok)
+    print(f"fraud_id={fraud_id} legit_id={legit_id}")
+    # Should succeed; if Qwen3 makes either label multi-token, this
+    # raises NotImplementedError with a clear message.
+
+5. High: The structured-as-text baseline does not use the generator's
+   event serialization.
+
+Status: FIXED.
+
+Action:
+
+a. `data/gen/build_dataset.py`: renamed `_event_to_line` to public
+   `event_to_line`. Kept `_event_to_line` as a back-compat alias for
+   the existing internal callers.
+
+b. `src/train/train_structured_as_text.py::_serialize_events_compact`:
+   removed the hand-written serialization. Now reads:
+
+       from data.gen.build_dataset import event_to_line
+       lines = [event_to_line(ev) for ev in events]
+       return "<events>\\n" + "\\n".join(lines) + "\\n</events>"
+
+   The per-event line is now byte-identical to the corpus's event
+   lines. The `<events>` block wrapper is an intentional baseline
+   variant (PLAN.md Baselines §3 example shows this wrapper; the
+   corpus does NOT wrap events in `<events>`). The docstring
+   documents this distinction.
+
+Verify (run on laptop right now):
+
+    python3 -c "
+    from data.gen.build_dataset import event_to_line
+    from src.train.train_structured_as_text import _serialize_events_compact
+    sample = {'t': 7, 'event': 'txn', 'actor': 'human',
+              'amount_bucket': '<amount_bucket=high>',
+              'ip_risk': '<ip_risk=low>',
+              'ip': '<ip>', 'recipient': '<recipient>'}
+    expected = event_to_line(sample)
+    block = _serialize_events_compact([sample])
+    inner = block.split('\\n')[1]
+    assert inner == expected, f'mismatch: {inner!r} vs {expected!r}'
+    print('byte-identical OK')
+    "
+
+Bottom line:
+The pod-side Path A run matrix can now proceed without the two
+blockers. Stage-0 will actually train the new token embeddings; the
+launcher will preserve the trainer's gate evidence; arm-mismatched
+checkpoints are rejected at config-validation; eval scoring fails
+loudly on broken markers; the structured-as-text baseline trains on
+the same event-line format as the corpus.
+
+Notes on the INDEX backfill:
+This followup is committed alongside the code fixes (commit A). Then
+INDEX.md's 007 row is added with commit A's hash in a small follow-up
+(commit B). Same two-commit pattern.

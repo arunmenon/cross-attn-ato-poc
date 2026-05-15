@@ -149,6 +149,32 @@ def validate_config(cfg: dict) -> list[str]:
         if lr is not None and not (1e-6 <= lr <= 1e-2):
             errs.append(f"training.lr {lr} out of [1e-6, 1e-2]")
 
+        # Per-arm base-checkpoint sanity (review 007 finding #3).
+        # Reject obviously-wrong arm/base combinations before they
+        # blow GPU time on a recursive Stage-0 or an invalidated
+        # LoRA-text baseline.
+        bc = cfg["training"].get("base_checkpoint")
+        if bc is not None:
+            bc_str = str(bc)
+            is_merged_path = "cpt-light-merged" in bc_str or "cpt_light_merged" in bc_str
+            is_raw_qwen = bc_str.startswith("Qwen/") or bc_str.startswith("qwen/")
+            if arm in ("cpt_light", "lora_text") and is_merged_path:
+                errs.append(
+                    f"arm={arm!r} cannot use base_checkpoint={bc_str!r}: "
+                    f"this arm trains from raw Qwen3-8B, not the merged "
+                    f"CPT-light checkpoint (review 007 finding #3). Omit "
+                    f"training.base_checkpoint so the trainer's per-arm "
+                    f"default applies, or override with Qwen/Qwen3-8B."
+                )
+            if arm in ("structured_as_text", "xattn") and is_raw_qwen:
+                errs.append(
+                    f"arm={arm!r} should use the merged CPT-light "
+                    f"checkpoint, not raw Qwen3 ({bc_str!r}). The "
+                    f"comparison to cross-attn must isolate the "
+                    f"architectural contribution; both arms need the "
+                    f"same starting point."
+                )
+
     # No shell-meta in any string value (defensive)
     forbidden = ("`", "$(", ";", "&&", "||", ">", "<", "\n")
     def _walk(node: Any, where: str) -> None:

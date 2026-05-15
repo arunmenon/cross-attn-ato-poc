@@ -106,17 +106,30 @@ def run_three_mode_eval(
             ]
 
             # Apply eval-mode transform per example (with per-example RNG
-            # for opaque)
+            # for opaque).
             transformed: list[str] = []
             for i, ex in enumerate(ex_list):
                 rng = random.Random(batch_start + i) if mode == "opaque" else None
                 new_text, _ = eval_modes.apply(ex["text"], mode, rng=rng)  # type: ignore[arg-type]
-                # Truncate at the score position +1 token so the model
-                # doesn't see the ground-truth label during scoring.
-                # We keep up to and including the "label:" marker.
+                # Truncate at the score position so the model never sees
+                # the ground-truth label.
+                #
+                # Review 007 finding #4: fail closed on missing marker.
+                # If the marker is absent (eval_mode transform stripped
+                # the WHOLE verdict block by accident, or the example's
+                # text is malformed), scoring at the last non-pad token
+                # would expose the ground-truth label downstream. Raise
+                # rather than silently emit a corrupted record.
                 marker_idx = new_text.find(LABEL_MARKER_STR)
-                if marker_idx >= 0:
-                    new_text = new_text[: marker_idx + len(LABEL_MARKER_STR)]
+                if marker_idx < 0:
+                    raise ValueError(
+                        f"eval example index {batch_start + i} "
+                        f"(mode={mode!r}) has no "
+                        f"'<risk_verdict>\\nlabel:' marker; cannot "
+                        f"score. Check the dataset's `text` field "
+                        f"includes the verdict footer."
+                    )
+                new_text = new_text[: marker_idx + len(LABEL_MARKER_STR)]
                 transformed.append(new_text)
 
             # Tokenize
@@ -127,6 +140,29 @@ def run_three_mode_eval(
                 padding=True,
                 return_tensors="pt",
             ).to(device)
+
+            # Review 007 finding #4 (continued): verify the marker
+            # survived tokenizer truncation. If max_length cut off the
+            # prefix before "label:", scoring at the last non-pad
+            # token is at the wrong place — fail closed.
+            for i in range(len(transformed)):
+                attn_i = enc["attention_mask"][i]
+                last_real = int(attn_i.sum().item()) - 1
+                # The token at last_real should be the LAST token of the
+                # truncated input, i.e., the one corresponding to ":".
+                # Conservative check: decode and confirm the suffix.
+                decoded = tokenizer.decode(
+                    enc["input_ids"][i][: last_real + 1],
+                    skip_special_tokens=False,
+                )
+                if not decoded.rstrip().endswith("label:"):
+                    raise ValueError(
+                        f"eval example index {batch_start + i} "
+                        f"(mode={mode!r}) was truncated before the "
+                        f"label: marker; max_length={max_length} is "
+                        f"too small for this example. Decoded suffix: "
+                        f"{decoded[-80:]!r}"
+                    )
 
             # Optional structured-side input for x-attn wrapper
             structured_kwargs: dict[str, Any] = {}

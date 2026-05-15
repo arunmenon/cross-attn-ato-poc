@@ -137,10 +137,15 @@ def sample_actor_for_family(family: str, rng: random.Random) -> str:
 # Serialization
 # ---------------------------------------------------------------------------
 
-def _event_to_line(ev: dict) -> str:
+def event_to_line(ev: dict) -> str:
     """Render one event as a single text line within the training corpus.
 
     Format: `<event_NAME>t=<sec> <bucket_tokens...>`.
+
+    Public per review 007 finding #5 — `train_structured_as_text.py`
+    imports this directly so the baseline's event-line format is
+    byte-identical to what the corpus uses (no divergent
+    `_serialize_events_compact`).
     """
     parts = [f"<event_{ev['event']}>t={ev['t']}"]
     for key in ("amount_bucket", "geo_distance", "ip_risk", "device_age",
@@ -153,6 +158,10 @@ def _event_to_line(ev: dict) -> str:
         if key in ev:
             parts.append(ev[key])
     return " ".join(parts)
+
+
+# Back-compat alias (the original private name was used internally below).
+_event_to_line = event_to_line
 
 
 def serialize_journey(journey: Journey, narrative: str) -> str:

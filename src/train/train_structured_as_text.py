@@ -49,29 +49,23 @@ from src.train.train_cpt_light import CPT_LIGHT_LORA_TARGETS
 
 
 def _serialize_events_compact(events) -> str:
-    """Compact one-line-per-event serialization. Same shape as the
-    `_event_to_line` helper in data/gen/build_dataset.py, but here we
-    re-derive it from the dataset's stored event dicts.
+    """One-line-per-event serialization wrapped in <events>...</events>.
 
-    Keep this in sync with data/gen/build_dataset.py::_event_to_line —
-    a divergence would silently make this baseline's input
-    distribution differ from what the prompt expects.
+    Imports `event_to_line` directly from `data/gen/build_dataset.py` so
+    the per-event format is byte-identical to the corpus's event lines.
+    This was a real bug (review 007 finding #5): an earlier
+    hand-written version diverged from `_event_to_line` and produced
+    `t=7 event=txn actor=<actor_human> high low` while the corpus
+    produces `<event_txn>t=7 high low`.
+
+    The `<events>` wrapper IS specific to this baseline (PLAN.md
+    Baselines §3 example) — the corpus does not wrap events in
+    `<events>`. So the baseline is "the corpus's per-event lines
+    + an `<events>` wrapper, prepended to the rest of the corpus
+    text". Documented as an intentional baseline variant.
     """
-    lines = []
-    for ev in events:
-        parts = [f"t={ev.get('t', 0)}", f"event={ev.get('event', '?')}"]
-        actor = ev.get("actor")
-        if actor:
-            parts.append(f"actor=<actor_{actor}>")
-        for key in ("amount_bucket", "geo_distance", "ip_risk", "device_age",
-                    "merchant_risk", "txn_velocity", "recipient_age",
-                    "session_dwell", "auth_strength"):
-            if key in ev:
-                parts.append(ev[key])
-        for key in ("ip", "device_id", "recipient", "merchant"):
-            if key in ev:
-                parts.append(ev[key])
-        lines.append(" ".join(parts))
+    from data.gen.build_dataset import event_to_line
+    lines = [event_to_line(ev) for ev in events]
     return "<events>\n" + "\n".join(lines) + "\n</events>"
 
 
@@ -137,9 +131,17 @@ def main():
     for p in model.parameters():
         p.requires_grad = False
 
+    # Defensive embed_tokens unfreeze (review 007 finding #1). The
+    # merged base SHOULD already include the custom-token embeddings
+    # trained during Stage-0, so n_new will typically be 0 above and
+    # this `modules_to_save` clause is a no-op. But if for any reason
+    # the merged checkpoint is loaded with an older tokenizer that
+    # lacks some custom tokens, defaulting to frozen-mean-init would
+    # silently invalidate this baseline.
     lora_config = LoraConfig(
         r=16, lora_alpha=16, lora_dropout=0.0, bias="none",
         task_type="CAUSAL_LM", target_modules=CPT_LIGHT_LORA_TARGETS,
+        modules_to_save=["embed_tokens"],
     )
     model = get_peft_model(model, lora_config)
     model = model.to(device)

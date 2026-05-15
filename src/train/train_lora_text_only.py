@@ -52,12 +52,16 @@ def main():
         model.resize_token_embeddings(len(tokenizer))
         from src.tokenizer.custom_tokens import init_new_embeddings
         init_new_embeddings(model, tokenizer, old_vocab_size=old_vocab_size)
-    # Freeze base, apply LoRA r=16 on q_proj only.
+    # Freeze base, apply LoRA r=16 on q_proj only. Custom-token
+    # embeddings need to be trainable so this baseline can READ the
+    # journey/actor tokens (review 007 finding #1 — frozen mean-init
+    # rows would make this baseline blind to the structural tokens).
     for p in model.parameters():
         p.requires_grad = False
     lora_config = LoraConfig(
         r=16, lora_alpha=16, lora_dropout=0.0, bias="none",
         task_type="CAUSAL_LM", target_modules=["q_proj"],
+        modules_to_save=["embed_tokens"],
     )
     model = get_peft_model(model, lora_config)
     model = model.to(device)
