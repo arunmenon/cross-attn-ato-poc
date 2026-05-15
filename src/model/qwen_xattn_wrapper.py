@@ -57,6 +57,96 @@ from src.model.resampler import PerceiverResampler
 # Insertion-pattern math (pure-Python; no torch needed)
 # ---------------------------------------------------------------------------
 
+def estimate_wrapper_trainable_params(
+    *,
+    insertion_pattern: str,
+    n_hidden_layers: int,
+    hidden_size: int,
+    cross_dim: int | None = None,
+    dim_feedforward: int | None = None,
+    n_heads_xattn: int = 8,
+    encoder_hidden_dim: int = 256,
+    encoder_n_layers: int = 6,
+    encoder_n_heads: int = 4,
+    resampler_n_layers: int = 2,
+    resampler_n_heads: int = 8,
+    n_slots: int = 64,
+    lora_r_on_q: int = 16,
+) -> dict[str, int]:
+    """Analytical estimate of total trainable params for a wrapper
+    constructed with these hyperparameters. Used by self-tests and
+    trainer-startup logs to validate sweep configs against PLAN.md's
+    200-400M Stage-1 budget WITHOUT loading the real Qwen3-8B.
+
+    Returns a dict with per-component counts + 'total'. Components:
+      xattn_blocks      — N × per-block (from estimate_block_param_count)
+      kv_projection     — encoder_hidden_dim × hidden_size (if differ)
+      encoder_approx    — rough estimate; encoder + resampler don't
+                          scale with hidden_size so they're small (~10M).
+      lora_on_q         — 2 × hidden_size × r per attention layer × N layers
+      total
+
+    The encoder/resampler estimate is rough (we don't compute it
+    exactly because they have many small Linear blocks). It's correct
+    within ±30%, which is fine for budget-bounds checking.
+    """
+    from src.model.cross_attn_block import estimate_block_param_count
+
+    insertion_layers = compute_insertion_layers(insertion_pattern, n_hidden_layers)
+    n_blocks = len(insertion_layers)
+    per_block = estimate_block_param_count(
+        hidden_size, cross_dim=cross_dim, dim_feedforward=dim_feedforward,
+        n_heads=n_heads_xattn,
+    )
+    xattn_blocks_total = per_block * n_blocks
+
+    # kv_projection: only present when encoder_hidden_dim != hidden_size
+    if encoder_hidden_dim != hidden_size:
+        kv_projection = encoder_hidden_dim * hidden_size
+    else:
+        kv_projection = 0
+
+    # Encoder rough estimate. For typical (encoder_hidden_dim=256,
+    # n_layers=6, n_heads=4), this is ~5M. Compute as the dominant
+    # transformer-block cost × n_layers.
+    enc_per_layer = 4 * encoder_hidden_dim * encoder_hidden_dim  # MHA q/k/v/o
+    enc_per_layer += 8 * encoder_hidden_dim * encoder_hidden_dim  # FFN (dim_ff=4×)
+    encoder_approx = (
+        encoder_n_layers * enc_per_layer
+        + 4 * encoder_hidden_dim * encoder_hidden_dim  # event embedder MLP
+        + 40 * encoder_hidden_dim  # vocab embeddings (~40 tokens)
+    )
+
+    # Resampler rough estimate: K latents + N layers × (cross-attn + self-attn + FFN)
+    res_per_layer = (
+        4 * encoder_hidden_dim * encoder_hidden_dim  # cross-attn
+        + 4 * encoder_hidden_dim * encoder_hidden_dim  # self-attn
+        + 8 * encoder_hidden_dim * encoder_hidden_dim  # FFN
+    )
+    resampler_approx = (
+        n_slots * encoder_hidden_dim
+        + resampler_n_layers * res_per_layer
+    )
+
+    # LoRA-on-Q: 2 × r × hidden_size per attention layer × n_hidden_layers
+    # (one LoRA A matrix + one LoRA B matrix per q_proj)
+    lora_on_q = 2 * lora_r_on_q * hidden_size * n_hidden_layers
+
+    total = (xattn_blocks_total + kv_projection + encoder_approx
+             + resampler_approx + lora_on_q)
+
+    return {
+        "n_xattn_blocks": n_blocks,
+        "per_block": per_block,
+        "xattn_blocks_total": xattn_blocks_total,
+        "kv_projection": kv_projection,
+        "encoder_approx": encoder_approx,
+        "resampler_approx": resampler_approx,
+        "lora_on_q": lora_on_q,
+        "total": total,
+    }
+
+
 def compute_insertion_layers(pattern: str, n_hidden_layers: int) -> list[int]:
     """Resolve a sweep-dial string to a sorted list of layer indices.
 
@@ -176,7 +266,33 @@ def _build_wrapper(
             """Run encoder + resampler + projection. Caches the result
             for the upcoming base.forward() call. Caller must invoke
             this before each forward() pass requiring cross-attention.
+
+            Defensive device/dtype handling (review 005 finding #2):
+              - ID tensors (event_type_ids, bucket_ids, event_mask) are
+                moved to the encoder's device but kept integer.
+              - delta_t is moved to encoder device AND cast to the
+                encoder's parameter dtype, so the resampler's
+                sinusoidal time encoding can compute in-dtype and the
+                downstream add `kv = encoder_output + time_pe` stays in
+                the residual-stream dtype (bf16 in production).
             """
+            # Detect the encoder's device + dtype. We do this every call
+            # rather than caching because the trainer may `.to(...)` the
+            # wrapper between forward passes (e.g., bf16 conversion
+            # mid-init).
+            params = next(self.encoder.parameters(), None)
+            target_device = params.device if params is not None else None
+            target_dtype = params.dtype if params is not None else None
+
+            if target_device is not None:
+                event_type_ids = event_type_ids.to(device=target_device)
+                bucket_ids = bucket_ids.to(device=target_device)
+                event_mask = event_mask.to(device=target_device)
+                # delta_t is float; cast both device AND dtype.
+                delta_t = delta_t.to(device=target_device, dtype=target_dtype)
+            elif target_dtype is not None:
+                delta_t = delta_t.to(dtype=target_dtype)
+
             enc_out = self.encoder(event_type_ids, bucket_ids, event_mask)
             kv_enc = self.resampler(enc_out, delta_t, event_mask)
             kv = self.kv_projection(kv_enc)
@@ -213,6 +329,30 @@ def _build_wrapper(
             finally:
                 self.clear_kv_cache()
             return out
+
+        def generate(self, *args, **kwargs):
+            """Autoregressive generation is not supported on the wrapper.
+
+            (Review 005 finding #4): the current architecture would
+            re-precompute cross-attention K/V on each generation step,
+            which is both inefficient and only partially implemented.
+            The Day-1-3 training path uses forward log-prob scoring
+            against the verdict footer's `label:` tokens, not
+            autoregressive generation, so this is not blocking for the
+            POC. A future batch can add a proper generation API that
+            prefills K/V once and reuses it across decode steps.
+
+            Until then: do NOT call wrapper.generate(...). Use forward()
+            with the verdict-footer prefix and read `out.logits` at the
+            position of the `label:` token.
+            """
+            raise NotImplementedError(
+                "QwenXAttnWrapper.generate() is intentionally unsupported. "
+                "Use wrapper.forward(input_ids=..., attention_mask=..., "
+                "labels=..., event_type_ids=..., bucket_ids=..., "
+                "delta_t=..., event_mask=...) and score from out.logits. "
+                "See src/model/qwen_xattn_wrapper.py generate() docstring."
+            )
 
         def attach_lora_on_q(self, r: int = 16, alpha: int = 16, dropout: float = 0.0):
             """Apply PEFT LoRA to the self-attention Q-projection only.
@@ -337,6 +477,30 @@ def _self_test() -> None:
         pass
     print("compute_insertion_layers OK for every_4/every_8/late_only")
 
+    # 1b. Trainable-param budget at production scale (Qwen3-8B; review
+    # 005 finding #1). All three sweep arms must fit in 200-400M.
+    print("\nProduction-scale trainable-param budget (Qwen3-8B, H=4096, 36 layers):")
+    for pattern in ("every_4", "every_8", "late_only"):
+        est = estimate_wrapper_trainable_params(
+            insertion_pattern=pattern, n_hidden_layers=36, hidden_size=4096,
+        )
+        print(f"  {pattern:10s}: total={est['total']/1e6:7.1f}M  "
+              f"(blocks={est['xattn_blocks_total']/1e6:.1f}M, "
+              f"lora_on_q={est['lora_on_q']/1e6:.1f}M, "
+              f"enc+resampler+kv_proj≈{(est['encoder_approx']+est['resampler_approx']+est['kv_projection'])/1e6:.1f}M)")
+    # The most aggressive arm (every_4) must be ≤ 400M.
+    every_4_est = estimate_wrapper_trainable_params(
+        insertion_pattern="every_4", n_hidden_layers=36, hidden_size=4096,
+    )
+    assert every_4_est["total"] <= 400_000_000, (
+        f"every_4 total {every_4_est['total']:,} exceeds 400M Stage-1 budget"
+    )
+    assert every_4_est["total"] >= 150_000_000, (
+        f"every_4 total {every_4_est['total']:,} suspiciously small — "
+        f"check encoder/resampler estimates"
+    )
+    print("Stage-1 trainable-param budget OK for all sweep arms")
+
     try:
         import torch
         import torch.nn as nn
@@ -424,6 +588,15 @@ def _self_test() -> None:
         f"base should be fully frozen, got {summary['base_trainable']} trainable"
     assert summary["xattn_machinery_total"] > 0
     print(f"trainable param summary: {summary}")
+
+    # 7. generate() must raise NotImplementedError (review 005 finding #4)
+    try:
+        wrapper.generate(input_ids=input_ids, max_new_tokens=4)
+        raise AssertionError("wrapper.generate should have raised NotImplementedError")
+    except NotImplementedError as e:
+        assert "forward" in str(e).lower(), \
+            f"generate's error should point to forward(); got: {e}"
+        print(f"generate() correctly raises NotImplementedError")
 
 
 if __name__ == "__main__":

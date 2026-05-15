@@ -1,0 +1,279 @@
+Review comments 005
+Date: 2026-05-15
+Subject: Path A Batch 3 model architecture surgery review
+
+Reviewed file(s):
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/README.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/CODEX_PROMPT.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/docs/batch-3-architecture.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/PLAN.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/model/encoders/small_transformer.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/model/resampler.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/model/cross_attn_block.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/model/qwen_xattn_wrapper.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/AGENT_INSTRUCTIONS.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/experiment_template.yaml
+
+Repo root used for comparison:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+Summary:
+Batch 3 lands the intended architecture skeleton and the torch-free local
+checks pass. The two material problems are not syntax-level: the default
+cross-attention block size blows past the PLAN.md trainable-parameter budget,
+and the bf16 path is not dtype-safe once delta_t enters the resampler. Fix
+those before wiring Batch 4 trainers or starting H100 sweeps. The resampler
+padding-mask self-test also needs a deterministic dropout-free setup, and the
+generation limitation is currently stronger than the docs say.
+
+Verification run:
+
+1. Diff base and changed files
+
+Command:
+    CLOSING_COMMIT=$(awk -F'|' '/^\| *0[0-9]{2,} *\|/ { gsub(/[ \t]/, "", $7); print $7 }' review/INDEX.md | tail -1); printf '%s\n' "$CLOSING_COMMIT"
+    CLOSING_COMMIT=$(awk -F'|' '/^\| *0[0-9]{2,} *\|/ { gsub(/[ \t]/, "", $7); print $7 }' review/INDEX.md | tail -1); git log --oneline "${CLOSING_COMMIT}..HEAD"
+    CLOSING_COMMIT=$(awk -F'|' '/^\| *0[0-9]{2,} *\|/ { gsub(/[ \t]/, "", $7); print $7 }' review/INDEX.md | tail -1); git diff --stat "${CLOSING_COMMIT}..HEAD"
+    CLOSING_COMMIT=$(awk -F'|' '/^\| *0[0-9]{2,} *\|/ { gsub(/[ \t]/, "", $7); print $7 }' review/INDEX.md | tail -1); git diff --name-only "${CLOSING_COMMIT}..HEAD"
+
+Actual output:
+    5916a53
+
+    778c752 Path A Batch 3: model architecture surgery (4 files)
+    38e9840 INDEX: record closing commit for review 004 + tidy row 003
+
+     docs/batch-3-architecture.md            | 258 +++++++++++++++++++
+     review/INDEX.md                         |   3 +-
+     src/model/cross_attn_block.py           | 189 ++++++++++++++
+     src/model/encoders/small_transformer.py | 329 ++++++++++++++++++++++++
+     src/model/qwen_xattn_wrapper.py         | 430 ++++++++++++++++++++++++++++++++
+     src/model/resampler.py                  | 223 +++++++++++++++++
+     6 files changed, 1431 insertions(+), 1 deletion(-)
+
+    docs/batch-3-architecture.md
+    review/INDEX.md
+    src/model/cross_attn_block.py
+    src/model/encoders/small_transformer.py
+    src/model/qwen_xattn_wrapper.py
+    src/model/resampler.py
+
+Disposition:
+    PASS, with note: the actual protocol base is 5916a53, so this review also
+    saw the review/INDEX.md maintenance commit 38e9840. The Batch 3 code
+    surface is commit 778c752.
+
+2. Plan copies and Layer A scaffold smoke
+
+Command:
+    if [ -d ../.claude/tasks/cross-attn-ato-poc ]; then md5 -q PLAN.md ../.claude/tasks/cross-attn-ato-poc/PLAN.md ~/.claude/plans/i-want-to-do-compressed-bee.md; else echo "running outside the project tree; checking in-repo PLAN.md only"; md5 -q PLAN.md; fi
+    PYTHONDONTWRITEBYTECODE=1 python3 -c "import sys, random; sys.path.insert(0, '.'); from eval import eval_modes; from eval.leakage_checks import narrative_leakage_scan; text = '<journey_sim_swap><actor_human><event_login> <amount_bucket=high></journey_sim_swap>'; assert 'journey_sim_swap' not in eval_modes.apply(text, 'stripped')[0]; assert '<amount_bucket=high>' in eval_modes.apply(text, 'stripped')[0]; a = eval_modes.apply(text, 'opaque', rng=random.Random(0))[0]; b = eval_modes.apply(text, 'opaque', rng=random.Random(1))[0]; assert a != b; assert not narrative_leakage_scan('This is fraudulent SIM-swap')['clean']; assert narrative_leakage_scan('Device change followed by password reset')['clean']; print('layer A smoke OK')"
+
+Actual output:
+    64515f2986ac4ea153e0b7b670d57c3e
+    64515f2986ac4ea153e0b7b670d57c3e
+    64515f2986ac4ea153e0b7b670d57c3e
+
+    layer A smoke OK
+
+Disposition:
+    PASS.
+
+3. Batch 3 local smoke tests
+
+Command:
+    PYTHONDONTWRITEBYTECODE=1 python3 -m src.model.encoders.small_transformer
+    PYTHONDONTWRITEBYTECODE=1 python3 -m src.model.resampler
+    PYTHONDONTWRITEBYTECODE=1 python3 -m src.model.cross_attn_block
+    PYTHONDONTWRITEBYTECODE=1 python3 -m src.model.qwen_xattn_wrapper
+
+Actual output:
+    event vocab size: 36
+    vocab + tokenize_events OK
+    torch not installed; encoder forward-pass test skipped (runs on the pod)
+
+    torch not installed; resampler self-test skipped (runs on the pod)
+
+    torch not installed; cross_attn_block self-test skipped (runs on the pod)
+
+    compute_insertion_layers OK for every_4/every_8/late_only
+    torch not installed; wrapper integration self-test skipped (runs on the pod)
+
+Disposition:
+    PASS for torch-free portions. GPU/Qwen3 and PyTorch forward-pass checks were
+    intentionally not run locally.
+
+4. Syntax and insertion-layer math
+
+Command:
+    git diff --check 5916a53..HEAD
+    PYTHONDONTWRITEBYTECODE=1 python3 -c "from pathlib import Path; files=['src/model/encoders/small_transformer.py','src/model/resampler.py','src/model/cross_attn_block.py','src/model/qwen_xattn_wrapper.py']; import ast; [ast.parse(Path(f).read_text(), filename=f) for f in files]; print('ast syntax OK:', ', '.join(files))"
+    PYTHONDONTWRITEBYTECODE=1 python3 -c "from src.model.qwen_xattn_wrapper import compute_insertion_layers; print('every_4', compute_insertion_layers('every_4',36)); print('every_8', compute_insertion_layers('every_8',36)); print('late_only', compute_insertion_layers('late_only',36))"
+
+Actual output:
+    git diff --check produced no output.
+
+    ast syntax OK: src/model/encoders/small_transformer.py, src/model/resampler.py, src/model/cross_attn_block.py, src/model/qwen_xattn_wrapper.py
+
+    every_4 [12, 16, 20, 24, 28, 32]
+    every_8 [12, 20, 28]
+    late_only [32, 33, 34, 35]
+
+Disposition:
+    PASS.
+
+5. Dependency availability on this machine
+
+Command:
+    PYTHONDONTWRITEBYTECODE=1 python3 -c "import importlib.util as u; print('torch', bool(u.find_spec('torch'))); print('transformers', bool(u.find_spec('transformers'))); print('peft', bool(u.find_spec('peft')))"
+
+Actual output:
+    torch False
+    transformers False
+    peft False
+
+Disposition:
+    PyTorch, Transformers, PEFT, real Qwen3DecoderLayer.forward signature, and
+    PEFT hook behavior still need pod-side verification.
+
+6. Parameter-count estimate for the current default x-attn block
+
+Command:
+    PYTHONDONTWRITEBYTECODE=1 python3 -c "H=4096; ffn=4*H; per_block=(3*H*H + 3*H) + (H*H + H) + (H*ffn + ffn) + (ffn*H + H) + (4*H) + 2; print('per_block', per_block); print('every_8_3_blocks', per_block*3); print('late_only_4_blocks', per_block*4); print('every_4_6_blocks', per_block*6); print('projection_256_to_4096', 256*4096)"
+
+Actual output:
+    per_block 201379842
+    every_8_3_blocks 604139526
+    late_only_4_blocks 805519368
+    every_4_6_blocks 1208279052
+    projection_256_to_4096 1048576
+
+Disposition:
+    FAIL against the stated 200-400M Stage-1 trainable-parameter budget.
+
+Review findings:
+
+1. High: The default cross-attention block is far over the planned trainable-parameter budget.
+
+Status: OPEN, blocker for Batch 4 trainer wiring and H100 sweeps unless intentionally accepted.
+
+Details:
+`QwenXAttnWrapper` builds one full-size `GatedCrossAttnDense(hidden_dim=hidden_size)`
+per insertion layer (`src/model/qwen_xattn_wrapper.py:125-132`). The block's
+default FFN is `4 * hidden_dim` (`src/model/cross_attn_block.py:117-118`), and
+the block also has full 4096-wide MHA projections. For Qwen3-8B hidden_size
+4096, that is about 201.4M parameters per x-attn block. The planned `every_4`
+pattern creates 6 blocks, so x-attn blocks alone are about 1.21B trainable
+parameters before the encoder, resampler, kv_projection, and LoRA-on-Q. Even
+the sparse `every_8` pattern is about 604M. PLAN.md says Stage-1 trainable
+params should be about 200-400M, and docs/batch-3-architecture.md focus area 6
+expects "hundreds of millions", not a 1.2B default arm.
+
+Recommendation:
+Before Batch 4 trainers instantiate this wrapper, choose an explicit x-attn
+parameter budget and make the block match it. Reasonable fixes are a
+bottlenecked/low-rank cross-attn block, a much smaller FFN, shared x-attn
+blocks across insertion layers, or a configurable `dim_feedforward` that is
+validated per insertion pattern. Add a param-count smoke that constructs a
+fake 36-layer/4096-hidden base and asserts every sweep arm is inside the
+accepted budget before launching training.
+
+2. High: The bf16 path is not dtype-safe once `delta_t` enters the resampler.
+
+Status: OPEN, likely to fail or silently upcast on the pod unless the trainer works around it.
+
+Details:
+The run configuration is bf16 (`src/auto_research/configs/sweep_space.yaml:35`
+and `src/auto_research/experiment_template.yaml:25`). The resampler creates
+time encodings in `delta_t`'s dtype (`src/model/resampler.py:51-63`) and then
+adds them to `encoder_output` (`src/model/resampler.py:119-120`). A normal
+collate path will create `delta_t` as float32. If the wrapper is moved to
+bf16, the encoder output and resampler weights are bf16, but `time_pe` remains
+float32, so `kv = encoder_output + time_pe` becomes float32. At best this
+silently upcasts the structured-side activations in a bf16 run; at worst it
+hits dtype mismatches inside LayerNorm/MultiheadAttention when module weights
+are bf16. The wrapper also leaves event tensor device/dtype synchronization to
+the future caller (`src/model/qwen_xattn_wrapper.py:291-292`), which is fragile
+for the first trainer pass.
+
+Recommendation:
+Make `precompute_kv` defensive. Move `event_type_ids`, `bucket_ids`,
+`delta_t`, and `event_mask` to the wrapper/base device before use; keep ID
+tensors integer; cast `delta_t` or `time_pe` to `encoder_output.dtype` before
+the add. The minimum resampler-side guard is:
+
+    time_pe = sinusoidal_time_encoding(delta_t.to(encoder_output.dtype), hidden_dim)
+    time_pe = time_pe.to(device=encoder_output.device, dtype=encoder_output.dtype)
+
+Then add a pod-side bf16 smoke that constructs the wrapper, calls
+`wrapper.to(torch.bfloat16)`, runs a forward pass, and asserts the resampler
+K/V and cross-attn inputs stay bf16.
+
+3. Medium: The resampler padding-mask self-test is nondeterministic because dropout is active.
+
+Status: OPEN, test reliability.
+
+Details:
+`PerceiverResampler` defaults to `dropout=0.1` (`src/model/resampler.py:135-143`).
+The self-test constructs it without overriding dropout (`src/model/resampler.py:194-197`)
+and never calls `eval()`. It then compares two separate forward passes for
+near-equality after corrupting masked positions (`src/model/resampler.py:210-218`).
+With PyTorch installed, dropout can make those two outputs differ even if the
+key-padding mask is perfectly correct. That means the first pod-side smoke can
+fail for the wrong reason, or pass/fail depending on RNG state.
+
+Recommendation:
+Make the self-test deterministic: instantiate with `dropout=0.0`, or call
+`resampler.eval()` and wrap the two comparisons in `torch.no_grad()`. If the
+intent is to test only masking, dropout should be absent from that check.
+After that, strengthen the test to compare corrupted masked positions in both
+rows, not only one half-padded row.
+
+4. Medium: The generation-mode limitation is stronger than the docs state.
+
+Status: OPEN, generation/eval ergonomics.
+
+Details:
+docs/batch-3-architecture.md says generation would recompute cross-attention
+K/V on each `generate()` step (`docs/batch-3-architecture.md:221`), and focus
+area 10 asks to verify that. The current wrapper is a plain `nn.Module` with a
+`forward()` method (`src/model/qwen_xattn_wrapper.py:193-215`); it does not
+expose `generate()`, does not subclass/forward GenerationMixin, and does not
+delegate to `base.generate`. So `wrapper.generate(...)` is not merely
+inefficient today; it is unsupported. If Batch 4 scoring uses forward log-prob
+only, this is not a training blocker. If any path calls HF generation through
+the wrapper, it will fail before the K/V caching issue is reached.
+
+Recommendation:
+Either document generation as unsupported until a later batch, or implement an
+explicit generation API before anything calls it. A clean API would precompute
+and hold structured K/V for the duration of generation, delegate to the base
+generation path, and clear the cache in a `finally` block. Add a mock-base test
+that proves the public behavior: either `generate` intentionally raises a clear
+NotImplementedError, or it works and only precomputes K/V once.
+
+5. Informational: The actual review diff base is 5916a53, not the 38e9840 expected in the prompt.
+
+Status: OPEN if exact single-commit review diffs matter; otherwise informational.
+
+Details:
+The official awk extractor in review/CODEX_PROMPT.md returned 5916a53 from
+review/INDEX.md, so this review covered both 38e9840 and 778c752. The prompt
+text said the extractor would return 38e9840 and the diff would be exactly the
+Batch 3 commit. The extra commit is only review/INDEX.md maintenance, and I
+focused the code review on 778c752, but the protocol and the prompt are
+currently out of sync. If the convention is "Closing commit is the latest
+commit that advanced this review's status," review 004's row should probably
+point at 38e9840. If the convention is "Closing commit is the code-fix commit
+and the index backfill can appear in the next review diff," then the prompt
+should stop promising that 38e9840 is the extracted base.
+
+Recommendation:
+Pick one convention and make review/INDEX.md, review/CODEX_PROMPT.md, and the
+per-batch briefing agree. This does not affect Batch 3 code correctness, but
+it does affect whether future reviews see clean per-batch diffs.
+
+Bottom line:
+Do not start Batch 4 training against this wrapper unchanged. First reduce or
+explicitly accept the x-attn parameter budget, then make bf16/device handling
+defensive and add the pod-side real Qwen3 hook smoke. The rest is test and
+documentation cleanup.

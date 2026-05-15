@@ -116,7 +116,18 @@ def _build_resampler(hidden_dim: int, n_slots: int, n_layers: int,
             Returns: (B, K, H) compressed latents.
             """
             # Add time encoding to K/V before attending.
-            time_pe = sinusoidal_time_encoding(delta_t, hidden_dim)     # (B, N, H)
+            #
+            # bf16 safety (review 005 finding #2): delta_t typically
+            # arrives as float32 from collate; the encoder + resampler
+            # parameters are bf16 when the wrapper is .to(bfloat16).
+            # If we add a float32 time_pe to a bf16 encoder_output, the
+            # result silently upcasts to float32 (PyTorch's promotion
+            # rule) — defeating mixed-precision. Compute time_pe in the
+            # encoder_output dtype to keep the residual stream
+            # consistent.
+            time_pe = sinusoidal_time_encoding(
+                delta_t.to(encoder_output.dtype), hidden_dim,
+            )                                                            # (B, N, H)
             kv = encoder_output + time_pe
 
             B = encoder_output.size(0)
@@ -190,33 +201,68 @@ def _self_test() -> None:
     assert not torch.allclose(pe[0, 1], pe[0, N - 1]), "PE collapses over Δt range"
     print(f"sinusoidal_time_encoding OK; shape {tuple(pe.shape)}")
 
-    # 2. Resampler forward
+    # 2. Resampler forward — deterministic setup (review 005 finding #3):
+    # default dropout=0.1 would make the padding-mask comparison below
+    # nondeterministic. Use dropout=0.0 AND eval()+no_grad() to remove
+    # any source of run-to-run variation.
     resampler = PerceiverResampler(
         hidden_dim=H, n_slots=K, n_layers=2, n_heads=4,
-        dim_feedforward=64,
+        dim_feedforward=64, dropout=0.0,
     )
+    resampler.eval()
+
     encoder_output = torch.randn(2, N, H)
     delta_t = torch.tensor([[0.0, 30.0, 60.0, 120.0, 240.0, 480.0, 960.0,
                              1920.0, 3840.0, 7680.0, 15360.0, 30720.0]] * 2)
-    attention_mask = torch.tensor([[1] * N, [1] * 6 + [0] * 6])  # second row half-padded
-    out = resampler(encoder_output, delta_t, attention_mask)
+    # Second row has half the events padded out.
+    attention_mask = torch.tensor([[1] * N, [1] * 6 + [0] * 6])
+
+    with torch.no_grad():
+        out = resampler(encoder_output, delta_t, attention_mask)
     assert out.shape == (2, K, H), f"expected (2, {K}, {H}), got {out.shape}"
     assert torch.isfinite(out).all(), "resampler output contains NaN/Inf"
     print(f"PerceiverResampler forward OK; output shape {tuple(out.shape)}")
 
-    # 3. Padded positions should not change the output meaningfully if we
-    # swap values at padded positions (since key_padding_mask should
-    # exclude them from cross-attention).
+    # 3. Padded positions must not affect output. Corrupt masked
+    # positions in BOTH rows simultaneously and verify output is
+    # byte-identical.
     encoder_output_b = encoder_output.clone()
-    encoder_output_b[1, 6:] = 999.0  # set padded positions to extreme values
-    out_b = resampler(encoder_output_b, delta_t, attention_mask)
-    # Row 0 (no padding) should be unchanged
-    assert torch.allclose(out[0], out_b[0], atol=1e-5), "padding mask leaks into unpadded row"
-    # Row 1 (half-padded) should also be unchanged since padded positions
-    # shouldn't have been attended to.
-    assert torch.allclose(out[1], out_b[1], atol=1e-5), \
-        "padding mask not enforced — padded positions affect output"
-    print("padding mask enforced OK")
+    # Row 0: artificially pad the last 4 positions for this test
+    attention_mask_b = torch.tensor([[1] * 8 + [0] * 4, [1] * 6 + [0] * 6])
+    encoder_output_b[0, 8:] = 999.0   # row 0 corrupted at masked positions
+    encoder_output_b[1, 6:] = -777.0  # row 1 corrupted at masked positions
+    # Baseline with same mask but UN-corrupted values for fair compare
+    encoder_output_baseline = encoder_output.clone()
+    encoder_output_baseline[0, 8:] = 0.0
+    encoder_output_baseline[1, 6:] = 0.0
+    with torch.no_grad():
+        out_baseline = resampler(encoder_output_baseline, delta_t, attention_mask_b)
+        out_b = resampler(encoder_output_b, delta_t, attention_mask_b)
+    assert torch.allclose(out_baseline[0], out_b[0], atol=1e-5), \
+        "padding mask not enforced in row 0 (corrupted masked positions leak)"
+    assert torch.allclose(out_baseline[1], out_b[1], atol=1e-5), \
+        "padding mask not enforced in row 1 (corrupted masked positions leak)"
+    print("padding mask enforced in both rows OK")
+
+    # 4. bf16 dtype safety: time_pe should be cast to encoder_output.dtype
+    # (review 005 finding #2).
+    enc_bf16 = encoder_output.to(torch.bfloat16)
+    resampler_bf16 = PerceiverResampler(
+        hidden_dim=H, n_slots=K, n_layers=2, n_heads=4,
+        dim_feedforward=64, dropout=0.0,
+    )
+    resampler_bf16 = resampler_bf16.to(torch.bfloat16)
+    resampler_bf16.eval()
+    # delta_t deliberately stays float32 — that's the common case from
+    # the dataloader collate; the resampler's internal cast should handle
+    # this.
+    with torch.no_grad():
+        out_bf16 = resampler_bf16(enc_bf16, delta_t, attention_mask)
+    assert out_bf16.dtype == torch.bfloat16, (
+        f"resampler output should be bf16, got {out_bf16.dtype}; "
+        f"time_pe dtype cast is broken"
+    )
+    print(f"bf16 dtype safety OK; output dtype = {out_bf16.dtype}")
 
 
 if __name__ == "__main__":

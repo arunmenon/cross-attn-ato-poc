@@ -1,0 +1,232 @@
+Review comments 005 — follow-up
+Date: 2026-05-15
+Subject: Disposition of findings in 005-path-a-batch-3/comments.txt
+Author: scaffold maintainer
+
+Original review file:
+    review/005-path-a-batch-3/comments.txt
+
+Repo state at follow-up:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+Baseline commit:
+    778c752 (Path A Batch 3 — code under review)
+
+Summary:
+Four fixable findings (1-4) all FIXED in this pass; finding 5 is an
+INDEX convention question that on re-reading is already correctly
+documented in review/INDEX.md ("Closing commit = latest commit that
+advanced this review's status"). The protocol behaved correctly during
+review 005; the confusion was in my pre-review chat narration to the
+user (where I incorrectly promised a specific diff base), not in any
+committed artifact. ACKNOWLEDGED with a brief clarification in this
+followup.
+
+Disposition per finding:
+
+1. High: The default cross-attention block is far over the planned
+   trainable-parameter budget.
+
+Status: FIXED.
+
+Action: src/model/cross_attn_block.py refactored to add a bottleneck:
+
+  Old:  full-H MHA (4×H×H weights) + 4H FFN per block
+        → 201M/block at H=4096
+        → every_4 (6 blocks) = 1.21B (~6× over the 400M budget)
+
+  New:  cross_dim defaults to H//4 (1024 at H=4096).
+        - Down-projections: hidden → cross_dim (q_proj_in, kv_proj_in,
+          both bias=False).
+        - MHA operates at cross_dim, not hidden_dim.
+        - Up-projection: cross_dim → hidden (out_proj, bias=False).
+        - FFN at hidden_dim with dim_feedforward = H//2 (2048 at
+          H=4096), half the standard transformer 4× ratio.
+
+        out_proj is zero-init so the cross-attn contribution at step 0
+        is exactly zero regardless of gate-init choice (belt-and-braces
+        with gate_init="zero").
+
+  New defaults preserve the residual-stream dim (so the wrapper can
+  drop blocks in as residual-additive layers) while cutting parameter
+  cost by ~6×:
+
+        per_block at H=4096 = 33.6M
+        every_4 (6 blocks)   = 201.5M
+        every_8 (3 blocks)   = 100.8M
+        late_only (4 blocks) = 134.4M
+
+  Plus the wrapper's encoder + resampler + kv_projection + LoRA-on-Q
+  add ~13M (encoder/resampler ≈ 8M, LoRA-on-Q for 36 layers at r=16 ≈
+  4.7M). Total wrapper trainable:
+
+        every_4  : 214.4M  (within 200-400M Stage-1 budget per PLAN.md)
+        every_8  : 113.6M
+        late_only: 147.2M
+
+  Two new public helpers ship for the trainer to use:
+    - estimate_block_param_count(hidden_dim, cross_dim, dim_feedforward,
+      n_heads) → int. Pure-Python, no torch needed.
+    - estimate_wrapper_trainable_params(insertion_pattern,
+      n_hidden_layers, hidden_size, ...) → dict with per-component
+      breakdown + total.
+
+  Self-tests at both module levels assert the production-scale budget
+  is satisfied:
+    - cross_attn_block self-test prints per_block + 3 sweep arms and
+      asserts every_4 total ≤ 400M.
+    - qwen_xattn_wrapper self-test prints all 3 sweep arms' wrapper
+      total and asserts every_4 ≤ 400M.
+
+Verify:
+
+    python3 -m src.model.cross_attn_block
+    # Expected:
+    #   param estimate at H=4096: per_block=33,589,250
+    #     every_4 (6 blocks): 201,535,500
+    #     every_8 (3 blocks): 100,767,750
+    #     late_only (4 blocks): 134,357,000
+    #   param budget OK for all three sweep arms
+
+    python3 -m src.model.qwen_xattn_wrapper
+    # Expected (excerpt):
+    #   every_4   : total=  214.4M  (blocks=201.5M, lora_on_q=4.7M, ...)
+    #   every_8   : total=  113.6M  ...
+    #   late_only : total=  147.2M  ...
+    #   Stage-1 trainable-param budget OK for all sweep arms
+
+2. High: The bf16 path is not dtype-safe once delta_t enters the
+   resampler.
+
+Status: FIXED.
+
+Action — two layers of defense:
+
+a. src/model/resampler.py forward path: delta_t is now cast to
+   encoder_output.dtype BEFORE the sinusoidal time encoding is
+   computed, so time_pe has the same dtype as encoder_output, and the
+   `kv = encoder_output + time_pe` add stays in the residual-stream
+   dtype. The fix is one line inside the inner _PerceiverResampler
+   class:
+
+       time_pe = sinusoidal_time_encoding(
+           delta_t.to(encoder_output.dtype), hidden_dim,
+       )
+
+b. src/model/qwen_xattn_wrapper.py precompute_kv: defensive device +
+   dtype handling on entry. Every call reads `next(encoder.parameters()).device`
+   and `.dtype`, then:
+     - Moves event_type_ids, bucket_ids, event_mask to encoder device
+       (kept integer).
+     - Moves delta_t to encoder device AND casts to encoder dtype.
+
+   This protects against the common case where the dataloader collate
+   produces float32 delta_t and the wrapper has been moved to bf16,
+   without requiring the trainer's collate to know about wrapper
+   internals.
+
+c. Resampler self-test now includes an explicit bf16 round-trip:
+   construct a fp32 encoder_output, cast to bf16, call resampler on it
+   with fp32 delta_t, assert output dtype is bf16. Fails loudly if any
+   silent fp32 upcast sneaks in.
+
+Verify (pod-side, once torch is available):
+
+    python3 -m src.model.resampler
+    # Includes "bf16 dtype safety OK; output dtype = torch.bfloat16"
+    # in the success path.
+
+3. Medium: The resampler padding-mask self-test is nondeterministic
+   because dropout is active.
+
+Status: FIXED.
+
+Action: src/model/resampler.py _self_test() rewritten:
+  - Instantiates the resampler with `dropout=0.0` (overriding the
+    default 0.1).
+  - Calls `resampler.eval()` to disable any remaining stochastic
+    layers.
+  - Wraps every forward pass in `torch.no_grad()`.
+
+Strengthened test surface:
+  - Corrupted masked positions in BOTH rows (not just one half-padded
+    row).
+  - Compares against a baseline where masked positions are zero'd
+    (same mask, different corruption pattern), asserting byte-identical
+    output at unmasked positions.
+
+Verify (pod-side):
+
+    python3 -m src.model.resampler
+    # Includes "padding mask enforced in both rows OK" in the success
+    # path. Run twice; output must be byte-identical between runs.
+
+4. Medium: The generation-mode limitation is stronger than the docs
+   state.
+
+Status: FIXED.
+
+Action: src/model/qwen_xattn_wrapper.py now has an explicit
+`generate()` method on the wrapper that raises NotImplementedError
+with a clear message:
+
+    raise NotImplementedError(
+        "QwenXAttnWrapper.generate() is intentionally unsupported. "
+        "Use wrapper.forward(input_ids=..., attention_mask=..., "
+        "labels=..., event_type_ids=..., bucket_ids=..., "
+        "delta_t=..., event_mask=...) and score from out.logits. "
+        "See src/model/qwen_xattn_wrapper.py generate() docstring."
+    )
+
+The docstring explains the rationale (K/V would re-precompute per
+step; only partially implemented; not on the Day-1-3 critical path
+since the trainer scores via forward log-prob on the verdict footer).
+
+The wrapper self-test now includes a check that
+`wrapper.generate(...)` raises NotImplementedError with a message
+pointing at forward().
+
+Verify (pod-side):
+
+    python3 -m src.model.qwen_xattn_wrapper
+    # Success path includes:
+    #   generate() correctly raises NotImplementedError
+
+5. Informational: The actual review diff base is 5916a53, not the
+   38e9840 expected in the prompt.
+
+Status: ACKNOWLEDGED.
+
+Clarification: the awk-based extractor in review/CODEX_PROMPT.md
+correctly returns the latest hash in the INDEX.md TABLE — which is
+5916a53 (review 004's closing-commit row). The protocol behaved
+exactly as documented. My pre-review chat narration to the user said
+"the awk extractor will return 38e9840", which was incorrect: 38e9840
+is the INDEX-backfill commit for review 004, which is housekeeping and
+does NOT appear in the table. INDEX convention "Closing commit = the
+latest commit that advanced this review's status" stands; 5916a53
+correctly identifies review 004's code-fixing commit.
+
+For review 005's diff base, the same convention says: this commit's
+hash (the one closing review 005's fixes) will appear in INDEX row 005,
+and a future review 006 will diff from that hash. The INDEX-backfill
+commit that updates INDEX row 005 is again housekeeping and does not
+itself appear in the table.
+
+Recommendation for future reviews: I will avoid promising a specific
+diff base in chat narration unless I've already updated INDEX.md and
+verified the extractor returns the expected hash. The protocol text in
+CODEX_PROMPT.md is authoritative; the user-facing chat is informal.
+
+No code or doc change in this followup.
+
+Bottom line:
+Batch 4 trainers are now safe to instantiate against the Batch 3
+wrapper. The trainable-parameter budget is in range (200-400M for the
+primary arm), the bf16 path is dtype-safe end-to-end, and the
+generation footgun is replaced by a loud failure. The resampler test
+will run reproducibly on the pod.
+
+Notes on the INDEX backfill:
+This followup is committed alongside the code fixes (commit A). Then
+INDEX.md's 005 row is added with commit A's hash in a small follow-up
+(commit B). Same two-commit pattern used for reviews 003 and 004.
