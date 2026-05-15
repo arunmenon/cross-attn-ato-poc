@@ -2,6 +2,10 @@
 
 Single-page view of all reviews. See `review/README.md` for conventions.
 
+**Running a new review?** Point Codex at `review/CODEX_PROMPT.md` (or
+paste: `Review the cross_attn_ato_poc repo per review/CODEX_PROMPT.md.
+Follow it exactly.`).
+
 | #   | Slug                 | Date       | Findings | Status | Closing commit |
 |-----|----------------------|------------|----------|--------|----------------|
 | 001 | plan-and-scaffold    | 2026-05-15 | 6        | partial-closed (5 fixed, 1 deferred → Path A) | b903809 |
