@@ -43,7 +43,7 @@ Find the best cross-attention configuration on a synthetic ATO dataset given a 1
 
 ## Per-iteration loop
 
-1. **Read state.** Read this file, `sweep_state.yaml`, last 5 lines of `experiments.jsonl`, the four baseline entries.
+1. **Read state.** Read this file, `sweep_state.yaml`, last 5 lines of `experiments.jsonl`, the four baseline entries. If `sweep_state.yaml` or `experiments.jsonl` is missing (gitignored runtime state — fresh clone or just-reset), treat it as zero completed runs and proceed to step 2 normally. The first launcher invocation will create both files. If you're uncertain whether the missing-file case is intentional, run `python scripts/init_auto_research_state.py` to create empty state files (idempotent; does not overwrite non-empty state).
 2. **Check halt status.** `sweep_state.yaml` exposes `halted: true/false` and `halt_reason: <string or null>`. If halted: skip to "Daily writeup" below.
 3. **Propose next config.** Apply the proposer heuristic (next section). Write to `src/auto_research/runs/exp_NNN/config.yaml` where NNN is the next free slot.
 4. **Launch.** Run:

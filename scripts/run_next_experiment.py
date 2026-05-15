@@ -329,11 +329,36 @@ ARM_TO_TRAINER = {
 }
 
 
-def launch_trainer(arm: str, config_path: Path, run_dir: Path) -> int:
+def _per_experiment_timeout_minutes(cfg: dict) -> int:
+    """Read the per-experiment wall-clock cap from budget.yaml. Uses
+    `stress_run_max_wall_clock_minutes` when this experiment is marked
+    as a stress run, otherwise `max_wall_clock_minutes`. Review 008
+    finding #4 — the budget file documented these caps but the
+    launcher never enforced them.
+    """
+    if not BUDGET_YAML.exists():
+        return 0
+    budget = yaml.safe_load(BUDGET_YAML.read_text())
+    per_exp = budget.get("per_experiment", {})
+    stress = (cfg.get("training", {}) or {}).get("stress_run", False)
+    if stress:
+        return int(per_exp.get("stress_run_max_wall_clock_minutes", 150))
+    return int(per_exp.get("max_wall_clock_minutes", 90))
+
+
+def launch_trainer(arm: str, config_path: Path, run_dir: Path,
+                   cfg: dict | None = None) -> tuple[int, bool]:
     """Run `accelerate launch <trainer>.py --config <cfg>` and stream to train.log.
 
-    Returns the trainer's exit code.
+    Enforces the per-experiment wall-clock cap from budget.yaml (review
+    008 finding #4): wait with timeout, send SIGTERM on overrun, then
+    SIGKILL after a 30-second grace period.
+
+    Returns (exit_code, timed_out).
     """
+    import signal
+    import time
+
     trainer = ARM_TO_TRAINER[arm]
     accel_cfg = REPO_ROOT / "src" / "train" / "accelerate_configs" / "single_h100.yaml"
     log_path = run_dir / "train.log"
@@ -344,11 +369,40 @@ def launch_trainer(arm: str, config_path: Path, run_dir: Path) -> int:
         str(REPO_ROOT / trainer),
         "--config", str(config_path),
     ]
-    print(f"launching: {' '.join(cmd)}")
+
+    timeout_min = _per_experiment_timeout_minutes(cfg or {})
+    timeout_sec = timeout_min * 60 if timeout_min > 0 else None
+    print(f"launching: {' '.join(cmd)} (timeout={timeout_min}min)")
+
+    timed_out = False
     with log_path.open("w") as logf:
-        proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, cwd=str(REPO_ROOT))
-        rc = proc.wait()
-    return rc
+        proc = subprocess.Popen(
+            cmd, stdout=logf, stderr=subprocess.STDOUT,
+            cwd=str(REPO_ROOT),
+        )
+        try:
+            rc = proc.wait(timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            print(
+                f"TIMEOUT after {timeout_min} min — sending SIGTERM",
+                file=sys.stderr,
+            )
+            proc.send_signal(signal.SIGTERM)
+            try:
+                rc = proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                print("SIGTERM did not stop process; sending SIGKILL", file=sys.stderr)
+                proc.kill()
+                rc = proc.wait()
+            # Append a marker line to the log so post-parse sees the cause.
+            with log_path.open("a") as logf2:
+                logf2.write(
+                    f"\n[run_next_experiment.py] TIMEOUT after "
+                    f"{timeout_min} minutes; trainer was killed.\n"
+                )
+
+    return rc, timed_out
 
 
 # ---------------------------------------------------------------------------
@@ -527,13 +581,20 @@ def _do_run(config_path: Path) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 5. Launch trainer
+        # 5. Launch trainer with per-experiment wall-clock cap (review 008 #4)
         t_start = time.time()
-        rc = launch_trainer(cfg["arm"], config_path, run_dir)
+        rc, timed_out = launch_trainer(cfg["arm"], config_path, run_dir, cfg)
         wall_clock_min = (time.time() - t_start) / 60.0
 
         if rc != 0:
-            print(f"TRAINER FAILED: exit code {rc} (see {run_dir}/train.log)", file=sys.stderr)
+            if timed_out:
+                print(
+                    f"TRAINER TIMEOUT after {wall_clock_min:.1f} min "
+                    f"(see {run_dir}/train.log)",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"TRAINER FAILED: exit code {rc} (see {run_dir}/train.log)", file=sys.stderr)
             # Still parse what we can — captures NaN/OOM markers
             try:
                 subprocess.run(
@@ -548,7 +609,7 @@ def _do_run(config_path: Path) -> int:
                 "exp_id": cfg["exp_id"],
                 "arm": cfg["arm"],
                 "config_hash": config_hash,
-                "status": "failed",
+                "status": "timeout" if timed_out else "failed",
                 "trainer_exit_code": rc,
                 "wall_clock_min": wall_clock_min,
                 "timestamp": dt.datetime.utcnow().isoformat() + "Z",
@@ -557,7 +618,9 @@ def _do_run(config_path: Path) -> int:
             metrics_json = run_dir / "metrics.json"
             if metrics_json.exists():
                 m = json.loads(metrics_json.read_text())
-                record["status"] = m.get("status", "failed")
+                # Don't let parsed status downgrade an explicit timeout.
+                if not timed_out:
+                    record["status"] = m.get("status", "failed")
                 record["max_gate_magnitude"] = m.get("max_gate_magnitude")
             append_experiment(record)
             update_sweep_state()

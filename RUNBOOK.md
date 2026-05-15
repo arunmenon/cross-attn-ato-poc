@@ -32,14 +32,26 @@ Everything that must survive a pod restart goes on the network volume. Container
 
 ### 1.3 First-boot bootstrap
 
+The git repository's root IS `cross_attn_ato_poc` (verified via review
+008). Clone it directly into `/workspace/cross_attn_ato_poc` — there is
+NO additional nesting. All commands below assume this layout.
+
 ```bash
 cd /workspace
-git clone <your-repo-url> repo
-cd repo/cross_attn_ato_poc
+git clone <your-repo-url> cross_attn_ato_poc
+cd /workspace/cross_attn_ato_poc
+
 python -m venv /workspace/.venv
 source /workspace/.venv/bin/activate
 pip install --upgrade pip wheel
 pip install -r requirements.txt
+
+# Initialize the auto-research state files (gitignored by design; the
+# agent loop expects them to exist before its first iteration).
+python scripts/init_auto_research_state.py
+
+# Preflight: GPU/VRAM/persistence-env/tokenizer/W&B (fails closed if
+# HF_HOME et al. are not under /workspace — review 008 finding #3).
 python scripts/preflight_check.py
 ```
 
@@ -54,7 +66,7 @@ python scripts/preflight_check.py
 ├── .venv/                      Python virtualenv
 ├── .hf/                        HF cache (models, datasets)
 ├── .wandb/                     W&B offline logs
-├── repo/                       This repository (git clone)
+├── cross_attn_ato_poc/         This repository (git clone — repo-as-root layout)
 ├── data/                       Generated synthetic datasets
 │   ├── train_llm_narrated/     20-30k LLM-narrated pairs
 │   ├── eval_fast_5k/           5k stratified eval
@@ -94,8 +106,8 @@ Already complete if this file exists.
 2. Three more baselines: LoRA-text, structured-as-text, event-only classifier (Task #36).
 3. First x-attn smoke run (Task #37).
 4. Start agent loop. Either:
-   - **Cron-driven (default)**: `crontab -e` and add `*/30 * * * * /workspace/repo/cross_attn_ato_poc/scripts/agent_tick.sh`
-   - **Single long session**: `cd /workspace/repo/cross_attn_ato_poc && claude` (or `codex`), then paste the loop prompt from §6 below.
+   - **Cron-driven (default)**: `crontab -e` and add `*/30 * * * * /workspace/cross_attn_ato_poc/scripts/agent_tick.sh`
+   - **Single long session**: `cd /workspace/cross_attn_ato_poc && claude` (or `codex`), then paste the loop prompt from §6 below.
 5. Agent runs first 4-6 experiments (Task #38). Writes Day-2 README section.
 
 ### Day 3
@@ -113,7 +125,8 @@ If the pod restarts or is terminated:
 
 1. Verify network volume still exists (RunPod console).
 2. Boot a new pod with the same volume attached.
-3. Run `scripts/preflight_check.py` to verify env.
+3. `cd /workspace/cross_attn_ato_poc && source /workspace/.venv/bin/activate`.
+4. Run `python scripts/preflight_check.py` to verify env.
 4. Inspect `src/auto_research/experiments.jsonl` — last entry tells you what experiment was in flight.
 5. Check `src/auto_research/runs/exp_NNN/` for any partial outputs.
 6. If a run was in flight: delete the partial `exp_NNN/` directory and let the agent re-propose.

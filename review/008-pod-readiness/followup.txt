@@ -1,0 +1,237 @@
+Review comments 008 — follow-up
+Date: 2026-05-16
+Subject: Disposition of findings in 008-pod-readiness/comments.txt
+Author: scaffold maintainer
+
+Original review file:
+    review/008-pod-readiness/comments.txt
+
+Repo state at follow-up:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+Baseline commit:
+    1f7cc3e (CLAUDE.md addition; last commit before review 008)
+
+Summary:
+All six findings FIXED in this pass. Two were blockers preventing
+clone-and-run on a fresh RunPod VM (nested-repo path assumption +
+missing default loop script). The other four were operational
+guardrails the RUNBOOK/PLAN documented but the code did not actually
+enforce (preflight persistence-env check, launcher per-experiment
+timeout, top-3 backup correctness, and bootstrap state-file
+initialization).
+
+Disposition per finding:
+
+1. Blocker: The RunPod bootstrap path assumes a nested repo layout that
+   does not match this git repository.
+
+Status: FIXED.
+
+Action: chose the clone-as-root layout (the simpler of the two options
+in the reviewer's recommendation). Cloning the cross_attn_ato_poc repo
+to `/workspace/cross_attn_ato_poc` lands all sources directly under
+that path — no nesting, no `repo/` parent.
+
+  - `RUNBOOK.md` §1.3 bootstrap rewritten:
+        cd /workspace
+        git clone <your-repo-url> cross_attn_ato_poc
+        cd /workspace/cross_attn_ato_poc
+        # ...
+  - Replace-all `/workspace/repo/cross_attn_ato_poc` →
+    `/workspace/cross_attn_ato_poc` across RUNBOOK.md.
+  - Storage-layout diagram updated: `cross_attn_ato_poc/` is the clone
+    target, not `repo/`.
+  - Pod-restart recovery now includes the cd + venv activate step.
+  - `scripts/backup_to_external.sh` REPO_ROOT derivation changed from
+    a hardcoded path to:
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+    Script-location-relative — portable across any clone layout.
+
+Verify (run on laptop right now):
+
+    grep -n "/workspace/repo/cross_attn_ato_poc" RUNBOOK.md scripts/ \
+        PLAN.md src/ docs/ -r 2>/dev/null | head -5
+    # Expected: (no output)
+
+2. Blocker: The documented default auto-loop script does not exist.
+
+Status: FIXED.
+
+Action: created `scripts/agent_tick.sh` with the reviewer's exact
+spec:
+
+  - Derives REPO_ROOT from script location (matches Finding #1's
+    portability fix).
+  - Activates `/workspace/.venv` (configurable via `AGENT_VENV` env).
+  - Calls `python scripts/run_next_experiment.py --halt-check` first;
+    exits 0 if launcher reports halted (no CLI call needed).
+  - Pipes the standard RUNBOOK §6 loop prompt into the selected CLI
+    (default `claude`; configurable via `AGENT_CLI=codex`).
+  - Supports `DRY_RUN=1` which prints what would be run without
+    invoking the CLI.
+  - Bash-set-euo-pipefail; fails closed on missing venv or CLI.
+  - Concurrency safety: relies on the launcher's GPU lockfile, so
+    overlapping cron ticks are safe (the second's launcher call will
+    bounce off the lock).
+
+Verify (run on laptop):
+
+    bash -n scripts/agent_tick.sh && echo "syntax OK"
+    DRY_RUN=1 AGENT_VENV=/nonexistent bash scripts/agent_tick.sh
+    # Expected: "[agent_tick] venv not found at /nonexistent; aborting"
+
+3. High: Preflight does not fail when persistence-critical environment
+   variables are missing.
+
+Status: FIXED.
+
+Action: `scripts/preflight_check.py` adds `check_persistent_env()`
+that runs BEFORE any `transformers` / `wandb` import (the imports that
+read these env vars at module load):
+
+    HF_HOME            -> must start with /workspace
+    TRANSFORMERS_CACHE -> must start with /workspace
+    WANDB_DIR          -> must start with /workspace
+    TOKENIZERS_PARALLELISM -> must be exactly 'false'
+
+Fail-closed with exit code 18 if any of these don't match. The error
+message points back at RUNBOOK §1.2's pod-template env block.
+
+Also reordered `main()` to call `check_persistent_env()` FIRST so the
+later `check_model_download` and `check_tokenizer_roundtrip` (which do
+import transformers) see the correct cache paths.
+
+Verify (pod-side; this fires only with real env vars):
+
+    unset HF_HOME
+    python3 scripts/preflight_check.py
+    # Expected: PREFLIGHT FAIL (18): persistence-critical env var 'HF_HOME' is unset...
+
+    export HF_HOME=/tmp/hf
+    python3 scripts/preflight_check.py
+    # Expected: PREFLIGHT FAIL (18): ... not under /workspace ...
+
+4. High: The launcher documents per-experiment timeouts but waits
+   forever.
+
+Status: FIXED.
+
+Action: `scripts/run_next_experiment.py` now enforces the budget.yaml
+`per_experiment.max_wall_clock_minutes` cap (or
+`stress_run_max_wall_clock_minutes` when `training.stress_run=true`):
+
+  - New helper `_per_experiment_timeout_minutes(cfg)` reads
+    `configs/budget.yaml` and picks the right cap based on stress-run
+    flag.
+  - `launch_trainer` signature changed to return `(exit_code,
+    timed_out: bool)`. Uses `proc.wait(timeout=cap_sec)`. On
+    `TimeoutExpired`: send SIGTERM, wait 30 sec, then SIGKILL.
+    Append a marker line to train.log so post-parse sees the cause.
+  - `_do_run` updates its experiment record on timeout:
+        record["status"] = "timeout"
+    The status string is preserved through the parse-metrics merge
+    path (won't be overwritten by a misclassifying parser).
+
+The launcher's GPU lock is released in the existing `finally` block,
+so a timeout cleanly returns the GPU to the next tick.
+
+Verify (pod-side or local):
+
+    # Local: synthesize a config that runs a sleep, set max=1 min,
+    # confirm timeout fires. This requires accelerate-installable env;
+    # skipping inline. The reviewer's recommended test pattern is:
+    #
+    #   from subprocess import Popen, TimeoutExpired
+    #   p = Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    #   try: p.wait(timeout=1)
+    #   except TimeoutExpired: p.kill(); print("OK timeout test")
+
+5. High: External backup will not copy the actual x-attn checkpoints.
+
+Status: FIXED — both subbugs.
+
+Sub-bug A (top_3 YAML parser): the embedded `python -c` printed each
+top_3 entry as a Python dict (`{'exp_id': 'exp_001', ...}`); the
+shell for-loop over whitespace-tokenized that into garbage. Fixed by
+emitting JUST `entry["exp_id"]` in the heredoc parser. Verified
+locally:
+
+    python3 -c "
+    fake_state = {'top_3': [{'exp_id': 'exp_001', 'auc_stripped': 0.8},
+                            {'exp_id': 'exp_002', 'auc_stripped': 0.79}]}
+    for entry in fake_state.get('top_3', []):
+        if isinstance(entry, dict) and 'exp_id' in entry:
+            print(entry['exp_id'])
+    "
+    # Output:
+    #   exp_001
+    #   exp_002
+
+Sub-bug B (checkpoint location): backed up the wrong path. The
+trainer (`train_xattn.py:282`) saves `xattn_state.pt` to the run
+directory at `src/auto_research/runs/exp_NNN/`. There is no
+`/workspace/checkpoints/xattn_NNN/` produced anywhere. Fixed by
+syncing `$REPO_ROOT/src/auto_research/runs/$exp_id/` directly for
+each top-3 run. That picks up `xattn_state.pt`, `metrics.json`,
+`ci_report.json`, `gate_trajectory.json`, `leakage_report.json`, and
+`config.yaml` — everything needed to resurrect a top-3 run on a new
+pod.
+
+Verify (laptop, with a fake sweep_state.yaml):
+
+    # Build a fake sweep_state with top_3 entries and a real run dir;
+    # run the script with DRY_RUN=1 once it's wired. (The current
+    # script doesn't have DRY_RUN; documented as a future
+    # enhancement.)
+
+6. Medium: Fresh clones do not contain the state files the agent
+   instructions require reading.
+
+Status: FIXED.
+
+Action — three parts:
+
+a. New script `scripts/init_auto_research_state.py`:
+   - Creates `src/auto_research/experiments.jsonl` (empty file).
+   - Writes empty-history `src/auto_research/sweep_state.yaml`
+     (schema_version=1, n_completed=0, current_best=null, halted=false).
+   - Idempotent: refreshes timestamp on existing empty state; refuses
+     to overwrite non-empty state unless --force.
+   - Creates `src/auto_research/runs/` dir if missing.
+
+b. `RUNBOOK.md` §1.3 bootstrap now calls
+   `python scripts/init_auto_research_state.py` between `pip install`
+   and `preflight_check.py`. The agent loop can therefore expect both
+   state files to exist on every fresh boot.
+
+c. `src/auto_research/AGENT_INSTRUCTIONS.md` per-iteration loop step 1
+   updated:
+       If `sweep_state.yaml` or `experiments.jsonl` is missing
+       (gitignored runtime state — fresh clone or just-reset), treat
+       it as zero completed runs and proceed normally. The first
+       launcher invocation will create both files. If uncertain,
+       run `python scripts/init_auto_research_state.py`.
+   Belt-and-braces: the agent now handles the missing-file case
+   gracefully even if RUNBOOK §1.3 was skipped.
+
+Verify (laptop):
+
+    rm -f src/auto_research/sweep_state.yaml src/auto_research/experiments.jsonl
+    python3 scripts/init_auto_research_state.py
+    # Output:
+    #   created .../experiments.jsonl (empty)
+    #   created .../sweep_state.yaml
+    #   auto-research state initialized
+
+Bottom line:
+A fresh RunPod clone of this repo can now follow RUNBOOK.md §1.3
+literally: clone-as-root, init state, preflight, and proceed. The
+default cron loop has the script it claims to use. Hung runs no
+longer hold the GPU forever. Top-3 checkpoints actually back up.
+Cache artifacts can't accidentally land on ephemeral disk.
+
+Notes on the INDEX backfill:
+This followup is committed alongside the code fixes (commit A). Then
+INDEX.md's 008 row is added with commit A's hash in a small follow-up
+(commit B). Same two-commit pattern.

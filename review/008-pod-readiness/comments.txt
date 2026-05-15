@@ -1,0 +1,590 @@
+Review comments 008
+Date: 2026-05-15
+Subject: RunPod pod-readiness review before pushing the repo to the VM
+
+Reviewed file(s):
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/README.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/CODEX_PROMPT.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/PLAN.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/RUNBOOK.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/README.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/CLAUDE.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/requirements.txt
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/INDEX.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/007-path-a-batch-4/followup.txt
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/preflight_check.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/run_next_experiment.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/parse_metrics.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/merge_stage0_lora.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/backup_to_external.sh
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/AGENT_INSTRUCTIONS.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/experiment_template.yaml
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/configs/budget.yaml
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/configs/sweep_space.yaml
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/accelerate_configs/single_h100.yaml
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/common.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/train_cpt_light.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/train_xattn.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/gen/build_dataset.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/gen/cheap_template_generator.py
+
+Repo root used for comparison:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+Summary:
+The model/data scaffold is in much better shape after review 007, and the
+torch-free checks pass. The repo is not yet clean to hand to a RunPod VM by
+following the documented commands. The remaining blockers are operational:
+the runbook points at a nested repo path that does not match this git repo, and
+the default cron loop references a script that is not tracked.
+
+Verification run:
+
+1. Diff base and changed files
+
+Command:
+    CLOSING_COMMIT=$(awk -F'|' '/^\| *0[0-9]{2,} *\|/ { gsub(/[ \t]/, "", $7); print $7 }' review/INDEX.md | tail -1); printf 'diffing against: %s\n' "$CLOSING_COMMIT"; git log --oneline "${CLOSING_COMMIT}..HEAD"; git diff --stat "${CLOSING_COMMIT}..HEAD"; git diff --name-only "${CLOSING_COMMIT}..HEAD"
+
+Actual output:
+    diffing against: d9a4f7f
+    1f7cc3e Add project-level CLAUDE.md with 12-rule template
+    f359762 INDEX: record closing commit for review 007
+     CLAUDE.md       | 62 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+     review/INDEX.md |  1 +
+     2 files changed, 63 insertions(+)
+    CLAUDE.md
+    review/INDEX.md
+
+Disposition:
+    PASS. The direct post-007 diff is small; this review therefore focused on
+    full scaffold pod-readiness and RunPod operational contracts.
+
+2. Local torch-free smoke checks
+
+Command:
+    md5 -q PLAN.md ../.claude/tasks/cross-attn-ato-poc/PLAN.md ~/.claude/plans/i-want-to-do-compressed-bee.md
+    PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+    import sys, random
+    sys.path.insert(0, '.')
+    from eval import eval_modes
+    from eval.leakage_checks import narrative_leakage_scan
+    text = '<journey_sim_swap><actor_human><event_login> <amount_bucket=high></journey_sim_swap>'
+    assert 'journey_sim_swap' not in eval_modes.apply(text, 'stripped')[0]
+    assert '<amount_bucket=high>' in eval_modes.apply(text, 'stripped')[0]
+    a = eval_modes.apply(text, 'opaque', rng=random.Random(0))[0]
+    b = eval_modes.apply(text, 'opaque', rng=random.Random(1))[0]
+    assert a != b
+    assert not narrative_leakage_scan('This is fraudulent SIM-swap')['clean']
+    assert narrative_leakage_scan('Device change followed by password reset')['clean']
+    print('layer A smoke OK')
+    PY
+    PYTHONDONTWRITEBYTECODE=1 python3 -m src.tokenizer.custom_tokens --check
+    PYTHONDONTWRITEBYTECODE=1 python3 -m data.gen.feature_bucketer --self-test
+    PYTHONDONTWRITEBYTECODE=1 python3 -m data.gen.cheap_template_generator --self-test
+    PYTHONDONTWRITEBYTECODE=1 python3 -m src.tokenizer.fencer
+    PYTHONDONTWRITEBYTECODE=1 python3 -m data.gen.pii_fencer
+    PYTHONDONTWRITEBYTECODE=1 python3 scripts/parse_metrics.py --self-test
+    PYTHONDONTWRITEBYTECODE=1 python3 -m src.train.common
+
+Actual output:
+    64515f2986ac4ea153e0b7b670d57c3e
+    64515f2986ac4ea153e0b7b670d57c3e
+    64515f2986ac4ea153e0b7b670d57c3e
+
+    layer A smoke OK
+
+    custom-token registry OK:
+      n_total                        = 65
+      n_journey                      = 18
+      n_actor                        = 6
+      n_event                        = 7
+      n_pii                          = 8
+      n_bucket                       = 26
+      n_journey_families             = 9
+      n_actor_families               = 6
+      n_bucket_families              = 9
+      n_hard_negative_families       = 3
+      n_fraud_families               = 5
+      n_agent_actor_families         = 5
+
+    feature_bucketer self-test OK
+
+    cheap_template_generator self-test OK (54 family/actor combos, no leakage)
+
+    fencer self-test OK: {'<email>': 1, '<device_id>': 1, '<ip>': 1, '<amount>': 1, '<phone>': 1, '<browser>': 1, '<acct_id>': 1}
+
+    pii_fencer self-test OK (incl. review-004 #2 negative cases)
+
+    parse_metrics merge contract OK (trainer metrics survive)
+
+    load_config OK
+    find_label_score_position OK
+    write_predictions_jsonl OK
+    torch/transformers not installed; tokenizer / dataset / optimizer self-tests skipped (run on the pod)
+
+Disposition:
+    PASS. The review-007 parser fix is locally verified, and the no-GPU
+    scaffold checks are still green.
+
+3. Full Python AST parse
+
+Command:
+    PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+    import ast
+    from pathlib import Path
+    for p in sorted(Path('.').rglob('*.py')):
+        if any(part in {'.venv', '__pycache__'} for part in p.parts):
+            continue
+        ast.parse(p.read_text(), filename=str(p))
+        print('AST OK', p)
+    PY
+
+Actual output:
+    AST OK data/gen/__init__.py
+    AST OK data/gen/agent_actor_mixer.py
+    AST OK data/gen/build_dataset.py
+    AST OK data/gen/cheap_template_generator.py
+    AST OK data/gen/feature_bucketer.py
+    AST OK data/gen/journey_templates.py
+    AST OK data/gen/narrative_generator.py
+    AST OK data/gen/pii_fencer.py
+    AST OK data/gen/types.py
+    AST OK eval/__init__.py
+    AST OK eval/bootstrap_ci.py
+    AST OK eval/eval_modes.py
+    AST OK eval/leakage_checks.py
+    AST OK eval/score_risk.py
+    AST OK scripts/__init__.py
+    AST OK scripts/merge_stage0_lora.py
+    AST OK scripts/parse_metrics.py
+    AST OK scripts/preflight_check.py
+    AST OK scripts/run_next_experiment.py
+    AST OK src/__init__.py
+    AST OK src/auto_research/__init__.py
+    AST OK src/model/__init__.py
+    AST OK src/model/cross_attn_block.py
+    AST OK src/model/encoders/__init__.py
+    AST OK src/model/encoders/small_transformer.py
+    AST OK src/model/qwen_xattn_wrapper.py
+    AST OK src/model/resampler.py
+    AST OK src/tokenizer/__init__.py
+    AST OK src/tokenizer/custom_tokens.py
+    AST OK src/tokenizer/fencer.py
+    AST OK src/train/__init__.py
+    AST OK src/train/common.py
+    AST OK src/train/eval_runner.py
+    AST OK src/train/mixers/__init__.py
+    AST OK src/train/mixers/eval_mode_dropout.py
+    AST OK src/train/train_cpt_light.py
+    AST OK src/train/train_event_only_classifier.py
+    AST OK src/train/train_lora_text_only.py
+    AST OK src/train/train_structured_as_text.py
+    AST OK src/train/train_xattn.py
+
+Disposition:
+    PASS. I used AST parsing instead of py_compile to avoid writing __pycache__
+    during review.
+
+4. Local dependency availability
+
+Command:
+    PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+    import importlib.util as u
+    for name in ['torch', 'transformers', 'peft', 'accelerate', 'datasets', 'bitsandbytes', 'sklearn', 'numpy', 'scipy', 'yaml', 'anthropic', 'faker', 'wandb']:
+        print(name, bool(u.find_spec(name)))
+    PY
+
+Actual output:
+    torch False
+    transformers False
+    peft False
+    accelerate False
+    datasets False
+    bitsandbytes False
+    sklearn False
+    numpy False
+    scipy False
+    yaml True
+    anthropic False
+    faker False
+    wandb False
+
+Disposition:
+    Expected for this laptop environment. GPU/model/PEFT/Accelerate checks must
+    run on the pod via scripts/preflight_check.py and the first trainer smoke.
+
+5. Template dataset generation smoke
+
+Command:
+    PYTHONDONTWRITEBYTECODE=1 python3 -m data.gen.build_dataset --n 20 --out /private/tmp/cross_attn_pod_readiness_smoke --mode template --eval-frac 0.2 --leakage-audit-n 20
+
+Actual output:
+      [     1/20] rate=1830.8/s cost=$0.000
+      [     2/20] rate=2840.7/s cost=$0.000
+      [     3/20] rate=3845.6/s cost=$0.000
+      [     4/20] rate=4704.8/s cost=$0.000
+      [     5/20] rate=5475.6/s cost=$0.000
+      [     6/20] rate=6090.5/s cost=$0.000
+      [     7/20] rate=6735.5/s cost=$0.000
+      [     8/20] rate=7324.7/s cost=$0.000
+      [     9/20] rate=7776.8/s cost=$0.000
+      [    10/20] rate=8299.0/s cost=$0.000
+      [    11/20] rate=8619.0/s cost=$0.000
+      [    12/20] rate=9070.4/s cost=$0.000
+      [    13/20] rate=9412.4/s cost=$0.000
+      [    14/20] rate=9270.6/s cost=$0.000
+      [    15/20] rate=9492.2/s cost=$0.000
+      [    16/20] rate=9737.2/s cost=$0.000
+      [    17/20] rate=9922.5/s cost=$0.000
+      [    18/20] rate=9787.1/s cost=$0.000
+      [    19/20] rate=9822.7/s cost=$0.000
+      [    20/20] rate=10048.6/s cost=$0.000
+    {
+      "n_records": 20,
+      "mode": "template",
+      "family_counts": {
+        "hn_large_purchase": 4,
+        "cred_stuff": 2,
+        "sim_swap": 4,
+        "hn_travel": 2,
+        "hn_account_recovery": 3,
+        "clean": 3,
+        "malware_rat": 1,
+        "phish_takeover": 1
+      },
+      "actor_counts": {
+        "human": 12,
+        "agent_buying": 3,
+        "hybrid": 2,
+        "agent_finance": 1,
+        "agent_adversarial": 2
+      },
+      "eval_frac": 0.2,
+      "leakage_audit_n": 20,
+      "leakage_audit_failures": 0,
+      "duration_seconds": 0.0
+    }
+
+Disposition:
+    PASS. Template data generation works locally when output is directed outside
+    the worktree.
+
+6. Review-007 validation contracts
+
+Command:
+    PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+    import importlib.util, sys
+    sys.path.insert(0, '.')
+    spec = importlib.util.spec_from_file_location('rne', 'scripts/run_next_experiment.py')
+    rne = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rne)
+
+    bad = {'exp_id': 'e', 'arm': 'cpt_light',
+           'training': {'base_checkpoint': '/workspace/checkpoints/qwen3-8b-cpt-light-merged'},
+           'data': {}, 'eval': {}, 'rationale': ''}
+    errs = rne.validate_config(bad)
+    assert any('cannot use base_checkpoint' in e for e in errs)
+    print('cpt_light + merged-path correctly rejected')
+
+    bad2 = {'exp_id': 'e', 'arm': 'xattn',
+            'xattn': {'insertion_pattern': 'every_4', 'gate_init': 'small_0.01',
+                      'resampler_slots': 64, 'encoder': 'small_transformer',
+                      'lora_r_on_q': 16},
+            'training': {'base_checkpoint': 'Qwen/Qwen3-8B'},
+            'data': {}, 'eval': {}, 'rationale': ''}
+    errs2 = rne.validate_config(bad2)
+    assert any('should use the merged' in e for e in errs2)
+    print('xattn + raw-Qwen correctly rejected')
+
+    ok = {'exp_id': 'e', 'arm': 'cpt_light', 'training': {'steps': 1500},
+          'data': {}, 'eval': {}, 'rationale': ''}
+    assert len(rne.validate_config(ok)) == 0
+    print('cpt_light + no-base-checkpoint accepted')
+    PY
+
+Actual output:
+    cpt_light + merged-path correctly rejected
+    xattn + raw-Qwen correctly rejected
+    cpt_light + no-base-checkpoint accepted
+
+Disposition:
+    PASS.
+
+7. RunPod operational path probes
+
+Command:
+    git rev-parse --show-toplevel
+    git ls-files | sed -n '1,40p'
+    test -f scripts/agent_tick.sh; printf 'scripts/agent_tick.sh exists: %s\n' "$?"
+    rg -n "agent_tick|repo/cross_attn_ato_poc|git clone|HF_HOME|TRANSFORMERS_CACHE|TOKENIZERS_PARALLELISM|/workspace/repo" RUNBOOK.md PLAN.md scripts src -S
+
+Actual output:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+    .gitignore
+    CLAUDE.md
+    PLAN.md
+    README.md
+    RUNBOOK.md
+    data/gen/__init__.py
+    data/gen/agent_actor_mixer.py
+    data/gen/build_dataset.py
+    data/gen/cheap_template_generator.py
+    data/gen/feature_bucketer.py
+    data/gen/journey_templates.py
+    data/gen/narrative_generator.py
+    data/gen/pii_fencer.py
+    data/gen/types.py
+    docs/README.md
+    docs/batch-2-data-generators.md
+    docs/batch-3-architecture.md
+    docs/batch-4-trainers.md
+    eval/__init__.py
+    eval/bootstrap_ci.py
+    eval/eval_modes.py
+    eval/leakage_checks.py
+    eval/score_risk.py
+    requirements.txt
+    review/001-plan-and-scaffold/comments.txt
+    review/001-plan-and-scaffold/followup.txt
+    review/002-followup-on-001/comments.txt
+    review/002-followup-on-001/followup.txt
+    review/003-recent-repo-state/comments.txt
+    review/003-recent-repo-state/followup.txt
+    review/004-path-a-batch-2/comments.txt
+    review/004-path-a-batch-2/followup.txt
+    review/005-path-a-batch-3/comments.txt
+    review/005-path-a-batch-3/followup.txt
+
+    scripts/agent_tick.sh exists: 1
+
+    PLAN.md:467:1. **Cron-driven re-invocation** (default): `scripts/agent_tick.sh` runs every N minutes via crontab. Wrapper pipes a fixed prompt — "Read `AGENT_INSTRUCTIONS.md` and continue" — into `claude` or `codex` CLI. Lockfile prevents concurrent runs.
+    RUNBOOK.md:37:git clone <your-repo-url> repo
+    RUNBOOK.md:38:cd repo/cross_attn_ato_poc
+    RUNBOOK.md:97:   - **Cron-driven (default)**: `crontab -e` and add `*/30 * * * * /workspace/repo/cross_attn_ato_poc/scripts/agent_tick.sh`
+    RUNBOOK.md:98:   - **Single long session**: `cd /workspace/repo/cross_attn_ato_poc && claude` (or `codex`), then paste the loop prompt from §6 below.
+    RUNBOOK.md:228:- **`HF_HOME=/workspace/.hf`** must be set *before* importing `transformers` or it caches to container disk and loses on restart.
+    scripts/backup_to_external.sh:5:#   */30 * * * * /workspace/repo/cross_attn_ato_poc/scripts/backup_to_external.sh >> /workspace/backup.log 2>&1
+    scripts/backup_to_external.sh:18:REPO_ROOT="${REPO_ROOT:-/workspace/repo/cross_attn_ato_poc}"
+
+Disposition:
+    FAIL for pod bootstrap/loop pathing. This git repository is already
+    cross_attn_ato_poc at its root, and scripts/agent_tick.sh is not tracked.
+
+8. Backup top-3 parsing probe
+
+Command:
+    PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+    state = {'top_3': [{'exp_id': 'exp_001', 'auc_stripped': 0.8}, {'exp_id': 'exp_002', 'auc_stripped': 0.79}]}
+    for exp_id in state.get('top_3', []):
+        print(exp_id)
+    PY
+    rg -n "top_3|xattn_state.pt|xattn_exp|/workspace/checkpoints/xattn" scripts/backup_to_external.sh scripts/run_next_experiment.py src/train/train_xattn.py RUNBOOK.md PLAN.md -S
+
+Actual output:
+    {'exp_id': 'exp_001', 'auc_stripped': 0.8}
+    {'exp_id': 'exp_002', 'auc_stripped': 0.79}
+
+    RUNBOOK.md:69:│   └── xattn_exp_NNN/          Top-3 only; failed sweep checkpoints not kept
+    RUNBOOK.md:210:- Top-3 `checkpoints/xattn_exp_NNN/` (rotating)
+    scripts/backup_to_external.sh:83:# Top-3 checkpoints (rotating; identified by sweep_state.yaml's current_best
+    scripts/backup_to_external.sh:90:for exp_id in state.get('top_3', []):
+    scripts/backup_to_external.sh:94:        ckpt_dir="/workspace/checkpoints/xattn_$exp_id"
+    src/train/train_xattn.py:282:    torch.save(sd, run_dir / "xattn_state.pt")
+
+Disposition:
+    FAIL for external checkpoint backup. The script prints whole top_3 dicts
+    instead of exp_id strings, and it looks under /workspace/checkpoints even
+    though train_xattn saves xattn_state.pt in the run directory.
+
+Review findings:
+
+1. Blocker: The RunPod bootstrap path assumes a nested repo layout that does not match this git repository.
+
+Status: OPEN, blocker for pushing this repo and following RUNBOOK.md literally on the VM.
+
+Details:
+`git rev-parse --show-toplevel` reports this repository root as
+`/Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc`. A fresh
+`git clone <your-repo-url> repo` of this repo will therefore place
+`RUNBOOK.md`, `scripts/`, `src/`, and `requirements.txt` directly under
+`/workspace/repo`. The runbook then says `cd repo/cross_attn_ato_poc`
+(`RUNBOOK.md:35-43`), which will fail for this repo-as-root clone. The same
+nested assumption appears in the Day-2 cron and single-session commands
+(`RUNBOOK.md:96-99`) and in `scripts/backup_to_external.sh`'s default
+`REPO_ROOT` (`scripts/backup_to_external.sh:18`).
+
+This is exactly the path a user will take when pushing this repo to a RunPod VM.
+The first-boot bootstrap should not depend on remembering whether the remote is
+a parent monorepo or the `cross_attn_ato_poc` repo itself.
+
+Recommendation:
+Pick one RunPod layout and make every command match it. For this repository,
+the simplest is:
+
+    cd /workspace
+    git clone <your-repo-url> cross_attn_ato_poc
+    cd /workspace/cross_attn_ato_poc
+
+Then update the cron examples and `backup_to_external.sh` default
+`REPO_ROOT` to `/workspace/cross_attn_ato_poc`, or make them derive the repo
+root from the script location. If you intend to clone a parent
+Foundation-Science repo instead, say that explicitly in RUNBOOK.md and make the
+clone command use that parent remote. Do not leave the bootstrap ambiguous.
+
+2. Blocker: The documented default auto-loop script does not exist.
+
+Status: OPEN, blocker for the default Day-2 cron-driven auto-loop.
+
+Details:
+PLAN.md names cron-driven re-invocation as the default loop mode and says
+`scripts/agent_tick.sh` runs every N minutes (`PLAN.md:467`). RUNBOOK.md gives
+the concrete crontab entry:
+
+    */30 * * * * /workspace/repo/cross_attn_ato_poc/scripts/agent_tick.sh
+
+(`RUNBOOK.md:96-98`). The file is not tracked; the verification command
+returned `scripts/agent_tick.sh exists: 1`, where shell exit code 1 means
+missing. Without this wrapper, the default loop cannot start after the baselines
+and first x-attn smoke. The single long-session fallback exists, but the
+runbook explicitly marks cron as default, and restart recovery assumes the loop
+can be restarted from the documented path.
+
+Recommendation:
+Add `scripts/agent_tick.sh` or change the runbook/plan to make the single
+long-session path the actual supported path. If adding the script, keep it
+minimal and deterministic: `cd` to the repo root, activate `/workspace/.venv`,
+check the launcher lock/halt status, then pipe the fixed RUNBOOK §6 prompt into
+the selected CLI (`claude` or `codex`) with logs under `/workspace`. Add a
+local shell syntax check and a dry-run mode that prints the command without
+launching an agent.
+
+3. High: Preflight does not fail when persistence-critical environment variables are missing.
+
+Status: OPEN, should be fixed before first pod boot.
+
+Details:
+RUNBOOK.md requires the pod template to set:
+
+    HF_HOME=/workspace/.hf
+    WANDB_DIR=/workspace/.wandb
+    TRANSFORMERS_CACHE=/workspace/.hf/transformers
+    TOKENIZERS_PARALLELISM=false
+
+(`RUNBOOK.md:25-31`). The same runbook says `HF_HOME=/workspace/.hf` must be
+set before importing transformers or the model cache can land on container disk
+and disappear on restart (`RUNBOOK.md:228`). `scripts/preflight_check.py`
+imports `transformers` during `check_model_download` and
+`check_tokenizer_roundtrip` (`scripts/preflight_check.py:152-161`), but it never
+checks these environment variables. The probe confirmed `HF_HOME`,
+`TRANSFORMERS_CACHE`, `WANDB_DIR`, and `TOKENIZERS_PARALLELISM` are absent from
+the preflight source.
+
+This means preflight can pass after caching Qwen artifacts to ephemeral
+container disk. That is a RunPod-specific footgun: a restart would lose the
+download even though the gatekeeper said the environment was clean.
+
+Recommendation:
+Add a `check_persistent_env()` call before any `transformers` import. Fail if
+`HF_HOME` is unset or not under `/workspace`, if `TRANSFORMERS_CACHE` is unset
+or not under `/workspace`, if `WANDB_DIR` is unset or not under `/workspace`,
+or if `TOKENIZERS_PARALLELISM` is not `false`. Also accept `WANDB_MODE=offline`
+as already implemented, but still require `WANDB_DIR=/workspace/.wandb` so
+offline logs survive restarts. Then update RUNBOOK.md to export these variables
+in the bootstrap shell as a fallback even if the pod template missed them.
+
+4. High: The launcher documents per-experiment timeouts but waits forever.
+
+Status: OPEN, should be fixed before unattended H100 runs.
+
+Details:
+`src/auto_research/configs/budget.yaml` says per-experiment wall-clock caps are
+"enforced by run_next_experiment.py via timeout" and sets 90/150 minute caps
+(`src/auto_research/configs/budget.yaml:26-29`). The launcher does not enforce
+that. `launch_trainer` starts `accelerate` with `subprocess.Popen` and calls
+`proc.wait()` with no timeout (`scripts/run_next_experiment.py:332-351`). The
+only timeout-related grep hit in the launcher is the budget comment; there is no
+`wait(timeout=...)`, `communicate(timeout=...)`, alarm, or kill path.
+
+On RunPod this is a cost and recovery problem. A hung model download, stuck
+dataset reader, CUDA deadlock, or trainer loop that stops printing will hold
+the GPU lock and burn wall-clock until a human notices.
+
+Recommendation:
+Thread the budget cap into `launch_trainer`: use
+`stress_run_max_wall_clock_minutes` when `training.stress_run` is true,
+otherwise `max_wall_clock_minutes`. Call `proc.wait(timeout=cap_seconds)`, send
+SIGTERM on timeout, then SIGKILL after a short grace period. Write a failure
+record with `status="timeout"` and keep the existing lock release in `finally`.
+Add a no-GPU test by launching a short Python sleep script with a one-second
+timeout and asserting the run is marked failed.
+
+5. High: External backup will not copy the actual x-attn checkpoints.
+
+Status: OPEN, should be fixed before long sweeps.
+
+Details:
+The runbook says top-3 x-attn checkpoints live under
+`/workspace/checkpoints/xattn_exp_NNN/` and are externally backed up
+(`RUNBOOK.md:63-69`, `RUNBOOK.md:208-210`). `train_xattn.py` saves the trainable
+state dict to the run directory as `xattn_state.pt`
+(`src/train/train_xattn.py:278-282`), and I found no code that promotes top-3
+runs into `/workspace/checkpoints/xattn_exp_NNN/`.
+
+The backup script also parses `sweep_state.yaml` incorrectly. `update_sweep_state`
+writes `top_3` as a list of dicts with `exp_id` and `auc_stripped`, but
+`backup_to_external.sh` prints each dict object directly and then loops over
+the whitespace-split result (`scripts/backup_to_external.sh:83-100`). The probe
+shows the script would print:
+
+    {'exp_id': 'exp_001', 'auc_stripped': 0.8}
+    {'exp_id': 'exp_002', 'auc_stripped': 0.79}
+
+That never maps cleanly to `/workspace/checkpoints/xattn_$exp_id`. Combined
+with the path mismatch, the top-3 checkpoint backup is effectively a no-op.
+
+Recommendation:
+Pick one checkpoint location. Either back up
+`src/auto_research/runs/exp_NNN/xattn_state.pt` directly for top-3 runs, or
+teach the launcher/agent to copy promoted top-3 checkpoints to
+`/workspace/checkpoints/xattn_exp_NNN/`. Fix the parser to emit
+`entry["exp_id"]`, not the whole dict. Add a shell-level dry-run or small Python
+helper test with a synthetic `sweep_state.yaml` containing two top-3 entries
+and fake checkpoint directories; assert the backup resolves the expected paths.
+
+6. Medium: Fresh clones do not contain the state files the agent instructions require reading.
+
+Status: OPEN, should be fixed before starting the auto-loop.
+
+Details:
+`src/auto_research/AGENT_INSTRUCTIONS.md` tells the agent to read
+`sweep_state.yaml` and the last five lines of `experiments.jsonl` at every loop
+iteration (`src/auto_research/AGENT_INSTRUCTIONS.md:20-24`,
+`src/auto_research/AGENT_INSTRUCTIONS.md:44-52`). Both files are ignored and
+not tracked:
+
+    .gitignore:22:src/auto_research/experiments.jsonl
+    .gitignore:23:src/auto_research/sweep_state.yaml
+
+There is a local ignored `sweep_state.yaml`, but it will not come along when the
+repo is pushed or cloned to RunPod. The launcher can create these files after a
+run, but the agent playbook asks for them before proposing the first loop
+config. A robust agent may infer missing files mean zero history; the written
+instructions do not say that.
+
+Recommendation:
+Add an explicit bootstrap step before starting the loop:
+
+    python scripts/run_next_experiment.py --halt-check
+    python -c "import importlib.util; ...; rne.update_sweep_state()"
+    touch src/auto_research/experiments.jsonl
+
+or add a small `scripts/init_auto_research_state.py` that creates empty
+`experiments.jsonl` and initial `sweep_state.yaml` if absent. Update
+AGENT_INSTRUCTIONS.md so missing state files are treated as "zero completed
+runs" rather than an error.
+
+Bottom line:
+Do not push-and-run from RUNBOOK.md as-is. Fix findings 1 and 2 before booting
+the VM, and fix findings 3-5 before leaving the pod unattended for paid H100
+work.

@@ -15,7 +15,12 @@
 
 set -euo pipefail
 
-REPO_ROOT="${REPO_ROOT:-/workspace/repo/cross_attn_ato_poc}"
+# Derive REPO_ROOT from script location so the script is portable across
+# clone layouts (review 008 finding #1). The hard-coded
+# `/workspace/repo/cross_attn_ato_poc` default was wrong for this repo
+# (this IS the repo root; the clone path is /workspace/cross_attn_ato_poc).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 TARGET="${BACKUP_TARGET:-}"
 LOCK="/workspace/.backup.lock"
 
@@ -80,25 +85,44 @@ if [[ "${STAGING:-}" != "" ]]; then
     rm -rf "$STAGING"
 fi
 
-# Top-3 checkpoints (rotating; identified by sweep_state.yaml's current_best
-# and the agent's marked top_3 list).
+# Top-3 x-attn checkpoints (rotating). Review 008 finding #5 fixed two
+# bugs at once:
+#   (a) the old YAML parser printed each top_3 entry as a Python dict
+#       (`{'exp_id': 'exp_001', 'auc_stripped': 0.8}`), so the shell
+#       for-loop received garbage tokens like `{'exp_id':` and never
+#       resolved a real exp_id.
+#   (b) checkpoints were looked up under /workspace/checkpoints/xattn_*
+#       but train_xattn.py actually saves xattn_state.pt under the run
+#       directory at src/auto_research/runs/exp_NNN/. Nothing was
+#       getting backed up.
 TOP3_FILE="$REPO_ROOT/src/auto_research/sweep_state.yaml"
-if [[ -f "$TOP3_FILE" ]] && command -v python >/dev/null; then
-    TOP3=$(python -c "
-import yaml, sys
-state = yaml.safe_load(open('$TOP3_FILE'))
-for exp_id in state.get('top_3', []):
-    print(exp_id)
-" || true)
+if [[ -f "$TOP3_FILE" ]] && command -v python3 >/dev/null; then
+    TOP3=$(python3 - <<PYEOF || true
+import yaml
+state = yaml.safe_load(open("$TOP3_FILE")) or {}
+for entry in state.get("top_3", []) or []:
+    # Each entry is now {exp_id: ..., auc_stripped: ...}; we want JUST exp_id.
+    if isinstance(entry, dict) and "exp_id" in entry:
+        print(entry["exp_id"])
+    elif isinstance(entry, str):
+        print(entry)
+PYEOF
+)
     for exp_id in $TOP3; do
-        ckpt_dir="/workspace/checkpoints/xattn_$exp_id"
-        if [[ -d "$ckpt_dir" ]]; then
-            log "syncing checkpoint $exp_id"
+        # Per-run directory where train_xattn.py writes xattn_state.pt
+        # and where the launcher records metrics.json + ci_report.json
+        # + gate_trajectory.json. Backing this up gives us everything
+        # needed to resurrect a top-3 run on a new pod.
+        run_dir="$REPO_ROOT/src/auto_research/runs/$exp_id"
+        if [[ -d "$run_dir" ]]; then
+            log "syncing top-3 run dir $exp_id"
             case "$TARGET" in
-                s3://*) aws s3 sync "$ckpt_dir" "${TARGET}checkpoints/xattn_$exp_id/" --no-progress >/dev/null ;;
-                r2://*) rclone sync "$ckpt_dir" "${TARGET}checkpoints/xattn_$exp_id/" --quiet ;;
-                hf://*) huggingface-cli upload "${TARGET#hf://}" "$ckpt_dir" "checkpoints/xattn_$exp_id" --quiet ;;
+                s3://*) aws s3 sync "$run_dir" "${TARGET}runs/$exp_id/" --no-progress >/dev/null ;;
+                r2://*) rclone sync "$run_dir" "${TARGET}runs/$exp_id/" --quiet ;;
+                hf://*) huggingface-cli upload "${TARGET#hf://}" "$run_dir" "runs/$exp_id" --quiet ;;
             esac
+        else
+            log "top-3 run dir $exp_id not found at $run_dir; skipping"
         fi
     done
 fi

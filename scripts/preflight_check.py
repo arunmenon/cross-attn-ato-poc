@@ -149,8 +149,64 @@ def check_wandb_or_offline() -> None:
     _ok("W&B online mode configured (API key present)")
 
 
+def check_persistent_env() -> None:
+    """Verify all caches + state dirs point under /workspace (the
+    network-volume mount). Without these, the first transformers /
+    HF / W&B import will land artifacts on the ephemeral container
+    disk and a pod restart will lose them. RunPod-specific footgun;
+    review 008 finding #3.
+
+    MUST be called BEFORE any `from transformers import ...` or
+    `import wandb`, because those imports read the env vars at import
+    time.
+    """
+    required = {
+        "HF_HOME":            "/workspace",
+        "TRANSFORMERS_CACHE": "/workspace",
+        "WANDB_DIR":          "/workspace",
+    }
+    for var, prefix in required.items():
+        val = os.environ.get(var)
+        if not val:
+            _fail(
+                18,
+                f"persistence-critical env var {var!r} is unset. Set it "
+                f"in the pod template (e.g., {var}={prefix}/{var.lower().replace('_', '')}) "
+                f"or export in the bootstrap shell. RUNBOOK.md §1.2."
+            )
+        if not val.startswith(prefix):
+            _fail(
+                18,
+                f"persistence-critical env var {var!r}={val!r} is not "
+                f"under {prefix}. Artifacts would land on ephemeral "
+                f"container disk and be lost on pod restart."
+            )
+
+    # TOKENIZERS_PARALLELISM must be explicitly 'false' to avoid the
+    # noisy warning + occasional deadlock under Accelerate's
+    # multi-worker dataloader.
+    tp = os.environ.get("TOKENIZERS_PARALLELISM")
+    if tp != "false":
+        _fail(
+            18,
+            f"TOKENIZERS_PARALLELISM={tp!r} (expected 'false'). Set "
+            f"in the pod template to avoid warnings + deadlocks under "
+            f"Accelerate's dataloader. RUNBOOK.md §1.2."
+        )
+
+    _ok(
+        f"persistent-env OK: HF_HOME={os.environ['HF_HOME']!r}, "
+        f"TRANSFORMERS_CACHE={os.environ['TRANSFORMERS_CACHE']!r}, "
+        f"WANDB_DIR={os.environ['WANDB_DIR']!r}, "
+        f"TOKENIZERS_PARALLELISM='false'"
+    )
+
+
 def main() -> int:
     print("=== preflight_check.py ===")
+    # Order matters: env-var checks BEFORE the transformers/wandb
+    # imports they govern.
+    check_persistent_env()
     check_cuda()
     check_vram()
     check_workspace_writable()
