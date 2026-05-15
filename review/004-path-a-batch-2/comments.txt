@@ -1,0 +1,509 @@
+Review comments 004
+Date: 2026-05-15
+Subject: Path A Batch 2 data generation pipeline review
+
+Reviewed file(s):
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/docs/batch-2-data-generators.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/gen/types.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/gen/journey_templates.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/gen/agent_actor_mixer.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/gen/narrative_generator.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/gen/cheap_template_generator.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/gen/build_dataset.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/INDEX.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/CODEX_PROMPT.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/PLAN.md
+
+Repo root used for comparison:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+Summary:
+Batch 2 is directionally solid: template builds run fast, deterministic output
+holds, leakage audit passes on generated template data, class balance converges
+at n=5000, and the journey/actor/event skeleton matches PLAN.md. The pieces that
+need fixing before Day-1 LLM generation are concentrated around leakage and
+guardrails: the LLM prompt receives semantic actor labels like
+agent_compromised, the PII boundary checker misses raw synthetic IDs in normal
+PII fields, and CostTracker can accept a narrative after overshooting the
+declared budget. The review protocol also still extracts the wrong diff base
+because INDEX.md contains a later prose hash after the table.
+
+Verification run:
+
+1. Review protocol selected the wrong closing commit from INDEX.md.
+
+Command:
+    CLOSING_COMMIT=$(grep -Eo '\b[0-9a-f]{7}\b' review/INDEX.md | tail -1); echo "diffing against: ${CLOSING_COMMIT}"; git log --oneline "${CLOSING_COMMIT}..HEAD"; git diff --stat "${CLOSING_COMMIT}..HEAD"; git diff --name-only "${CLOSING_COMMIT}..HEAD"
+
+Actual output:
+    diffing against: b903809
+    19b9ecd Path A Batch 2: data generation pipeline (6 files)
+    940f5bc INDEX: record closing commit for review 003
+    87070cf Address review 003: single-hash INDEX + fix CODEX_PROMPT commands
+    22918ee Save reusable Codex review prompt to review/CODEX_PROMPT.md
+    3cc9d05 Restructure review/ folder: per-review subdirs + INDEX + README
+     data/gen/agent_actor_mixer.py                      | 218 ++++++++++
+     data/gen/build_dataset.py                          | 359 +++++++++++++++
+     data/gen/cheap_template_generator.py               | 187 ++++++++
+     data/gen/journey_templates.py                      | 483 +++++++++++++++++++++
+     data/gen/narrative_generator.py                    | 392 +++++++++++++++++
+     data/gen/types.py                                  |  69 +++
+     docs/README.md                                     |  32 ++
+     docs/batch-2-data-generators.md                    | 310 +++++++++++++
+     .../comments.txt}                                  |   0
+     .../followup.txt}                                  |   0
+     .../comments.txt}                                  |   0
+     .../followup.txt}                                  |   0
+     review/003-recent-repo-state/comments.txt          | 265 +++++++++++
+     review/003-recent-repo-state/followup.txt          | 144 ++++++
+     review/CODEX_PROMPT.md                             | 244 +++++++++++
+     review/INDEX.md                                    |  33 ++
+     review/README.md                                   | 225 ++++++++++
+     17 files changed, 2961 insertions(+)
+
+Disposition:
+    FAIL. For this Batch 2 review, the intended base is 940f5bc, but the
+    protocol extractor returned b903809 because review/INDEX.md has a prose
+    mention of b903809 after the table.
+
+2. Intended Batch 2 diff surface.
+
+Command:
+    git log --oneline 940f5bc..HEAD; git diff --stat 940f5bc..HEAD; git diff --name-only 940f5bc..HEAD
+
+Actual output:
+    19b9ecd Path A Batch 2: data generation pipeline (6 files)
+     data/gen/agent_actor_mixer.py        | 218 ++++++++++++++++
+     data/gen/build_dataset.py            | 359 ++++++++++++++++++++++++++
+     data/gen/cheap_template_generator.py | 187 ++++++++++++++
+     data/gen/journey_templates.py        | 483 +++++++++++++++++++++++++++++++++++
+     data/gen/narrative_generator.py      | 392 ++++++++++++++++++++++++++++
+     data/gen/types.py                    |  69 +++++
+     docs/README.md                       |  32 +++
+     docs/batch-2-data-generators.md      | 310 ++++++++++++++++++++++
+     8 files changed, 2050 insertions(+)
+    data/gen/agent_actor_mixer.py
+    data/gen/build_dataset.py
+    data/gen/cheap_template_generator.py
+    data/gen/journey_templates.py
+    data/gen/narrative_generator.py
+    data/gen/types.py
+    docs/README.md
+    docs/batch-2-data-generators.md
+
+Disposition:
+    PASS. This is the surface reviewed for focus: path-a-batch-2.
+
+3. Batch 2 self-tests.
+
+Command:
+    python3 -m data.gen.journey_templates --self-test
+    python3 -m data.gen.agent_actor_mixer --self-test
+    python3 -m data.gen.cheap_template_generator --self-test
+    python3 -m data.gen.narrative_generator --self-test
+
+Actual output:
+    journey_templates self-test OK (9 families)
+    agent_actor_mixer self-test OK
+      durations: {'human': 519, 'agent_buying': 294, 'agent_finance': 342, 'agent_compromised': 164, 'agent_adversarial': 192, 'hybrid': 459}
+      tool_calls: {'human': 0, 'agent_buying': 4, 'agent_finance': 4, 'agent_compromised': 3, 'agent_adversarial': 4, 'hybrid': 0}
+    cheap_template_generator self-test OK (9 families, no leakage)
+    narrative_generator self-test OK (using stub narrator)
+      tracker summary: {'spent_usd': 0.0012, 'budget_usd': 10.0, 'n_calls': 1, 'n_cache_hits': 1, 'by_model': {'claude-haiku-4-5-20251001': 0.0012}}
+
+Disposition:
+    PASS.
+
+4. 5000-record template build, full leakage audit, and class balance.
+
+Command:
+    python3 -m data.gen.build_dataset --n 5000 --out /private/tmp/cross_attn_review_004_5000 --mode template --seed 7 --leakage-audit-n 5000
+
+Actual output:
+    {
+      "n_records": 5000,
+      "mode": "template",
+      "family_counts": {
+        "clean": 2039,
+        "mule_chain": 308,
+        "phish_takeover": 290,
+        "cred_stuff": 289,
+        "malware_rat": 276,
+        "hn_account_recovery": 500,
+        "hn_large_purchase": 498,
+        "hn_travel": 513,
+        "sim_swap": 287
+      },
+      "actor_counts": {
+        "human": 3566,
+        "agent_adversarial": 236,
+        "hybrid": 212,
+        "agent_buying": 435,
+        "agent_compromised": 281,
+        "agent_finance": 270
+      },
+      "eval_frac": 0.0,
+      "leakage_audit_n": 5000,
+      "leakage_audit_failures": 0,
+      "duration_seconds": 0.54
+    }
+
+    Computed balance:
+    {'clean_pct': 0.4078, 'fraud_pct': 0.29, 'hn_pct': 0.3022, 'family_counts': {'clean': 2039, 'mule_chain': 308, 'phish_takeover': 290, 'cred_stuff': 289, 'malware_rat': 276, 'hn_account_recovery': 500, 'hn_large_purchase': 498, 'hn_travel': 513, 'sim_swap': 287}}
+
+Disposition:
+    PASS. The 40/30/30 target converges within the requested 2 percentage
+    points at n=5000, and the leakage audit scanned all 5000 generated rows.
+
+5. Template-mode determinism.
+
+Command:
+    python3 -m data.gen.build_dataset --n 100 --out /private/tmp/cross_attn_review_004_det_a --mode template --seed 42 --leakage-audit-n 100
+    python3 -m data.gen.build_dataset --n 100 --out /private/tmp/cross_attn_review_004_det_b --mode template --seed 42 --leakage-audit-n 100
+    diff -u /private/tmp/cross_attn_review_004_det_a/data.jsonl /private/tmp/cross_attn_review_004_det_b/data.jsonl
+
+Actual output:
+    Both builds reported identical family_counts and actor_counts. diff produced
+    no output and exited 0.
+
+Disposition:
+    PASS. Template-mode output is byte-identical for the same seed.
+
+6. Verdict footer / score_risk surface.
+
+Command:
+    python3 - <<'PY'
+    import json
+    from pathlib import Path
+    for i,line in enumerate(Path('/private/tmp/cross_attn_review_004_det_a/data.jsonl').open()):
+        r=json.loads(line)
+        if i<3:
+            print('--- row', i, r['journey_family'], r['actor_family'], r['label'])
+            print(r['text'])
+            print()
+    PY
+
+Actual output:
+    Example rows contain:
+        <risk_verdict>
+        label: fraud
+        journey_family: malware_rat
+        ...
+        </risk_verdict>
+
+        <risk_verdict>
+        label: legit
+        journey_family: clean
+        ...
+        </risk_verdict>
+
+Disposition:
+    PASS. There is exactly one space after "label:" before fraud/legit in the
+    serialized rows I inspected, matching the score_risk log-prob surface.
+
+7. Agent mixer event-order preservation.
+
+Command:
+    python3 - <<'PY'
+    from data.gen.journey_templates import generate
+    from data.gen.agent_actor_mixer import mix
+    import random
+    j = generate('sim_swap', seed=123, actor='agent_compromised')
+    m = mix(j, rng=random.Random(123))
+    print([e['event'] for e in m.events])
+    print([e['t'] for e in m.events])
+    PY
+
+Actual output:
+    ['login', 'tool_call', 'device_add', 'tool_call', 'pw_reset', 'tool_call', 'recipient_add', 'tool_call', 'txn']
+    [0, 9, 15, 27, 35, 59, 74, 82, 86]
+
+Disposition:
+    PASS. The base journey order is preserved with tool_call events inserted
+    between base events.
+
+8. CODEX_PROMPT.py_compile command on zsh with multiple changed Python files.
+
+Command:
+    CLOSING_COMMIT=940f5bc; PY_FILES=$(git diff --name-only "${CLOSING_COMMIT}..HEAD" | grep -E '\.py$' || true); if [ -n "$PY_FILES" ]; then python3 -m py_compile $PY_FILES; else echo "no Python files changed; py_compile skipped"; fi
+
+Actual output:
+    [Errno 2] No such file or directory: 'data/gen/agent_actor_mixer.py\ndata/gen/build_dataset.py\ndata/gen/cheap_template_generator.py\ndata/gen/journey_templates.py\ndata/gen/narrative_generator.py\ndata/gen/types.py'
+
+Disposition:
+    FAIL. zsh did not split the newline-separated scalar into separate path
+    arguments.
+
+9. PII assertion negative case for raw synthetic IDs.
+
+Command:
+    python3 - <<'PY'
+    from data.gen.pii_fencer import assert_no_raw_pii_in_event
+    for ev in [
+        {'t': 0, 'event': 'txn', 'actor': 'human', 'recipient': 'recipient_abc123'},
+        {'t': 0, 'event': 'login', 'actor': 'human', 'device_id': 'device_deadbeef'},
+        {'t': 0, 'event': 'login', 'actor': 'human', 'acct_id': 'acct_123456'},
+    ]:
+        try:
+            assert_no_raw_pii_in_event(ev)
+            print('PASSED_UNDETECTED', ev)
+        except AssertionError as e:
+            print('CAUGHT', ev, e)
+    PY
+
+Actual output:
+    PASSED_UNDETECTED {'t': 0, 'event': 'txn', 'actor': 'human', 'recipient': 'recipient_abc123'}
+    PASSED_UNDETECTED {'t': 0, 'event': 'login', 'actor': 'human', 'device_id': 'device_deadbeef'}
+    PASSED_UNDETECTED {'t': 0, 'event': 'login', 'actor': 'human', 'acct_id': 'acct_123456'}
+
+Disposition:
+    FAIL. The boundary assertion does not catch raw synthetic IDs in ordinary
+    PII fields.
+
+10. LLM narrator prompt actor-label surface and leakage scan gap.
+
+Command:
+    python3 - <<'PY'
+    from data.gen.journey_templates import generate
+    from data.gen.agent_actor_mixer import mix
+    from data.gen.narrative_generator import _serialize_events_for_prompt
+    from eval.leakage_checks import narrative_leakage_scan
+    import random
+    for actor in ['agent_compromised', 'agent_adversarial', 'agent_buying']:
+        j = generate('sim_swap', seed=7, actor=actor)
+        j = mix(j, rng=random.Random(8))
+        prompt = _serialize_events_for_prompt(j)
+        print('---', actor)
+        print(prompt.splitlines()[0])
+    for s in ['The compromised agent completed the session.', 'An adversarial agent attempted automation.', 'The buying assistant completed checkout.']:
+        print(s, narrative_leakage_scan(s))
+    PY
+
+Actual output:
+    --- agent_compromised
+    Actor type: agent_compromised.
+    --- agent_adversarial
+    Actor type: agent_adversarial.
+    --- agent_buying
+    Actor type: agent_buying.
+    The compromised agent completed the session. {'clean': True, 'hits': [], 'n_hits': 0}
+    An adversarial agent attempted automation. {'clean': True, 'hits': [], 'n_hits': 0}
+    The buying assistant completed checkout. {'clean': True, 'hits': [], 'n_hits': 0}
+
+Disposition:
+    FAIL. The LLM user prompt contains semantic actor-family labels, and the
+    leakage scanner would allow those labels back into the narrative.
+
+11. CostTracker budget overshoot.
+
+Command:
+    python3 - <<'PY'
+    from pathlib import Path
+    from data.gen.journey_templates import generate
+    from data.gen.narrative_generator import CostTracker, generate_narrative
+    def costly(_j):
+        return ('Operational activity described without banned terms.', 1000000, 1000000)
+    j = generate('clean', seed=1, actor='human')
+    tracker = CostTracker(budget_usd=0.5)
+    generate_narrative(j, tracker=tracker, narrator_fn=costly, max_retries=0, cache_dir=Path('/private/tmp/cross_attn_review_004_cost_cache'))
+    print(tracker.summary())
+    PY
+
+Actual output:
+    {'spent_usd': 4.8, 'budget_usd': 0.5, 'n_calls': 1, 'n_cache_hits': 0, 'by_model': {'claude-haiku-4-5-20251001': 4.8}}
+
+Disposition:
+    FAIL. The narrative was accepted and cached after the tracker crossed the
+    declared budget.
+
+12. Anthropic dependency presence.
+
+Command:
+    rg -n "anthropic" requirements.txt
+
+Actual output:
+    requirements.txt:29:anthropic==0.39.0    # narrator (Claude)
+
+Disposition:
+    PASS.
+
+Review findings:
+
+1. High: LLM narration receives and can leak semantic actor labels.
+
+Status: OPEN, leakage risk before LLM-mode Day-1 generation
+
+Details:
+data/gen/narrative_generator.py lines 185-204 serialize the LLM prompt, and
+line 192 emits `Actor type: {actor}.`. For fraud-heavy actor classes this is
+not a neutral structural cue; it is semantic label material:
+`agent_compromised`, `agent_adversarial`, and even `agent_buying` are exposed
+directly to the narrator. The scan layer then fails to catch this class of leak.
+I verified that `narrative_leakage_scan('The compromised agent completed the
+session.')` and `narrative_leakage_scan('An adversarial agent attempted
+automation.')` both return clean. This is exactly the kind of token/label
+leakage the three-mode eval regime is supposed to prevent: `<actor_*>` tags are
+stripped or opacified at eval, but leaked actor semantics in the narrative body
+would remain visible to every text baseline.
+
+Recommendation:
+Do not pass raw actor-family names to the LLM. Replace `Actor type:
+agent_compromised` style input with neutral cadence/tool-use descriptors, e.g.
+"interaction cadence: highly regular", "tool-use trace: present", "actor
+surface: agent-mediated" without compromised/adversarial/buying/finance class
+names. Also extend `narrative_leakage_scan` and the narrator prompt ban list to
+catch actor-family semantic labels that should not appear in narrative text:
+compromised, adversarial, malicious agent, buying assistant, finance assistant,
+hybrid actor if you intend those to be stripped/opacified rather than visible.
+
+2. High: PII boundary assertion misses raw synthetic IDs in normal PII fields.
+
+Status: OPEN, PII fencing guardrail gap
+
+Details:
+data/gen/pii_fencer.py lines 129-152 only reject a short list of `*_real`
+keys, email-like strings, and IPv4-like strings. It does not enforce that
+identifier fields such as `recipient`, `merchant`, `device_id`, `acct_id`,
+`email`, `phone`, `ip`, and `browser` contain the approved fence tokens. I
+verified that these raw event values pass undetected:
+    {'recipient': 'recipient_abc123'}
+    {'device_id': 'device_deadbeef'}
+    {'acct_id': 'acct_123456'}
+
+This weakens the "last-line defense" that build_dataset.journey_to_record
+claims to run before writing. If a future generator accidentally assigns a raw
+synthetic ID to a normal PII key instead of using MetadataKeeper, the build will
+not abort.
+
+Recommendation:
+Make `assert_no_raw_pii_in_event` key-aware. For PII-bearing keys, require the
+value to equal the corresponding fence token exactly:
+    recipient -> <recipient>
+    merchant -> <merchant>
+    ip -> <ip>
+    device_id -> <device_id>
+    acct_id -> <acct_id>
+    email -> <email>
+    phone -> <phone>
+    browser -> <browser>
+Keep the existing string-pattern checks as defense in depth, but do not rely on
+them for structured event fields. Add negative self-tests for each PII key.
+
+3. Medium: CostTracker can accept and cache a narrative after exceeding budget.
+
+Status: OPEN, cost guardrail gap
+
+Details:
+docs/batch-2-data-generators.md line 150 says `CostTracker.over_budget()` is
+checked before every call, and PLAN.md line 589 says the LLM narration path is
+capped. In data/gen/narrative_generator.py lines 283-287 the budget is checked
+only before the call. Lines 299-308 then charge the actual usage and return the
+body if the leakage scan is clean, even if that charge took the tracker over
+budget. A synthetic narrator with high token counts produced:
+    {'spent_usd': 4.8, 'budget_usd': 0.5, 'n_calls': 1, ...}
+and `generate_narrative` still returned normally.
+
+For the normal Haiku path, overshoot may be only one call, but the current
+implementation is not a hard cap and can be much worse when the usage estimate
+or injected narrator is wrong.
+
+Recommendation:
+After `tracker.charge(...)`, check whether `tracker.spent_usd >
+tracker.budget_usd`. If it does, fail loudly before caching or returning the
+narrative. If you want to avoid making an unrecoverable API call when budget is
+nearly exhausted, add a pre-call estimated-cost guard based on serialized prompt
+length and `max_tokens`, but the post-charge guard is the minimum fix.
+
+4. Medium: LLM retry loop is likely to repeat the same leaky output.
+
+Status: OPEN, LLM-mode robustness gap
+
+Details:
+data/gen/narrative_generator.py lines 297-311 loop over retries but call the
+same narrator with the same journey and prompt each time. The code does not vary
+the prompt with the previous leakage hits, does not pass any retry-specific
+instruction, and does not set a temperature. If the provider output is
+deterministic or sticky for this prompt, a leakage failure will repeat until the
+retry budget is exhausted. I verified this behavior with an injected leaky
+narrator: the function made three attempts and failed with the same hit class.
+That is a loud failure rather than silent leakage, which is good, but it means
+Day-1 LLM generation can drop or fail rows that a targeted retry prompt could
+recover.
+
+Recommendation:
+On retry, pass feedback into the next prompt, e.g. "The previous attempt used
+these banned phrases: X. Rewrite without them." To make this testable, change
+the injected NarratorFn surface or wrap the real API call so it can receive
+retry context. Alternatively, set an explicit temperature and document why
+retries are expected to differ. Do not leave retry success dependent on provider
+defaults.
+
+5. Medium: CODEX_PROMPT.md's py_compile verification still fails under zsh.
+
+Status: OPEN, review protocol command bug
+
+Details:
+review/CODEX_PROMPT.md replaced the doc-only unsafe py_compile command, but the
+new block still assumes shell word splitting of a newline-separated scalar:
+    PY_FILES=$(git diff --name-only "${CLOSING_COMMIT}..HEAD" | grep -E '\.py$' || true)
+    python3 -m py_compile $PY_FILES
+
+In this repo's zsh environment, unquoted scalar expansion does not split those
+newlines into separate arguments. The command failed with:
+    [Errno 2] No such file or directory: 'data/gen/agent_actor_mixer.py\ndata/gen/build_dataset.py\n...'
+
+This is not a Batch 2 model/data bug, but it directly affected this review and
+will affect future reviews that touch multiple Python files.
+
+Recommendation:
+Use an xargs or array-based command that is shell-robust:
+    git diff --name-only "${CLOSING_COMMIT}..HEAD" \
+      | grep -E '\.py$' \
+      | xargs -r python3 -m py_compile
+On macOS/BSD where `xargs -r` may not exist, use a temporary file or a Python
+wrapper to read newline-separated paths and call py_compile.
+
+6. Medium: INDEX.md still causes the official closing-commit extractor to
+diff from the wrong base.
+
+Status: OPEN, review protocol command bug
+
+Details:
+review/CODEX_PROMPT.md now extracts the last 7-hex token anywhere in
+review/INDEX.md. review/INDEX.md lines 31-33 mention `b903809` in the "Latest
+open question" prose after the table. As a result, the official extractor
+returns b903809, not the latest closing commit 940f5bc. The prompt therefore
+pulls review-protocol restructuring and older commits into the diff for this
+Batch 2 review.
+
+Recommendation:
+Restrict extraction to the table's "Closing commit" column, or keep all prose
+hashes above the table. A robust reviewer command would parse table rows only,
+for example with awk selecting rows that start with `| 00` and printing the
+last field, then extracting the hash from that field. Also update the prose
+"Latest open question" to avoid bare 7-character hashes after the table, or put
+them in followup files only.
+
+7. Informational: Batch 2 template path passes the requested scale and
+determinism checks.
+
+Status: OPEN, informational
+
+Details:
+The requested focus checks for class balance at n=5000, leakage audit, template
+determinism, verdict-footer shape, actor-mixer event order, and Anthropic
+dependency all passed. The 5000-row build produced clean/fraud/hard-negative
+percentages of 40.78% / 29.00% / 30.22%, with 0 leakage-audit failures across
+all 5000 rows. Two n=100 template builds with the same seed produced
+byte-identical data.jsonl files. The first inspected verdict footers used
+`label: fraud` / `label: legit` with the expected single space after the colon.
+
+Recommendation:
+No code change required for this finding. Keep these commands as Batch 2
+regression checks in the follow-up.
+
+Bottom line:
+Do not run Day-1 LLM-narrated generation yet. Fix the actor-label leakage path
+and strengthen the PII assertion first; the template path is healthy, but the
+LLM path can currently leak stripped actor semantics into narrative text and the
+last-line PII guard is weaker than its contract.

@@ -61,6 +61,7 @@ def verify_opaque(text: str) -> dict:
 # Stems matter: "fraud" catches fraud, fraudulent, fraudster, defraud, etc.
 # unless an explicit exception is added.
 _BANNED_STEMS = [
+    # Class-name labels (label leakage if any of these appear in narrative)
     r"\bfraud\w*",        # fraud, fraudulent, fraudster, defraud
     r"\blegit\w*",        # legit, legitimate, legitimately
     r"\bgenuine\w*",      # genuine, genuinely
@@ -76,6 +77,16 @@ _BANNED_STEMS = [
     r"\blegitimate\s+travel\b",
     r"\blegitimate\s+(large\s+)?purchase\b",
     r"\blegitimate\s+(account\s+)?recovery\b",
+    # Actor-class labels (review 004 #1 — these are stripped/opacified at
+    # eval, so the narrative body must not name them either).
+    r"\bcompromised\b",
+    r"\badversarial\b",
+    r"\bmalicious\s+(agent|bot|tool|assistant)\b",
+    r"\b(buying|shopping)\s+(assistant|agent|bot|tool)\b",
+    r"\b(finance|financial)\s+(assistant|agent|bot|tool)\b",
+    r"\bhybrid\s+(actor|agent|user|session)\b",
+    # Raw class-name tokens (should never appear in narrative body)
+    r"\bagent_(buying|finance|compromised|adversarial)\b",
 ]
 
 # Phrases that look bannable but are operational evidence (allow-listed).

@@ -29,5 +29,6 @@ the corresponding `followup.txt`, not here.
 ## Latest open question
 
 001 Finding 1 → Path A (build Day-1/2 implementation files locally) is the
-follow-on work. Batch 1 of 4 shipped at commit `b903809`. Batches 2-4 still
-to come. No reviewer action required until Batch 2 lands.
+follow-on work. Batch 1 of 4 is shipped; Batches 2-4 still to come. The
+Closing commit column above carries the per-review baseline hash; do not
+read hashes out of this prose section.

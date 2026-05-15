@@ -126,13 +126,41 @@ def fenced_event_dict(
     return ev
 
 
+# For known PII-bearing event keys, the only acceptable value is the
+# corresponding fence token. Anything else (raw synthetic ID, partial
+# fence, literal-looking PII) is a contract violation.
+# Updated per review 004 finding #2 — prior version only checked `*_real`
+# keys and rough string patterns and let raw synthetic IDs in normal PII
+# fields slip through.
+PII_FENCED_KEYS: dict[str, str] = {
+    "recipient": "<recipient>",
+    "merchant": "<merchant>",
+    "ip": "<ip>",
+    "device_id": "<device_id>",
+    "acct_id": "<acct_id>",
+    "email": "<email>",
+    "phone": "<phone>",
+    "browser": "<browser>",
+}
+
+
 def assert_no_raw_pii_in_event(ev: dict[str, Any]) -> None:
     """Defensive check: an event ready for the training corpus must not
     contain any raw identifier-looking values. Called by build_dataset.py
     on every event before writing.
+
+    Three layers:
+      1. Forbidden `*_real` keys (legacy/by-convention "raw" markers).
+      2. Key-aware PII enforcement: for keys in PII_FENCED_KEYS, the value
+         must EQUAL the fence token exactly. Catches the case where a
+         generator accidentally assigns a raw synthetic ID to a normal
+         PII field instead of using MetadataKeeper.
+      3. String-pattern spot checks across all string values (defense in
+         depth for keys we haven't enumerated above).
     """
+    # Layer 1: forbidden keys
     forbidden_keys = ("recipient_real", "merchant_real", "ip_real",
-                      "device_id_real", "email", "phone", "acct_id_real")
+                      "device_id_real", "acct_id_real")
     for k in forbidden_keys:
         if k in ev:
             raise AssertionError(
@@ -140,7 +168,19 @@ def assert_no_raw_pii_in_event(ev: dict[str, Any]) -> None:
                 f"use MetadataKeeper instead"
             )
 
-    # Spot-check string values for obvious leaks
+    # Layer 2: key-aware fence-token enforcement
+    for key, expected_token in PII_FENCED_KEYS.items():
+        if key in ev:
+            val = ev[key]
+            if val != expected_token:
+                raise AssertionError(
+                    f"event at t={ev.get('t')} has PII key {key!r}={val!r}, "
+                    f"but the only allowed value is the fence token "
+                    f"{expected_token!r}. Use MetadataKeeper for the actual "
+                    f"synthetic value."
+                )
+
+    # Layer 3: string-pattern spot checks (catch unenumerated keys)
     for key, val in ev.items():
         if not isinstance(val, str):
             continue
@@ -175,16 +215,40 @@ def _self_test() -> None:
     assert keeper.recipients[10].startswith("recipient_")
     assert_no_raw_pii_in_event(ev)
 
-    # Negative case
+    # Negative case 1: legacy email pattern check (layer 3)
     bad = dict(ev)
-    bad["email"] = "alice@evil.com"
+    bad["email"] = "alice@evil.com"  # not a fence token -> layer 2 catches first
     try:
         assert_no_raw_pii_in_event(bad)
-        raise AssertionError("expected AssertionError")
+        raise AssertionError("expected AssertionError on raw email")
     except AssertionError as e:
-        assert "raw PII" in str(e) or "email" in str(e)
+        assert "fence token" in str(e) or "email" in str(e)
 
-    print("pii_fencer self-test OK")
+    # Negative case 2: raw synthetic IDs in fenced-key positions (review 004 #2)
+    for key, raw_val in [
+        ("recipient", "recipient_abc123"),
+        ("device_id", "device_deadbeef"),
+        ("acct_id", "acct_123456"),
+        ("merchant", "merchant_9F2A"),
+    ]:
+        bad = {"t": 0, "event": "txn", "actor": "human", key: raw_val}
+        try:
+            assert_no_raw_pii_in_event(bad)
+            raise AssertionError(
+                f"layer-2 missed raw synthetic ID in {key!r}={raw_val!r}"
+            )
+        except AssertionError as e:
+            if "missed raw synthetic ID" in str(e):
+                raise  # propagate test failure
+            assert "fence token" in str(e), f"unexpected error: {e}"
+
+    # Negative case 3: valid fence tokens pass
+    good = {"t": 0, "event": "txn", "actor": "human",
+            "recipient": "<recipient>", "merchant": "<merchant>",
+            "ip": "<ip>", "device_id": "<device_id>"}
+    assert_no_raw_pii_in_event(good)
+
+    print("pii_fencer self-test OK (incl. review-004 #2 negative cases)")
 
 
 if __name__ == "__main__":

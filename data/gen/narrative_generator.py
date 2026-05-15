@@ -78,9 +78,15 @@ HARD RULES (any violation is a critical failure):
    - mule, mule chain
    - malware, remote access trojan, RAT
    - credential stuffing
-2. Describe what HAPPENED operationally — events, sequences, timing — without LABELING the session.
-3. Refer to the actor only as "the account holder", "the actor", "the session", or by tool/agent
-   if explicitly an agent-mediated session.
+   - compromised, adversarial, malicious (when describing the actor)
+   - buying assistant, shopping assistant, finance assistant, financial assistant
+   - hybrid actor, hybrid agent, hybrid user, hybrid session
+2. Describe what HAPPENED operationally — events, sequences, timing — without LABELING the
+   session or the actor's intent.
+3. Refer to the actor as one of: "the account holder", "the actor", "the session". For
+   agent-mediated sessions you may use "the agent" or "the tool-mediated agent". You must
+   NEVER use any class label (compromised, adversarial, buying assistant, finance assistant,
+   hybrid agent, etc.). Describe BEHAVIOR (cadence, tool-use trace), not CLASS.
 4. Do not invent any PII (no email addresses, IPs, phone numbers, account IDs, full names). If
    you need to refer to a recipient or device, use phrases like "a newly-added recipient" or
    "a previously-unseen device".
@@ -93,6 +99,8 @@ Examples of compliant phrasing:
    network location. No outgoing transactions completed."
 - "Routine session. A single login was followed by typical low-amount purchases to
    known merchants."
+- "The session showed a highly regular cadence with tool-mediated steps."   (agent case;
+   note: no class label used)
 """
 
 
@@ -182,14 +190,30 @@ def _cache_put(cache_dir: Path, key: str, body: str) -> None:
 # Prompt construction
 # ---------------------------------------------------------------------------
 
+# Per-actor neutral cadence descriptors. The LLM sees BEHAVIOR (cadence,
+# tool-use, jitter), never the class name. Review 004 finding #1.
+_ACTOR_CADENCE_DESCRIPTORS: dict[str, str] = {
+    "human":             "human-paced; irregular inter-event intervals",
+    "agent_buying":      "programmatic; tool-mediated steps; moderately fast cadence",
+    "agent_finance":     "programmatic; tool-mediated steps; regular cadence",
+    "agent_compromised": "very fast; highly regular cadence; tool-mediated steps",
+    "agent_adversarial": "fast; regular cadence with mimicry jitter; tool-mediated steps",
+    "hybrid":            "mixed human-paced and tool-mediated steps",
+}
+
+
 def _serialize_events_for_prompt(journey: Journey) -> str:
     """Compact textual rendering of the structured stream, fed into the
     narrator's user message. Keep this stable — cache keys depend on the
     event content.
+
+    Actor descriptor is NEUTRAL (behavioral, not class-named) per review
+    004 finding #1.
     """
     lines = []
     actor = journey.actor_family
-    lines.append(f"Actor type: {actor}.")
+    cadence = _ACTOR_CADENCE_DESCRIPTORS.get(actor, "unknown cadence")
+    lines.append(f"Interaction cadence: {cadence}.")
     lines.append(f"Number of events: {len(journey.events)}.")
     lines.append("Event sequence:")
     for ev in journey.events:
@@ -208,9 +232,17 @@ def _serialize_events_for_prompt(journey: Journey) -> str:
 # The LLM call
 # ---------------------------------------------------------------------------
 
-# Type alias for callable injection (used in tests / cheap-template fallback)
-NarratorFn = Callable[[Journey], tuple[str, int, int]]
-"""Function: journey -> (narrative_body, input_tokens, output_tokens)."""
+# Type alias for callable injection (used in tests / cheap-template fallback).
+# Review 004 finding #4: retries now pass `attempt` index and `prev_hits` so
+# the narrator can vary its prompt + temperature to escape leaky-output
+# fixed points.
+NarratorFn = Callable[[Journey, int, list], tuple[str, int, int]]
+"""Function: (journey, attempt_num, prev_hits) -> (narrative_body, input_tokens, output_tokens).
+
+attempt_num is 0 for the initial call, 1 for first retry, etc.
+prev_hits is the list of (phrase, span) tuples from the previous attempt's
+leakage scan; empty list on the initial call.
+"""
 
 
 def _real_anthropic_call(model: str, max_tokens: int, timeout: int) -> NarratorFn:
@@ -234,12 +266,32 @@ def _real_anthropic_call(model: str, max_tokens: int, timeout: int) -> NarratorF
 
     client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
 
-    def call(journey: Journey) -> tuple[str, int, int]:
+    def call(journey: Journey, attempt: int, prev_hits: list) -> tuple[str, int, int]:
         user_msg = _serialize_events_for_prompt(journey)
+
+        # On retry: append targeted feedback + raise temperature for variation.
+        # Review 004 finding #4: without this the retry will likely
+        # reproduce the same leaky output.
+        system = SYSTEM_PROMPT
+        if attempt > 0 and prev_hits:
+            banned_phrases = sorted({h[0] for h in prev_hits})
+            system = (
+                f"{SYSTEM_PROMPT}\n\n"
+                f"RETRY FEEDBACK (attempt {attempt}): a previous attempt at "
+                f"this narrative was REJECTED because it used these banned "
+                f"phrases or stems: {banned_phrases}. Rewrite the narrative "
+                f"without using any of them or their variants. Stay strictly "
+                f"within the HARD RULES above."
+            )
+        # Initial attempt uses low temperature for stable formatting; retries
+        # use higher temperature to escape stuck outputs.
+        temperature = 0.3 if attempt == 0 else 0.7
+
         resp = client.messages.create(
             model=model,
             max_tokens=max_tokens,
-            system=SYSTEM_PROMPT,
+            temperature=temperature,
+            system=system,
             messages=[{"role": "user", "content": user_msg}],
         )
         body = resp.content[0].text if resp.content else ""
@@ -295,10 +347,22 @@ def generate_narrative(
     call = narrator_fn or _real_anthropic_call(model, max_tokens, timeout)
 
     last_body = ""
-    last_hits: list = []
+    prev_hits: list = []
     for attempt in range(max_retries + 1):
-        body, in_toks, out_toks = call(journey)
+        body, in_toks, out_toks = call(journey, attempt, prev_hits)
         tracker.charge(model, in_toks, out_toks)
+
+        # Hard budget cap, post-charge (review 004 finding #3).
+        # The current call's cost is sunk, but we reject the narrative
+        # so it cannot be cached or consumed by the build.
+        if tracker.spent_usd > tracker.budget_usd:
+            raise RuntimeError(
+                f"narrator budget exceeded by this call: "
+                f"${tracker.spent_usd:.4f} > ${tracker.budget_usd:.2f}. "
+                f"Aborting before caching the narrative. Sunk cost from "
+                f"this overshoot is the in-flight call only."
+            )
+
         # Post-gen scrub: fence any literal-looking PII the narrator produced.
         body, _hits = fence(body)
         # Post-gen scan: did the narrator leak class names?
@@ -307,13 +371,14 @@ def generate_narrative(
             _cache_put(cache_dir, key, body)
             return body
         last_body = body
-        last_hits = scan["hits"]
-        # Loop continues; next call will regenerate.
+        prev_hits = scan["hits"]
+        # Loop continues; next call will regenerate with feedback (real
+        # narrator) or stable output (stub narrator).
 
     raise RuntimeError(
         f"narrative-leakage scan failed after {max_retries + 1} attempts "
         f"for journey seed={journey.seed} family={journey.journey_family}. "
-        f"Hits: {last_hits}. Last body: {last_body!r}"
+        f"Hits: {prev_hits}. Last body: {last_body!r}"
     )
 
 
@@ -323,11 +388,12 @@ def generate_narrative(
 
 def _stub_narrator() -> NarratorFn:
     """A narrator that returns deterministic compliant text without calling
-    the API. Useful for self-test and offline CI.
+    the API. Useful for self-test and offline CI. Accepts (and ignores)
+    the retry context — review 004 finding #4 signature change.
     """
     from data.gen.cheap_template_generator import generate_narrative as cheap
 
-    def call(journey: Journey) -> tuple[str, int, int]:
+    def call(journey: Journey, attempt: int, prev_hits: list) -> tuple[str, int, int]:
         body = cheap(journey)
         # Pretend it cost 300 input / 250 output tokens.
         return body, 300, 250

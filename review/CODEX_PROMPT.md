@@ -57,10 +57,16 @@ mkdir -p review/<NNN-slug>
 ## Step 3 — Determine what has changed since the last closed review
 
 The `Closing commit` column in `review/INDEX.md` is always exactly one
-short git hash. Extract the last such hash mechanically:
+short git hash. Extract the last hash from the **table** only — do NOT
+grep the whole file (prose elsewhere in INDEX.md may also contain
+hashes and would mis-target the diff base):
 
 ```bash
-CLOSING_COMMIT=$(grep -Eo '\b[0-9a-f]{7}\b' review/INDEX.md | tail -1)
+# Parse rows shaped like "| NNN | slug | date | n | status | hash |"
+# and emit just the hash from the Closing commit column.
+CLOSING_COMMIT=$(awk -F'|' '/^\| *0[0-9]{2,} *\|/ {
+    gsub(/[ \t]/, "", $7); print $7
+}' review/INDEX.md | tail -1)
 echo "diffing against: ${CLOSING_COMMIT}"
 
 git log --oneline "${CLOSING_COMMIT}..HEAD"
@@ -128,11 +134,13 @@ assert narrative_leakage_scan('Device change followed by password reset')['clean
 print('layer A smoke OK')
 PY
 
-# Syntax-check Python files in the diff (empty-safe — skips cleanly on
-# doc-only diffs):
+# Syntax-check Python files in the diff (empty-safe AND shell-portable).
+# Uses xargs so the newline-separated path list is split into separate
+# args reliably under both bash and zsh (zsh does not word-split scalar
+# expansion by default).
 PY_FILES=$(git diff --name-only "${CLOSING_COMMIT}..HEAD" | grep -E '\.py$' || true)
 if [ -n "$PY_FILES" ]; then
-    python3 -m py_compile $PY_FILES
+    echo "$PY_FILES" | xargs python3 -m py_compile
 else
     echo "no Python files changed; py_compile skipped"
 fi

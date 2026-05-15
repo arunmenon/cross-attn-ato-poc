@@ -1,0 +1,315 @@
+Review comments 004 — follow-up
+Date: 2026-05-15
+Subject: Disposition of findings in 004-path-a-batch-2/comments.txt
+Author: scaffold maintainer
+
+Original review file:
+    review/004-path-a-batch-2/comments.txt
+
+Repo state at follow-up:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+Baseline commit:
+    19b9ecd (Path A Batch 2 — code under review)
+
+Summary:
+All six fixable findings (1-6) are FIXED in this pass; finding 7 was
+informational and required no action. Two of the six (1 and 2) are
+material leakage / hygiene gaps that needed correction before any Day-1
+LLM-narrated generation runs. Three (3, 4, 6) tighten guardrails (budget
+hard-cap, retry escape from stuck outputs, single-source-of-truth for the
+review diff base). One (5) is a portability bug in the review protocol
+itself. Self-tests strengthened so this class of regression is caught
+locally next time. Two-commit INDEX backfill follows for the closing-
+commit hash.
+
+Disposition per finding:
+
+1. High: LLM narration receives and can leak semantic actor labels.
+
+Status: FIXED.
+
+Action:
+
+a. data/gen/narrative_generator.py: replaced the prompt's "Actor type:
+   {actor}." line with a neutral behavioral descriptor. New constant
+   `_ACTOR_CADENCE_DESCRIPTORS` maps each of the 6 actor families to a
+   class-name-free cadence string:
+
+       human             -> "human-paced; irregular inter-event intervals"
+       agent_buying      -> "programmatic; tool-mediated steps; moderately fast cadence"
+       agent_finance     -> "programmatic; tool-mediated steps; regular cadence"
+       agent_compromised -> "very fast; highly regular cadence; tool-mediated steps"
+       agent_adversarial -> "fast; regular cadence with mimicry jitter; tool-mediated steps"
+       hybrid            -> "mixed human-paced and tool-mediated steps"
+
+   The narrator now sees "Interaction cadence: <descriptor>." instead of
+   the raw class name. The cadence words alone do not encode
+   class identity in a way the model can reliably decode at eval time.
+
+b. data/gen/narrative_generator.py SYSTEM_PROMPT rule 3 rewritten:
+
+       Refer to the actor as one of: "the account holder", "the actor",
+       "the session". For agent-mediated sessions you may use
+       "the agent" or "the tool-mediated agent". You must NEVER use any
+       class label (compromised, adversarial, buying assistant, finance
+       assistant, hybrid agent, etc.). Describe BEHAVIOR (cadence,
+       tool-use trace), not CLASS.
+
+   Rule 1's banned-stem list was extended in the prompt with the
+   newly-banned actor-class words/phrases.
+
+c. eval/leakage_checks.py `_BANNED_STEMS` extended:
+
+       \bcompromised\b
+       \badversarial\b
+       \bmalicious\s+(agent|bot|tool|assistant)\b
+       \b(buying|shopping)\s+(assistant|agent|bot|tool)\b
+       \b(finance|financial)\s+(assistant|agent|bot|tool)\b
+       \bhybrid\s+(actor|agent|user|session)\b
+       \bagent_(buying|finance|compromised|adversarial)\b
+
+d. data/gen/cheap_template_generator.py: the agent-cadence notes for
+   `agent_buying` and `agent_finance` previously used the phrases
+   "shopping assistant" and "financial assistant" — both now banned.
+   Rewrote them to use neutral cadence descriptors. Verified all 54
+   (9 family × 6 actor) combinations leakage-clean.
+
+e. data/gen/cheap_template_generator.py self-test: now exhaustive (54
+   combinations) so this class of regression is caught locally.
+
+Verify (the original reviewer reproducers, after fix):
+
+    # Prompt header no longer leaks class name:
+    python3 -c "
+    import random
+    from data.gen.journey_templates import generate
+    from data.gen.agent_actor_mixer import mix
+    from data.gen.narrative_generator import _serialize_events_for_prompt
+    for actor in ['agent_compromised', 'agent_adversarial', 'agent_buying']:
+        j = generate('sim_swap', seed=7, actor=actor)
+        j = mix(j, rng=random.Random(8))
+        print(actor, '->', _serialize_events_for_prompt(j).splitlines()[0])
+    "
+    # Expected: all three lines start with 'Interaction cadence:' (NOT 'Actor type:').
+
+    # Leakage scan catches the previously-allowed leaky narratives:
+    python3 -c "
+    from eval.leakage_checks import narrative_leakage_scan
+    for s in ['The compromised agent completed the session.',
+             'An adversarial agent attempted automation.',
+             'The buying assistant completed checkout.',
+             'A financial assistant ran the workflow.']:
+        print(narrative_leakage_scan(s)['clean'], s)
+    "
+    # Expected: all four print False (clean=False = banned hit found).
+
+    # Exhaustive template-leakage check:
+    python3 -m data.gen.cheap_template_generator --self-test
+    # Expected: "cheap_template_generator self-test OK (54 family/actor combos, no leakage)"
+
+2. High: PII boundary assertion misses raw synthetic IDs in normal PII fields.
+
+Status: FIXED.
+
+Action: data/gen/pii_fencer.py `assert_no_raw_pii_in_event` rewritten as
+three layers (was two):
+
+  Layer 1 — forbidden keys check (kept; pruned to `*_real` keys only,
+            since email/phone are now key-aware enforced in layer 2).
+  Layer 2 — NEW: key-aware fence-token enforcement. For each key in
+            new dict `PII_FENCED_KEYS`, the value MUST equal the
+            corresponding fence token exactly:
+                recipient -> <recipient>
+                merchant  -> <merchant>
+                ip        -> <ip>
+                device_id -> <device_id>
+                acct_id   -> <acct_id>
+                email     -> <email>
+                phone     -> <phone>
+                browser   -> <browser>
+  Layer 3 — string-pattern spot checks (kept as defense-in-depth for
+            unenumerated keys).
+
+Negative-case self-tests added: each of the four reproducers the
+reviewer ran now raises AssertionError with a clear message.
+
+Verify:
+
+    # Reviewer's reproducer, now caught:
+    python3 -c "
+    from data.gen.pii_fencer import assert_no_raw_pii_in_event
+    for ev in [
+        {'t': 0, 'event': 'txn', 'actor': 'human', 'recipient': 'recipient_abc123'},
+        {'t': 0, 'event': 'login', 'actor': 'human', 'device_id': 'device_deadbeef'},
+        {'t': 0, 'event': 'login', 'actor': 'human', 'acct_id': 'acct_123456'},
+    ]:
+        try:
+            assert_no_raw_pii_in_event(ev)
+            print('STILL_UNDETECTED', ev)
+        except AssertionError as e:
+            print('CAUGHT', list(ev)[-1], '->', str(e)[:70])
+    "
+    # Expected: three lines starting with CAUGHT.
+
+3. Medium: CostTracker can accept and cache a narrative after exceeding budget.
+
+Status: FIXED.
+
+Action: data/gen/narrative_generator.py `generate_narrative` now has a
+post-`tracker.charge(...)` budget check inside the retry loop. If the
+charge took spent_usd over budget_usd, it raises RuntimeError BEFORE
+the fence/scan/cache_put steps. The in-flight call's cost is sunk
+(unavoidable: the API call already happened), but the narrative is
+rejected and not cached.
+
+The minimum-fix wording from the reviewer's recommendation is the
+implementation; we did not add a pre-call estimated-cost guard, which
+is documented as a known limitation if precision is needed later.
+
+Verify (the reviewer's reproducer):
+
+    python3 -c "
+    from pathlib import Path
+    import tempfile
+    from data.gen.journey_templates import generate
+    from data.gen.narrative_generator import CostTracker, generate_narrative
+    def costly(j, attempt, prev_hits):
+        return ('Operational activity described without banned terms.', 1000000, 1000000)
+    j = generate('clean', seed=1, actor='human')
+    tracker = CostTracker(budget_usd=0.5)
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            generate_narrative(j, tracker=tracker, narrator_fn=costly,
+                               max_retries=0, cache_dir=Path(td))
+            print('UNEXPECTED: no error')
+        except RuntimeError as e:
+            print('CAUGHT:', e)
+    "
+    # Expected: line starting 'CAUGHT: narrator budget exceeded by this
+    # call: $4.8000 > $0.50.'
+
+4. Medium: LLM retry loop is likely to repeat the same leaky output.
+
+Status: FIXED.
+
+Action:
+
+a. data/gen/narrative_generator.py: `NarratorFn` signature changed to:
+
+       Callable[[Journey, int, list], tuple[str, int, int]]
+
+   where the new args are `attempt_num` (0-indexed) and `prev_hits` (the
+   `narrative_leakage_scan` hits from the previous attempt; empty on
+   initial call). This makes retry context explicit at the type level.
+
+b. `_real_anthropic_call` now uses the retry context:
+   - On `attempt == 0`: temperature=0.3, vanilla SYSTEM_PROMPT.
+   - On `attempt > 0`: temperature=0.7 AND a retry-feedback addendum
+     appended to the system prompt naming the banned phrases that were
+     detected last time:
+
+         RETRY FEEDBACK (attempt N): a previous attempt at this narrative
+         was REJECTED because it used these banned phrases or stems:
+         {phrases}. Rewrite the narrative without using any of them or
+         their variants. Stay strictly within the HARD RULES above.
+
+   Both temperature and prompt variation are needed: temperature alone
+   sometimes still hits the same regional attractor; feedback alone with
+   temperature=0 risks repeated stuck outputs.
+
+c. `_stub_narrator` updated to accept (and ignore) the new args so
+   self-tests still pass.
+
+Verify (signature only — full LLM verify requires API key + a leaky
+journey, which is exercised on the pod):
+
+    python3 -c "
+    from data.gen.narrative_generator import _stub_narrator, _real_anthropic_call
+    stub = _stub_narrator()
+    out = stub(None, 1, [('compromised', (0, 11))])  # accepts new signature
+    print('stub OK; returns', type(out).__name__, 'of len', len(out))
+    "
+
+Known follow-on: the stub narrator does not exercise retry-feedback
+plumbing because cheap templates never leak. To exercise the real retry
+path locally before going to the pod, a deliberately-leaky stub could be
+added to a future test. Not blocking.
+
+5. Medium: CODEX_PROMPT.md's py_compile verification still fails under zsh.
+
+Status: FIXED.
+
+Action: review/CODEX_PROMPT.md Step 5 py_compile block now uses
+`echo "$PY_FILES" | xargs python3 -m py_compile`. xargs does its own
+word-splitting on whitespace including newlines, which works under both
+bash and zsh:
+
+    PY_FILES=$(git diff --name-only "${CLOSING_COMMIT}..HEAD" | grep -E '\.py$' || true)
+    if [ -n "$PY_FILES" ]; then
+        echo "$PY_FILES" | xargs python3 -m py_compile
+    else
+        echo "no Python files changed; py_compile skipped"
+    fi
+
+Verify (in zsh, this batch's diff):
+
+    CLOSING_COMMIT=940f5bc
+    PY_FILES=$(git diff --name-only "${CLOSING_COMMIT}..HEAD" | grep -E '\.py$' || true)
+    echo "$PY_FILES" | xargs python3 -m py_compile && echo "OK"
+    # Expected: "OK"
+
+6. Medium: INDEX.md still causes the official closing-commit extractor to
+   diff from the wrong base.
+
+Status: FIXED.
+
+Action (belt and braces):
+
+a. review/CODEX_PROMPT.md Step 3: extraction is now awk-based and only
+   parses TABLE rows shaped like `| 0NN | ...`. Prose hashes elsewhere
+   in INDEX.md are ignored:
+
+       CLOSING_COMMIT=$(awk -F'|' '/^\| *0[0-9]{2,} *\|/ {
+           gsub(/[ \t]/, "", $7); print $7
+       }' review/INDEX.md | tail -1)
+
+b. review/INDEX.md: the bare hash that previously appeared in the
+   "Latest open question" prose section has been removed. The note now
+   says "Batch 1 of 4 is shipped" without naming a hash, and explicitly
+   instructs readers not to extract hashes from this prose section.
+
+Verify (against THIS commit's INDEX.md, which is going to add the 004
+row with the closing hash backfilled in the second commit):
+
+    awk -F'|' '/^\| *0[0-9]{2,} *\|/ { gsub(/[ \t]/, "", $7); print $7 }' \
+        review/INDEX.md | tail -1
+    # Expected (post-backfill): the hash of THIS commit's successor that
+    # records the 004 closure (e.g., 87070cf for the analogous review-003
+    # case). Pre-backfill, the placeholder <this-commit> may appear.
+
+7. Informational: Batch 2 template path passes the requested scale and
+   determinism checks.
+
+Status: ACKNOWLEDGED.
+
+Action: none required. The reviewer's verification commands have been
+preserved in the followup and in PLAN.md's smoke section; rerunning them
+after each Path A batch is the regression check going forward.
+
+Bottom line:
+LLM-mode Day-1 generation is now safe to run from a guardrail standpoint
+(actor-label leakage closed, PII boundary tightened, budget hard-capped,
+retry can escape stuck outputs). One known-limitation residual: pre-call
+estimated-cost guard not added (post-charge guard is the floor). The
+review protocol itself is now zsh-portable and table-only for hash
+extraction.
+
+Notes on the two-commit pattern (review 004 closure):
+
+This followup is committed alongside the code fixes (commit A). Then
+INDEX.md's 004 row is backfilled with commit A's hash in a small
+follow-up (commit B). Same pattern as review 003. The awk-based
+extraction in CODEX_PROMPT.md is intentionally tolerant of one stale
+review row (the latest table entry may briefly contain `<this-commit>`
+between commit A and commit B, which awk simply prints as the hash —
+that's a known transient state, not a protocol gap).

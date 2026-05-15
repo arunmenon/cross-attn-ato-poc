@@ -122,22 +122,23 @@ def generate_narrative(journey: Journey, *, rng: random.Random | None = None) ->
     variants = _TEMPLATES[family]
     body = rng.choice(variants)
 
-    # Append a brief actor-cadence note for agent journeys (still no class
-    # names). Helps the model use actor signature without hand-holding.
+    # Append a brief actor-cadence note for agent journeys. NEUTRAL
+    # phrasings only — no class names like "shopping assistant",
+    # "financial assistant", "compromised", "adversarial", "hybrid agent"
+    # (all banned by eval/leakage_checks per review 004 finding #1).
+    # Describe BEHAVIOR (cadence, tool-use, jitter), not CLASS.
     if journey.actor_family != "human":
         actor_phrases = {
-            "agent_buying": " The session's interaction cadence is consistent "
-                            "with a programmatic shopping assistant.",
-            "agent_finance": " The session shows a regular, tool-mediated "
-                             "interaction cadence consistent with an automated "
-                             "financial assistant.",
+            "agent_buying":      " The session's interaction cadence is "
+                                 "moderately fast and contains tool-mediated steps.",
+            "agent_finance":     " The session shows a regular, tool-mediated "
+                                 "interaction cadence.",
             "agent_compromised": " The session's pacing is extremely regular "
                                  "and contains tool-mediated steps.",
             "agent_adversarial": " The session shows a regular cadence with "
-                                 "occasional jitter, suggestive of automation "
-                                 "attempting to mimic human pacing.",
-            "hybrid": " The session shows a mix of human-paced and "
-                      "tool-mediated steps.",
+                                 "occasional jitter, alongside tool-mediated steps.",
+            "hybrid":            " The session shows a mix of human-paced and "
+                                 "tool-mediated steps.",
         }
         body += actor_phrases.get(journey.actor_family, "")
 
@@ -145,23 +146,28 @@ def generate_narrative(journey: Journey, *, rng: random.Random | None = None) ->
 
 
 def _self_test() -> None:
+    """Exhaustive — every combination of (journey_family × actor_family)
+    must pass the leakage scan. Regression-protection against the
+    review-004 finding #1 class of issues (template strings that leaked
+    new banned terms only on agent paths).
+    """
     from data.gen.journey_templates import generate as gen_journey
-    from data.gen.agent_actor_mixer import mix
     from eval.leakage_checks import narrative_leakage_scan
 
+    ACTORS = ["human", "agent_buying", "agent_finance",
+              "agent_compromised", "agent_adversarial", "hybrid"]
+    leaks: list = []
     for family in _TEMPLATES:
-        j = gen_journey(family, seed=7, actor="human")
-        text = generate_narrative(j)
-        scan = narrative_leakage_scan(text)
-        assert scan["clean"], f"{family} template leaks: {scan['hits']}"
-
-    # Agent-actor variant
-    j = gen_journey("sim_swap", seed=11, actor="agent_compromised")
-    j = mix(j, rng=random.Random(11))
-    text = generate_narrative(j)
-    assert "regular" in text or "tool" in text, "agent cadence note missing"
-    scan = narrative_leakage_scan(text)
-    assert scan["clean"], f"agent variant leaks: {scan['hits']}"
+        for actor in ACTORS:
+            j = gen_journey(family, seed=7, actor=actor)
+            text = generate_narrative(j)
+            scan = narrative_leakage_scan(text)
+            if not scan["clean"]:
+                leaks.append((family, actor, scan["hits"]))
+    if leaks:
+        raise AssertionError(
+            f"{len(leaks)} family/actor combinations leaked: {leaks[:3]}"
+        )
 
     # Determinism
     j2 = gen_journey("clean", seed=99, actor="human")
@@ -169,7 +175,9 @@ def _self_test() -> None:
     b = generate_narrative(j2)
     assert a == b, "non-deterministic template"
 
-    print(f"cheap_template_generator self-test OK ({len(_TEMPLATES)} families, no leakage)")
+    n_combos = len(_TEMPLATES) * len(ACTORS)
+    print(f"cheap_template_generator self-test OK "
+          f"({n_combos} family/actor combos, no leakage)")
 
 
 def main() -> int:
