@@ -56,21 +56,24 @@ mkdir -p review/<NNN-slug>
 
 ## Step 3 — Determine what has changed since the last closed review
 
-```bash
-# Find the most recent closing commit from INDEX.md:
-grep -E '\| [0-9a-f]{7}' review/INDEX.md | tail -1
+The `Closing commit` column in `review/INDEX.md` is always exactly one
+short git hash. Extract the last such hash mechanically:
 
-# Diff the repo against that commit:
-git log --oneline <closing-commit>..HEAD
-git diff --stat <closing-commit>..HEAD
+```bash
+CLOSING_COMMIT=$(grep -Eo '\b[0-9a-f]{7}\b' review/INDEX.md | tail -1)
+echo "diffing against: ${CLOSING_COMMIT}"
+
+git log --oneline "${CLOSING_COMMIT}..HEAD"
+git diff --stat "${CLOSING_COMMIT}..HEAD"
+git diff --name-only "${CLOSING_COMMIT}..HEAD"
 ```
 
-Your review must focus on what has changed since the last closed
-review. You may also flag systemic issues in the broader scaffold if
-they are relevant, but the new diff is the primary surface.
+Your review must focus on what has changed since that commit. You may
+also flag systemic issues in the broader scaffold if they are relevant,
+but the new diff is the primary surface.
 
-If `review/INDEX.md` is empty or shows no closing commit, review the
-full scaffold against `PLAN.md`.
+If `review/INDEX.md` is empty or has no hash, review the full scaffold
+against `PLAN.md`.
 
 ## Step 4 — Required reading before writing
 
@@ -94,10 +97,19 @@ Where possible, run commands and capture verbatim output to support
 your findings. Examples of useful verifications:
 
 ```bash
-# Plan copies are consistent (md5 must match across all three):
-md5 -q cross_attn_ato_poc/PLAN.md \
-       .claude/tasks/cross-attn-ato-poc/PLAN.md \
-       ~/.claude/plans/i-want-to-do-compressed-bee.md 2>/dev/null
+# Plan copies are consistent (md5 must match across all three).
+# Runs from the repo root (cross_attn_ato_poc/). The ../.claude path is the
+# project-tree mirror; on a pod that clones cross_attn_ato_poc/ directly,
+# that path will not exist — in that case only check the in-repo PLAN.md
+# and skip the others.
+if [ -d ../.claude/tasks/cross-attn-ato-poc ]; then
+    md5 -q PLAN.md \
+           ../.claude/tasks/cross-attn-ato-poc/PLAN.md \
+           ~/.claude/plans/i-want-to-do-compressed-bee.md
+else
+    echo "running outside the project tree; checking in-repo PLAN.md only"
+    md5 -q PLAN.md
+fi
 
 # Layer A scaffold smoke (no GPU; PLAN.md section "Smoke tests — three layers"):
 python3 - <<'PY'
@@ -116,8 +128,14 @@ assert narrative_leakage_scan('Device change followed by password reset')['clean
 print('layer A smoke OK')
 PY
 
-# Syntax-check Python files you touched on:
-python3 -m py_compile $(git diff --name-only <closing-commit>..HEAD | grep -E '\.py$')
+# Syntax-check Python files in the diff (empty-safe — skips cleanly on
+# doc-only diffs):
+PY_FILES=$(git diff --name-only "${CLOSING_COMMIT}..HEAD" | grep -E '\.py$' || true)
+if [ -n "$PY_FILES" ]; then
+    python3 -m py_compile $PY_FILES
+else
+    echo "no Python files changed; py_compile skipped"
+fi
 
 # Custom-token registry integrity (Batch 1 onward):
 python3 -m src.tokenizer.custom_tokens --check
@@ -177,15 +195,22 @@ Tone:
 
 ## Step 7 — Hard rules (these are not negotiable)
 
-- Do NOT edit any file other than `review/<NNN-slug>/comments.txt`.
-- Do NOT edit prior `comments.txt` or `followup.txt` files.
-- Do NOT edit `review/INDEX.md`. The Maintainer owns that.
-- Do NOT run `git add`, `git commit`, `git push`, or any other write
-  operation against the git tree. The Maintainer's follow-up commit
-  picks up your new file naturally.
-- Do NOT propose fixes by editing code. Your output is *findings*. The
+The only allowed worktree writes during a review are:
+
+- `mkdir -p review/<NNN-slug>/` (the new review folder).
+- Writing `review/<NNN-slug>/comments.txt` (your one output file).
+
+Beyond those two, do NOT:
+
+- Edit any other file (no edits to other code, configs, docs).
+- Edit prior `comments.txt` or `followup.txt` files.
+- Edit `review/INDEX.md` — the Maintainer owns it.
+- Run `git add`, `git commit`, `git push`, `git rm`, `git mv`, or any
+  other git mutation. The Maintainer's follow-up commit picks up your
+  new file naturally.
+- Propose fixes by editing code. Your output is *findings*. The
   Maintainer applies the fixes.
-- Do NOT skip the schema. Header + numbered findings + bottom-line.
+- Skip the schema. Header + numbered findings + bottom-line.
 
 ## Step 8 — Stop
 

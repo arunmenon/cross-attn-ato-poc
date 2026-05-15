@@ -1,0 +1,265 @@
+Review comments 003
+Date: 2026-05-15
+Subject: Review of recent review-protocol changes since b903809
+
+Reviewed file(s):
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/CODEX_PROMPT.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/README.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/INDEX.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/PLAN.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/002-followup-on-001/followup.txt
+
+Repo root used for comparison:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+Summary:
+The new review protocol is a good direction: one reusable prompt, one numbered
+review folder, and clear Reviewer/Maintainer ownership. The changed surface is
+mostly review infrastructure, not the core ATO code. Three protocol details need
+fixing before the next review: closing-commit extraction is ambiguous, the md5
+verification command is wrong from repo root, and the py_compile command fails
+on doc-only diffs.
+
+Verification run:
+
+1. Diff surface since latest closing commit.
+
+Command:
+    git log --oneline b903809..HEAD
+    git diff --stat b903809..HEAD
+    git diff --name-only b903809..HEAD
+
+Actual output:
+    22918ee Save reusable Codex review prompt to review/CODEX_PROMPT.md
+    3cc9d05 Restructure review/ folder: per-review subdirs + INDEX + README
+
+    .../comments.txt}                                  |   0
+    .../followup.txt}                                  |   0
+    .../comments.txt}                                  |   0
+    .../followup.txt}                                  |   0
+    review/CODEX_PROMPT.md                             | 219 ++++++++++++++++++++
+    review/INDEX.md                                    |  28 +++
+    review/README.md                                   | 225 +++++++++++++++++++++
+     7 files changed, 472 insertions(+)
+
+    review/001-plan-and-scaffold/comments.txt
+    review/001-plan-and-scaffold/followup.txt
+    review/002-followup-on-001/comments.txt
+    review/002-followup-on-001/followup.txt
+    review/CODEX_PROMPT.md
+    review/INDEX.md
+    review/README.md
+
+Disposition:
+    PASS. The recent changes are the review-protocol restructuring and prompt.
+
+2. CODEX_PROMPT.md plan-copy md5 command as written.
+
+Command:
+    md5 -q cross_attn_ato_poc/PLAN.md .claude/tasks/cross-attn-ato-poc/PLAN.md ~/.claude/plans/i-want-to-do-compressed-bee.md 2>/dev/null
+
+Actual output:
+    64515f2986ac4ea153e0b7b670d57c3e
+
+Disposition:
+    FAIL. The command exits 1 from repo root and prints only one hash, because
+    the first two relative paths are wrong from cross_attn_ato_poc/.
+
+3. Corrected plan-copy md5 command.
+
+Command:
+    md5 -q PLAN.md ../.claude/tasks/cross-attn-ato-poc/PLAN.md ~/.claude/plans/i-want-to-do-compressed-bee.md
+
+Actual output:
+    64515f2986ac4ea153e0b7b670d57c3e
+    64515f2986ac4ea153e0b7b670d57c3e
+    64515f2986ac4ea153e0b7b670d57c3e
+
+Disposition:
+    PASS. The three plan copies are still consistent; the prompt command is
+    the broken part.
+
+4. Layer A scaffold smoke from CODEX_PROMPT.md.
+
+Command:
+    python3 - <<'PY'
+    import sys, random
+    sys.path.insert(0, '.')
+    from eval import eval_modes
+    from eval.leakage_checks import narrative_leakage_scan
+    text = '<journey_sim_swap><actor_human><event_login> <amount_bucket=high></journey_sim_swap>'
+    assert 'journey_sim_swap' not in eval_modes.apply(text, 'stripped')[0]
+    assert '<amount_bucket=high>' in eval_modes.apply(text, 'stripped')[0]
+    a = eval_modes.apply(text, 'opaque', rng=random.Random(0))[0]
+    b = eval_modes.apply(text, 'opaque', rng=random.Random(1))[0]
+    assert a != b
+    assert not narrative_leakage_scan('This is fraudulent SIM-swap')['clean']
+    assert narrative_leakage_scan('Device change followed by password reset')['clean']
+    print('layer A smoke OK')
+    PY
+
+Actual output:
+    layer A smoke OK
+
+Disposition:
+    PASS.
+
+5. CODEX_PROMPT.md py_compile command on this doc-only diff.
+
+Command:
+    python3 -m py_compile $(git diff --name-only b903809..HEAD | grep -E '\.py$')
+
+Actual output:
+    usage: python3.14 -m py_compile [-h] [-q] filenames [filenames ...]
+    python3.14 -m py_compile: error: the following arguments are required: filenames
+
+Disposition:
+    FAIL. The changed diff has no Python files, so the command expands to
+    python3 -m py_compile with no filenames.
+
+6. Batch-1 tokenizer/fencing smoke checks.
+
+Command:
+    python3 -m src.tokenizer.custom_tokens --check
+    python3 -m data.gen.feature_bucketer --self-test
+    python3 -m src.tokenizer.fencer
+    python3 -m data.gen.pii_fencer
+
+Actual output:
+    custom-token registry OK:
+      n_total                        = 65
+      n_journey                      = 18
+      n_actor                        = 6
+      n_event                        = 7
+      n_pii                          = 8
+      n_bucket                       = 26
+      n_journey_families             = 9
+      n_actor_families               = 6
+      n_bucket_families              = 9
+      n_hard_negative_families       = 3
+      n_fraud_families               = 5
+      n_agent_actor_families         = 5
+    feature_bucketer self-test OK
+    fencer self-test OK: {'<email>': 1, '<device_id>': 1, '<ip>': 1, '<amount>': 1, '<phone>': 1, '<browser>': 1, '<acct_id>': 1}
+    pii_fencer self-test OK
+
+Disposition:
+    PASS.
+
+7. Launcher update_sweep_state smoke.
+
+Command:
+    python3 -c "import importlib.util, sys; sys.path.insert(0, '.'); spec = importlib.util.spec_from_file_location('rne', 'scripts/run_next_experiment.py'); rne = importlib.util.module_from_spec(spec); spec.loader.exec_module(rne); assert hasattr(rne, 'update_sweep_state'); rne.update_sweep_state(); print(open(rne.SWEEP_STATE).read())"
+
+Actual output:
+    schema_version: 1
+    n_completed: 0
+    n_failed: 0
+    n_xattn_runs: 0
+    gpu_hours_used: 0.0
+    current_best: null
+    top_3: []
+    halted: false
+    halt_reason: null
+    last_updated: '2026-05-15T09:04:16.979517Z'
+
+Disposition:
+    PASS. Note: this command refreshes the ignored sweep_state.yaml file.
+
+Review findings:
+
+1. High: INDEX closing-commit format breaks the prompt's diff workflow.
+
+Status: OPEN, review protocol ambiguity
+
+Details:
+review/CODEX_PROMPT.md lines 59-65 tell the reviewer to find the most recent
+closing commit with:
+    grep -E '\| [0-9a-f]{7}' review/INDEX.md | tail -1
+
+review/INDEX.md line 12 stores review 002's closing commit as:
+    67ee1e7 + b903809
+
+That cell is human-readable but not a single commit value. A reviewer following
+the prompt has to guess whether to diff from 67ee1e7, b903809, or parse both.
+For this pass I used b903809 because it is the last hash and the index says
+Batch 1 shipped there, but the prompt does not encode that rule.
+
+Recommendation:
+Make the "Closing commit" column contain exactly one hash: the final commit that
+closes that review. If multiple commits matter, put the others in followup.txt,
+or add a separate notes column. Also update CODEX_PROMPT.md to extract a single
+hash mechanically, for example:
+    CLOSING_COMMIT=$(grep -Eo '[0-9a-f]{7}' review/INDEX.md | tail -1)
+    git log --oneline "${CLOSING_COMMIT}..HEAD"
+    git diff --stat "${CLOSING_COMMIT}..HEAD"
+
+2. Medium: CODEX_PROMPT.md's plan-copy md5 command is wrong from repo root.
+
+Status: OPEN, verification command bug
+
+Details:
+review/CODEX_PROMPT.md lines 97-100 give:
+    md5 -q cross_attn_ato_poc/PLAN.md \
+           .claude/tasks/cross-attn-ato-poc/PLAN.md \
+           ~/.claude/plans/i-want-to-do-compressed-bee.md 2>/dev/null
+
+The review protocol's quick reference says commands run from the repo root
+review/README.md lines 218-224. From this repo root, the correct in-repo plan
+path is PLAN.md, and the .claude task copy is one directory up at
+../.claude/tasks/cross-attn-ato-poc/PLAN.md. Running the prompt command printed
+only the home-plan hash and exited 1; the corrected command printed three
+matching hashes.
+
+Recommendation:
+Replace the command with:
+    md5 -q PLAN.md \
+           ../.claude/tasks/cross-attn-ato-poc/PLAN.md \
+           ~/.claude/plans/i-want-to-do-compressed-bee.md
+
+If the pod clone will not have ../.claude, document that this check is
+local-only and should degrade gracefully.
+
+3. Medium: CODEX_PROMPT.md's py_compile command fails on doc-only diffs.
+
+Status: OPEN, verification command bug
+
+Details:
+review/CODEX_PROMPT.md lines 119-120 give:
+    python3 -m py_compile $(git diff --name-only <closing-commit>..HEAD | grep -E '\.py$')
+
+This diff changed only review docs. The grep returned no paths, so the command
+expanded to python3 -m py_compile with no filenames and failed with exit code 2.
+That creates a false negative for review-protocol or doc-only reviews.
+
+Recommendation:
+Use an empty-safe shell block:
+    PY_FILES=$(git diff --name-only "${CLOSING_COMMIT}..HEAD" | grep -E '\.py$' || true)
+    if [ -n "$PY_FILES" ]; then
+      python3 -m py_compile $PY_FILES
+    else
+      echo "no Python files changed"
+    fi
+
+4. Minor: CODEX_PROMPT.md hard rule overstates the no-write policy.
+
+Status: OPEN, doc wording only
+
+Details:
+review/CODEX_PROMPT.md lines 180-184 says the reviewer must not edit any file
+other than comments.txt, then says not to run git add/commit/push "or any other
+write operation against the git tree." Read literally, "any other write
+operation" conflicts with Step 2's mkdir -p review/<NNN-slug> and Step 6's
+comments.txt creation, both of which are required write operations inside the
+worktree.
+
+Recommendation:
+Keep the intent but make the exception explicit:
+    Do not run git add, git commit, git push, or modify any tracked project
+    file. The only allowed worktree writes are mkdir for the new review folder
+    and writing review/<NNN-slug>/comments.txt.
+
+Bottom line:
+The new review protocol is usable, but it should be tightened before the next
+review pass. Fix the closing-commit extraction first; without that, every
+future "diff since last closed review" is vulnerable to reviewer interpretation.

@@ -1,0 +1,144 @@
+Review comments 003 — follow-up
+Date: 2026-05-15
+Subject: Disposition of findings in 003-recent-repo-state/comments.txt
+Author: scaffold maintainer
+
+Original review file:
+    review/003-recent-repo-state/comments.txt
+
+Repo state at follow-up:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+Baseline commit:
+    22918ee (review protocol + CODEX_PROMPT.md introduction)
+
+Summary:
+All four findings from review 003 are accepted as written. They are real
+defects in the review protocol I just shipped — the `Closing commit`
+column ambiguity (high), and three command-level bugs in CODEX_PROMPT.md
+that would have produced false negatives or guesswork on the next review.
+All four are FIXED in the same commit that records this followup.
+
+Disposition per finding:
+
+1. High: INDEX closing-commit format breaks the prompt's diff workflow.
+
+Status: FIXED.
+
+Action:
+  - review/INDEX.md: established a single-hash convention for the
+    `Closing commit` column. Updated existing rows so that:
+      * 002's cell `67ee1e7 + b903809` -> `67ee1e7` (the actual commit
+        that closed all three of its findings).
+      * 001's cell unchanged at `b903809` (the latest commit that
+        advanced its partial-closed status; Path A Batch 1 began
+        addressing the deferred Finding 1).
+  - Added an explicit `Convention:` note above the table so the rule is
+    self-documented.
+  - review/CODEX_PROMPT.md Step 3: replaced the loose grep with a
+    mechanical single-hash extractor:
+
+        CLOSING_COMMIT=$(grep -Eo '\b[0-9a-f]{7}\b' review/INDEX.md | tail -1)
+        echo "diffing against: ${CLOSING_COMMIT}"
+        git log --oneline "${CLOSING_COMMIT}..HEAD"
+        git diff --stat "${CLOSING_COMMIT}..HEAD"
+        git diff --name-only "${CLOSING_COMMIT}..HEAD"
+
+Verify (from repo root):
+    CLOSING_COMMIT=$(grep -Eo '\b[0-9a-f]{7}\b' review/INDEX.md | tail -1)
+    echo "$CLOSING_COMMIT" | grep -qE '^[0-9a-f]{7}$' && echo "single hash OK"
+(Should print the hash and "single hash OK".)
+
+2. Medium: CODEX_PROMPT.md's plan-copy md5 command is wrong from repo
+   root.
+
+Status: FIXED.
+
+Action: review/CODEX_PROMPT.md Step 5 replaced the broken command with
+a path-correct version, plus an environment guard for the pod case
+where `../.claude/` does not exist:
+
+    if [ -d ../.claude/tasks/cross-attn-ato-poc ]; then
+        md5 -q PLAN.md \
+               ../.claude/tasks/cross-attn-ato-poc/PLAN.md \
+               ~/.claude/plans/i-want-to-do-compressed-bee.md
+    else
+        echo "running outside the project tree; checking in-repo PLAN.md only"
+        md5 -q PLAN.md
+    fi
+
+The guard means the same command works on the laptop (three matching
+hashes expected) and on a pod that clones only cross_attn_ato_poc/
+(prints just the in-repo PLAN.md hash and notes the limited scope).
+
+Verify (from repo root):
+    if [ -d ../.claude/tasks/cross-attn-ato-poc ]; then
+        md5 -q PLAN.md ../.claude/tasks/cross-attn-ato-poc/PLAN.md \
+               ~/.claude/plans/i-want-to-do-compressed-bee.md
+    else
+        md5 -q PLAN.md
+    fi
+(Should print three identical hashes locally; one hash on the pod.)
+
+3. Medium: CODEX_PROMPT.md's py_compile command fails on doc-only diffs.
+
+Status: FIXED.
+
+Action: review/CODEX_PROMPT.md Step 5 replaced the unsafe one-liner
+with an empty-safe block:
+
+    PY_FILES=$(git diff --name-only "${CLOSING_COMMIT}..HEAD" | grep -E '\.py$' || true)
+    if [ -n "$PY_FILES" ]; then
+        python3 -m py_compile $PY_FILES
+    else
+        echo "no Python files changed; py_compile skipped"
+    fi
+
+`|| true` after grep prevents the assignment from inheriting a non-zero
+exit when no matches are found, which would otherwise be a problem
+under `set -e`.
+
+Verify (from repo root):
+    PY_FILES=$(git diff --name-only b903809..HEAD | grep -E '\.py$' || true)
+    if [ -n "$PY_FILES" ]; then python3 -m py_compile $PY_FILES; else echo "no Python files changed; py_compile skipped"; fi
+(Should print "no Python files changed; py_compile skipped" against the
+current head, which has only doc commits since b903809.)
+
+4. Minor: CODEX_PROMPT.md hard rule overstates the no-write policy.
+
+Status: FIXED.
+
+Action: review/CODEX_PROMPT.md Step 7 was rewritten to make the
+allowed-writes exception explicit before the prohibitions:
+
+    The only allowed worktree writes during a review are:
+      - mkdir -p review/<NNN-slug>/ (the new review folder).
+      - Writing review/<NNN-slug>/comments.txt (your one output file).
+    Beyond those two, do NOT:
+      - Edit any other file (no edits to other code, configs, docs).
+      - Edit prior comments.txt or followup.txt files.
+      - Edit review/INDEX.md — the Maintainer owns it.
+      - Run git add, git commit, git push, git rm, git mv, or any
+        other git mutation. …
+
+The mkdir + comments.txt allowance is now clearly bounded and the
+git-mutation prohibition is enumerated rather than relying on the
+ambiguous catch-all "any other write operation."
+
+Verify:
+    Inspect review/CODEX_PROMPT.md Step 7 directly. The "only allowed
+    worktree writes" preface should appear before the "do NOT" list.
+
+Open question for the user:
+
+None. All findings closed in this pass. The two-commit pattern noted
+below means the closing-commit hash for review 003 is filled in by a
+small follow-up commit immediately after this one.
+
+Notes on the two-commit pattern (review 003 closure):
+
+This followup is committed alongside the protocol fixes (commit A).
+Then INDEX.md is updated to record commit A's hash in the 003 row in a
+small follow-up (commit B). This pattern is unavoidable because the
+hash of a commit cannot be known until the commit object is written,
+and a single commit cannot reference its own hash. Future reviews will
+follow the same convention.

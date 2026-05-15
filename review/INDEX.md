@@ -6,10 +6,15 @@ Single-page view of all reviews. See `review/README.md` for conventions.
 paste: `Review the cross_attn_ato_poc repo per review/CODEX_PROMPT.md.
 Follow it exactly.`).
 
-| #   | Slug                 | Date       | Findings | Status | Closing commit |
-|-----|----------------------|------------|----------|--------|----------------|
-| 001 | plan-and-scaffold    | 2026-05-15 | 6        | partial-closed (5 fixed, 1 deferred → Path A) | b903809 |
-| 002 | followup-on-001      | 2026-05-15 | 3        | closed | 67ee1e7 + b903809 |
+**Convention:** `Closing commit` is exactly one short git hash — the latest
+commit that advanced this review's status. Multi-commit context belongs in
+the corresponding `followup.txt`, not here.
+
+| #   | Slug                 | Date       | Findings | Status         | Closing commit |
+|-----|----------------------|------------|----------|----------------|----------------|
+| 001 | plan-and-scaffold    | 2026-05-15 | 6        | partial-closed | b903809        |
+| 002 | followup-on-001      | 2026-05-15 | 3        | closed         | 67ee1e7        |
+| 003 | recent-repo-state    | 2026-05-15 | 4        | closed         | <this-commit>  |
 
 ---
 
