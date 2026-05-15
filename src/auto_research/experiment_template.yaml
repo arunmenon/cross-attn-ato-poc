@@ -1,0 +1,49 @@
+# Schema for a single experiment config.
+# run_next_experiment.py validates against this schema (whitelist of keys, type/range checks).
+# Unknown keys are REJECTED.
+
+# Required fields:
+exp_id: exp_NNN                          # auto-assigned by run_next_experiment.py
+arm: xattn                                # one of: xattn | cpt_light | lora_text | structured_as_text | event_only
+
+# x-attn architecture dials (required for arm=xattn)
+xattn:
+  insertion_pattern: every_4              # see sweep_space.yaml
+  gate_init: small_0.01                   # see sweep_space.yaml
+  resampler_slots: 64                     # see sweep_space.yaml
+  encoder: small_transformer              # see sweep_space.yaml
+  lora_r_on_q: 16
+
+# Training
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8                           # effective batch = 32
+  lr: 1e-4
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false                       # if true: steps=3000, seq_len=4096
+
+# Data
+data:
+  train_path: /workspace/data/train_llm_narrated
+  eval_fast_path: /workspace/data/eval_fast_5k
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+# Eval
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+# Rationale (free text; agent fills in)
+rationale: ""

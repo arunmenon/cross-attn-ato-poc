@@ -1,0 +1,146 @@
+Review comments 002
+Date: 2026-05-15
+Subject: Review of review-comments-001-followup.txt and follow-up repo state
+
+Reviewed file:
+/Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/review-comments-001-followup.txt
+
+Repo root used for comparison:
+/Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+Summary:
+The follow-up review file is mostly accurate against the current repo state.
+Findings 2 through 6 from review-comments-001.txt are reflected in the repo,
+and Finding 1 is correctly left as the remaining execution decision. I did not
+overwrite review-comments-001-followup.txt.
+
+Verification run:
+
+1. Plan copies are identical.
+
+Command:
+    md5 -q cross_attn_ato_poc/PLAN.md \
+           .claude/tasks/cross-attn-ato-poc/PLAN.md \
+           /Users/arunmenon/.claude/plans/i-want-to-do-compressed-bee.md
+
+Actual output:
+    4da291f75b0fb2918598b286bbf2469a
+    4da291f75b0fb2918598b286bbf2469a
+    4da291f75b0fb2918598b286bbf2469a
+
+Disposition:
+    PASS. The three PLAN.md copies are md5-identical.
+
+2. update_sweep_state() exists and runs.
+
+Command attempted from the follow-up text used "python", but this local shell
+does not have python on PATH.
+
+Actual output from "python ...":
+    zsh:1: command not found: python
+
+Rerun with python3:
+    python3 -c "import importlib.util, sys; sys.path.insert(0, '.'); spec = importlib.util.spec_from_file_location('rne', 'scripts/run_next_experiment.py'); rne = importlib.util.module_from_spec(spec); spec.loader.exec_module(rne); assert hasattr(rne, 'update_sweep_state'); rne.update_sweep_state(); print(open(rne.SWEEP_STATE).read())"
+
+Actual output:
+    schema_version: 1
+    n_completed: 0
+    n_failed: 0
+    n_xattn_runs: 0
+    gpu_hours_used: 0.0
+    current_best: null
+    top_3: []
+    halted: false
+    halt_reason: null
+    last_updated: '2026-05-15T08:31:17.543462Z'
+
+Disposition:
+    PASS with python3. The follow-up verify command should use python3 on this
+    machine, unless the pod venv aliases python.
+
+Side effect:
+    This verification refreshed src/auto_research/sweep_state.yaml with the
+    empty-state values above.
+
+3. Pure-Python eval/leakage smoke passes.
+
+Command:
+    python3 -c "import sys, random; sys.path.insert(0, '.'); from eval import eval_modes; from eval.leakage_checks import narrative_leakage_scan; text='<journey_sim_swap><actor_human><event_login> <amount_bucket=high></journey_sim_swap>'; stripped=eval_modes.apply(text, 'stripped')[0]; assert 'journey_sim_swap' not in stripped; assert '<amount_bucket=high>' in stripped; opaque0=eval_modes.apply(text, 'opaque', rng=random.Random(0))[0]; opaque1=eval_modes.apply(text, 'opaque', rng=random.Random(1))[0]; assert 'journey_type_' in opaque0; assert opaque0 != opaque1; assert not narrative_leakage_scan('This is fraudulent SIM-swap')['clean']; assert narrative_leakage_scan('Device change followed by password reset')['clean']; print('day-0 pure-python smoke OK'); print(opaque0); print(opaque1)"
+
+Actual output:
+    day-0 pure-python smoke OK
+    <journey_type_50><actor_type_12><event_login> <amount_bucket=high></journey_type_50>
+    <journey_type_18><actor_type_22><event_login> <amount_bucket=high></journey_type_18>
+
+Disposition:
+    PASS. Randomized opaque IDs behave as described, and narrative leakage
+    scanning catches the banned examples.
+
+4. Python syntax check passes for touched Python files.
+
+Command:
+    python3 -m py_compile scripts/run_next_experiment.py eval/eval_modes.py src/train/mixers/eval_mode_dropout.py eval/bootstrap_ci.py
+
+Actual output:
+    <no output>
+
+Disposition:
+    PASS.
+
+Review findings:
+
+1. Minor: copy-paste verify commands should use python3 for this local shell.
+
+Status: OPEN, doc wording only.
+
+Details:
+The follow-up file's verify snippets use "python", but /bin/zsh in this local
+environment reports "command not found: python". The commands work with
+"python3". If the RunPod venv provides python, this is harmless there, but the
+local review note claims copy-pasteability and should reflect the local command.
+
+Recommendation:
+Update review-comments-001-followup.txt and PLAN.md smoke snippets to prefer
+python3 for local no-GPU checks, or explicitly say "python inside the venv".
+
+2. Minor: PLAN.md labels a Day-0 block as "no GPU" while including
+preflight_check.py, which checks CUDA/VRAM.
+
+Status: OPEN, doc wording only.
+
+Details:
+PLAN.md now has a "Day-0 smoke (no GPU, no data needed; runnable today against
+the current scaffold)" section. That section includes:
+    python scripts/preflight_check.py
+
+However, preflight_check.py explicitly validates CUDA availability, VRAM,
+model download, tokenizer roundtrip, /workspace writability, bitsandbytes, and
+W&B configuration. It is a pod preflight, not a no-GPU local smoke.
+
+Recommendation:
+Split the section into two commands:
+    - Local scaffold smoke: pure-Python eval/leakage assertions, no GPU.
+    - Pod preflight: python3 scripts/preflight_check.py, requires GPU and
+      RunPod-like environment.
+
+3. Informational: the repo directory is not itself a git repository.
+
+Status: ACKNOWLEDGED.
+
+Details:
+Running git status from cross_attn_ato_poc produced:
+    fatal: not a git repository (or any of the parent directories): .git
+
+This matters because AGENT_INSTRUCTIONS.md asks the agent to git checkpoint
+before code edits. That policy will only work if the pod clone is rooted at a
+git repository that contains cross_attn_ato_poc, or if git is initialized here
+before the agent loop starts.
+
+Recommendation:
+Before Day-1/2 code-authoring starts, confirm the actual RunPod checkout is a
+git worktree at the level where edits will be made.
+
+Bottom line:
+The follow-up file is substantively correct. The remaining changes are small
+documentation fixes plus the still-open implementation decision from Finding 1:
+Path A, build Day-1/2 locally now, or Path B, let the pod agent author them.

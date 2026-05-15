@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtualenv
+.venv/
+
+# Data + checkpoints (large, RunPod-side only)
+data/train_llm_narrated/
+data/eval_fast_5k/
+data/eval_medium_50k/
+data/eval_large/
+data/samples/
+checkpoints/
+
+# Auto-research runtime
+src/auto_research/runs/
+src/auto_research/experiments.jsonl
+src/auto_research/sweep_state.yaml
+*.gpu.lock
+
+# Logs
+*.log
+.wandb/
+wandb/
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/

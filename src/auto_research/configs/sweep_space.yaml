@@ -1,0 +1,51 @@
+# Sweep space for the 3-day POC auto-research loop.
+# v3 — read-only reference. Modifying this mid-run breaks dedup logic in run_next_experiment.py.
+
+dials:
+  insertion_pattern:
+    values: [every_4, every_8, late_only]
+    description: |
+      Where to insert gated cross-attention layers in the Qwen3-8B stack.
+      every_4   — every 4th layer starting from layer 12 (6 x-attn layers)
+      every_8   — every 8th layer starting from layer 12 (3 x-attn layers)
+      late_only — last 4 layers only (4 x-attn layers, cheap)
+
+  gate_init:
+    values: [zero, small_0.01]
+    description: |
+      Initial value of tanh(alpha) gating coefficient.
+      zero       — true Flamingo init, base LM is preserved exactly at step 0
+      small_0.01 — slight initial signal, sometimes trains faster
+
+  resampler_slots:
+    values: [64, 128]
+    description: |
+      Perceiver-Resampler output length. Number of compressed K/V tokens
+      the LM cross-attends to per session.
+
+  encoder:
+    values: [small_transformer]
+    description: |
+      Side-stream encoder family. Only small_transformer in 3-day scope.
+
+# Fixed (no sweep on Day 1-3):
+fixed:
+  synth_data_ratio: 0.5   # ratio of synthetic (LLM-narrated) vs templated narratives in training mix
+  base_model: Qwen3-8B
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  seq_len: 2048
+  lora_r_on_q: 16
+  steps_per_experiment: 1500
+
+# Deferred to Day 4+:
+deferred:
+  insertion_pattern: [every_2]
+  gate_init: [learnable]
+  resampler_slots: [32, 256]
+  encoder: [ft_transformer, cnn_lstm]
+  synth_data_ratio: [0.3, 0.7]
+
+# Total active grid:
+# 3 (insertion) x 2 (gate) x 2 (slots) x 1 (encoder) = 12 cells
+# Budget = 10-12 experiments => near-exhaustive coverage.

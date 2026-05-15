@@ -1,0 +1,268 @@
+Review comments 001 — follow-up
+Date: 2026-05-15
+Subject: Disposition of findings in review-comments-001.txt
+Author: scaffold maintainer
+
+Original review file:
+/Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/review-comments-001.txt
+
+Repo state at follow-up:
+/Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+
+Summary:
+Findings 2 through 6 were accepted in full and applied in this pass. Finding 1
+is acknowledged but explicitly out of scope for the Day-0 scaffold and is
+flagged below for an execution decision. The five accepted fixes were
+implemented as code changes, doc changes, and a smoke test that exercises the
+new behavior end-to-end without GPU. The smoke test is documented in PLAN.md
+under "Smoke tests — two layers" and was run locally with all assertions
+passing.
+
+Disposition per finding:
+
+1. Blocker: core files referenced by the plan are missing from the repo.
+
+Status: ACKNOWLEDGED, deferred to user decision.
+
+Rationale: the missing files (data generators, tokenizer registry, model
+surgery, side-stream encoders, all five trainers) are Day-1/2 deliverables in
+PLAN.md, not Day-0. The Day-0 scope was deliberately limited to the
+orchestration substrate (eval primitives, deterministic launcher, agent
+instructions, configs, RUNBOOK) so the scaffold could be reviewed and
+hardened before any GPU spend. The reviewer is correct that as-is, the
+launcher dispatches to trainers that do not yet exist; running
+run_next_experiment.py against an xattn or cpt_light config today will fail
+at the accelerate launch step.
+
+Two paths offered to the user:
+
+  Path A — build remaining Day-1/2 implementation files locally now (all are
+  CPU-friendly Python; no GPU required for authoring). Cost: ~2-3 additional
+  hours of local writing. Benefit: pod arrives end-to-end runnable; GPU time
+  is spent on training, not file authoring.
+
+  Path B — boot the pod and let Claude Code or Codex author the Day-1/2 files
+  on the box. Cleaner separation between scaffold and impl, but burns
+  H100-hours on text-only work.
+
+Recommendation: Path A. Decision pending user confirmation.
+
+2. Blocker: PLAN.md outside the repo, but repo docs reference it.
+
+Status: FIXED.
+
+Action: PLAN.md was copied into the repo root at
+cross_attn_ato_poc/PLAN.md. The canonical planning artifact remains at
+.claude/tasks/cross-attn-ato-poc/PLAN.md per the project's
+.claude/tasks/ convention; the in-repo copy is a working duplicate so that
+a pod clone of cross_attn_ato_poc/ alone is self-contained. The plan-mode
+mirror at ~/.claude/plans/i-want-to-do-compressed-bee.md is also kept in
+sync. All three copies are md5-identical.
+
+Verify:
+    md5 -q cross_attn_ato_poc/PLAN.md \
+           .claude/tasks/cross-attn-ato-poc/PLAN.md \
+           ~/.claude/plans/i-want-to-do-compressed-bee.md
+(All three should print the same hash.)
+
+3. High: auto-loop ownership inconsistency; possible double-write to
+   experiments.jsonl.
+
+Status: FIXED.
+
+Decision: launcher (scripts/run_next_experiment.py) is the sole owner of
+both experiments.jsonl and sweep_state.yaml. The agent is restricted to
+writing runs/exp_NNN/config.yaml (one per proposed experiment) and
+runs/exp_NNN/notes.md (one per completed experiment, natural-language
+summary only). The agent never edits experiments.jsonl or sweep_state.yaml.
+
+Changes:
+
+  - scripts/run_next_experiment.py
+    - Added update_sweep_state() function. It recomputes the entire state
+      from experiments.jsonl + budget.yaml on every call and writes the
+      result atomically (.yaml.tmp -> rename). Schema includes
+      schema_version, n_completed, n_failed, n_xattn_runs, gpu_hours_used,
+      current_best (xattn arm only), top_3 (xattn arm only by
+      AUC-stripped), halted (bool), halt_reason (string or null),
+      last_updated (ISO timestamp).
+    - update_sweep_state() is called after each append_experiment() in
+      _do_run (both success and failure paths) and in _do_mark_failed.
+
+  - src/auto_research/AGENT_INSTRUCTIONS.md
+    - Replaced the prior "State you write" / "State you do not write"
+      blocks with an explicit ownership table.
+    - Per-iteration loop step 6 now reads "Write notes to
+      runs/exp_NNN/notes.md" instead of "append to experiments.jsonl";
+      step 7 ("update sweep_state.yaml") removed entirely.
+    - Replaced the JSON summary template with a markdown notes template.
+    - Error-handling row updated to use --mark-failed instead of
+      hand-editing experiments.jsonl.
+    - Git-checkpoint policy updated to list config.yaml, notes.md, and
+      README.md as the only files the agent may write without a commit.
+
+Verify (no GPU needed):
+
+    cd cross_attn_ato_poc
+    python3 -c "
+    import importlib.util, sys
+    sys.path.insert(0, '.')
+    spec = importlib.util.spec_from_file_location('rne',
+        'scripts/run_next_experiment.py')
+    rne = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rne)
+    assert hasattr(rne, 'update_sweep_state')
+    rne.update_sweep_state()
+    print(open(rne.SWEEP_STATE).read())
+    "
+(Should print sweep_state.yaml with n_completed=0, current_best=null,
+halted=false.)
+
+4. High: CI artifact names mismatch.
+
+Status: FIXED.
+
+The launcher now writes BOTH:
+
+  - Per-mode files (debug-friendly):
+      runs/exp_NNN/ci_report_stripped.json
+      runs/exp_NNN/ci_report_opaque.json
+      runs/exp_NNN/ci_report_full.json
+
+  - An aggregate canonical file (what PLAN.md and AGENT_INSTRUCTIONS.md
+    reference):
+      runs/exp_NNN/ci_report.json
+    Shape:
+      {
+        "stripped": { ...bootstrap_ci.py output... },
+        "opaque":   { ... },
+        "full":     { ... }
+      }
+
+Code change in scripts/run_next_experiment.py: run_post_processing() now
+collects each per-mode CI into per_mode_ci dict and writes an atomic
+aggregate ci_report.json at the run dir. The aggregate is the file the
+agent and downstream synthesis read; the per-mode files remain for
+debugging.
+
+5. Medium: smoke-test commands in PLAN.md are stale.
+
+Status: FIXED.
+
+The PLAN.md "Verification" section's smoke block was split into two
+layers, both of which are now accurate against the current scaffold or
+the intended Day-1 state:
+
+  Day-0 smoke (runnable TODAY against the current scaffold, no GPU, no
+  data):
+    - python scripts/preflight_check.py
+    - A python -c block that imports eval.eval_modes,
+      eval.leakage_checks.narrative_leakage_scan, asserts:
+        * stripped mode removes journey/actor tokens but preserves
+          bucketed-feature and PII-fence tokens
+        * opaque mode produces a randomized mapping (seed-dependent)
+        * narrative_leakage_scan catches "fraudulent" / "SIM-swap" and
+          passes a clean narrative
+
+  Day-1 smoke (becomes runnable once Day-1 modules land):
+    - python data/gen/build_dataset.py --n 100 --out data/samples/smoke
+    - python -m src.tokenizer.custom_tokens --check
+    - python -m eval.leakage_checks --dataset data/samples/smoke
+        --modes stripped,opaque,full --narrative-scan
+    - accelerate launch src/train/train_xattn.py
+        --config src/auto_research/runs/exp_smoke/config.yaml
+    - python -m eval.bootstrap_ci
+        --predictions src/auto_research/runs/exp_smoke/predictions_stripped.jsonl
+        --out src/auto_research/runs/exp_smoke/ci_report_stripped.json
+
+The reviewer's specific complaint about bootstrap_ci.py taking
+--metrics-from was correct; the corrected invocation uses --predictions
+and --out, matching the actual CLI signature in eval/bootstrap_ci.py.
+
+Verify: the Day-0 smoke command in PLAN.md "Smoke tests — two layers"
+section was executed during this pass and printed "day-0 smoke: ALL
+PASS". Output excerpt:
+    strip OK
+    opaque seed=0: '<journey_type_50><actor_type_12>...'
+    opaque seed=1: '<journey_type_18><actor_type_22>...'
+    opaque seed=2: '<journey_type_08><actor_type_88>...'
+    opaque randomized + open/close paired OK
+    narrative-leakage scan OK
+
+6. Medium: opaque eval mode is not actually neutral.
+
+Status: FIXED.
+
+The reviewer's argument was correct: the previous stable journey/actor ID
+mapping meant the model could learn the mapping during training-time
+eval-mode dropout (50% full / 25% opaque / 25% stripped), making opaque
+effectively just renamed full.
+
+Change in eval/eval_modes.py:
+
+  - apply(text, mode, rng=None) now accepts an optional random.Random.
+  - In opaque mode, the function generates a per-call random permutation
+    of IDs [01..99] for journey families and another for actor families,
+    then assigns IDs on-the-fly per family encountered in the text.
+  - Within a single call, the same journey name maps to the same ID, so
+    open and close tags pair correctly and the model retains the
+    structural (boundary) signal — but across calls, the ID for a given
+    name is randomized.
+
+Change in src/train/mixers/eval_mode_dropout.py:
+
+  - EvalModeDropoutCollator._transform now constructs a fresh
+    random.Random per opaque example (seeded from the collator's master
+    RNG) and passes it to eval_modes.apply().
+  - For full and stripped modes, no rng is passed (no-op).
+
+Verify (already executed):
+
+    python3 -c "
+    import sys, random
+    sys.path.insert(0, '.')
+    from eval import eval_modes
+    text = '<journey_sim_swap><actor_human></journey_sim_swap>'
+    a, _ = eval_modes.apply(text, 'opaque', rng=random.Random(0))
+    b, _ = eval_modes.apply(text, 'opaque', rng=random.Random(1))
+    assert a != b
+    print(a); print(b)
+    "
+Output during this pass:
+    <journey_type_50><actor_type_12></journey_type_50>
+    <journey_type_18><actor_type_22></journey_type_18>
+
+The opaque mode is now structurally informative (open/close paired,
+journey vs actor distinguishable, boundary positions visible) but
+semantically non-decodable across the training distribution.
+
+Recommended next actions (carried from the original review):
+
+1. Copy or generate PLAN.md into the repo root, or update repo docs to
+   point to a pod-visible plan path.
+   - Done. PLAN.md exists at cross_attn_ato_poc/PLAN.md.
+
+2. Add the missing Day 1 implementation files first: custom tokens,
+   fencer, feature bucketer, generators, build_dataset.py, and dataset
+   card.
+   - DEFERRED to user decision (see Finding 1 above). Recommended path:
+     build locally now.
+
+3. Add minimal trainers only after a local dataset smoke test passes.
+   - Acknowledged. The Day-0 smoke passes; the Day-1 dataset smoke is the
+     next gate.
+
+4. Reconcile run_next_experiment.py with AGENT_INSTRUCTIONS.md for
+   ownership of experiments.jsonl, sweep_state.yaml, and CI report
+   filenames.
+   - Done (Findings 3 and 4).
+
+5. Replace the smoke-test block with commands that are guaranteed to run
+   against this repo state.
+   - Done (Finding 5). Two-layer smoke now in PLAN.md.
+
+Open question for the user:
+
+Should we proceed with Path A (build remaining Day-1/2 implementation
+files locally now) before booting the pod, or Path B (let the agent on
+the pod author them)? Default recommendation: Path A.

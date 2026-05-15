@@ -1,0 +1,29 @@
+# Auto-research loop budget and halt conditions.
+# Read by run_next_experiment.py on every invocation.
+
+max_experiments: 12
+max_gpu_hours: 18           # across Day 2 PM + Day 3 AM/midday
+max_llm_narrator_usd: 200
+
+# Halt conditions — ANY of these halts the loop.
+halt:
+  nan_cascade:
+    enabled: true
+    consecutive_threshold: 2
+
+  zero_gate_activation:
+    enabled: true
+    consecutive_threshold: 2
+    magnitude_threshold: 0.05      # gate magnitude considered "open" at >= 0.05
+    eval_step: 1500                # measured at this step
+
+  convergence:
+    enabled: true
+    min_valid_runs_before_halt: 6  # cannot halt before 6 valid x-attn runs (v3 minor 5)
+    window: 4                      # look at last N runs
+    auc_lift_threshold: 0.005      # if no AUC-stripped lift >= this over window, halt
+
+# Per-experiment resource caps (enforced by run_next_experiment.py via timeout)
+per_experiment:
+  max_wall_clock_minutes: 90       # stress run can be larger; see stress_run_max_wall_clock_minutes
+  stress_run_max_wall_clock_minutes: 150

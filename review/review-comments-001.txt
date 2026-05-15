@@ -1,0 +1,125 @@
+Review comments 001
+Date: 2026-05-15
+Subject: PLAN.md review against cross_attn_ato_poc repo scaffold
+
+Reviewed file:
+/Users/arunmenon/projects/Foundation-Science/.claude/tasks/cross-attn-ato-poc/PLAN.md
+
+Repo root used for comparison:
+/Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+Summary:
+The plan is thoughtful and detailed, but the repo currently contains the
+orchestration and eval scaffold, not the full data/model/training codebase the
+plan assumes. Before starting RunPod work, reconcile the repo surface: either
+copy PLAN.md into the repo and implement the missing Day 1/2 modules, or rewrite
+the plan as a scaffold-completion plan with a smaller vertical slice.
+
+Findings:
+
+1. Blocker: core files referenced by the plan are missing from the repo.
+
+PLAN.md lists generators, tokenizer code, model surgery, encoders, and trainers:
+- data/gen/build_dataset.py
+- data/gen/journey_templates.py
+- data/gen/agent_actor_mixer.py
+- data/gen/feature_bucketer.py
+- data/gen/pii_fencer.py
+- data/gen/narrative_generator.py
+- data/gen/cheap_template_generator.py
+- src/tokenizer/custom_tokens.py
+- src/tokenizer/fencer.py
+- src/model/cross_attn_block.py
+- src/model/resampler.py
+- src/model/qwen_xattn_wrapper.py
+- src/model/encoders/small_transformer.py
+- src/train/train_cpt_light.py
+- src/train/train_xattn.py
+- src/train/train_lora_text_only.py
+- src/train/train_structured_as_text.py
+- src/train/train_event_only_classifier.py
+
+The current repo does not contain those implementation files. The launcher
+dispatches to the absent trainers, so the auto-loop cannot launch as written.
+
+2. Blocker: PLAN.md is outside the repo, but repo docs tell the agent to read
+PLAN.md from the repo root.
+
+README.md says:
+Plan: `PLAN.md` (v3).
+
+AGENT_INSTRUCTIONS.md also lists `PLAN.md` as a state file to read. However,
+the actual plan lives at:
+/Users/arunmenon/projects/Foundation-Science/.claude/tasks/cross-attn-ato-poc/PLAN.md
+
+On RunPod, a normal repo clone will not include that .claude task artifact. The
+agent loop will lose the source of truth unless PLAN.md is copied or symlinked
+into the repo, or the docs point to a path that will exist in the pod.
+
+3. High: auto-loop ownership is internally inconsistent and may double-write
+experiment history.
+
+PLAN.md says run_next_experiment.py appends to experiments.jsonl and updates
+sweep_state.yaml. AGENT_INSTRUCTIONS.md also tells the agent to append summaries
+to experiments.jsonl and update sweep_state.yaml. The script already appends
+records, but it does not actually update sweep_state.yaml.
+
+Recommendation:
+Pick one owner for each artifact:
+- run_next_experiment.py should own structured experiment records and sweep
+  state updates, or
+- the agent should own sweep_state.yaml and only append natural-language notes
+  to a separate log.
+
+Do not have both write experiments.jsonl.
+
+4. High: CI artifact names do not match between plan, agent instructions, and
+script.
+
+PLAN.md and AGENT_INSTRUCTIONS.md expect:
+- ci_report.json
+
+run_next_experiment.py writes:
+- ci_report_stripped.json
+- ci_report_opaque.json
+- ci_report_full.json
+
+The loop will look for files that are never produced. Either write an aggregate
+ci_report.json, or update the plan and agent instructions to use per-mode CI
+files.
+
+5. Medium: smoke-test commands in the plan are stale against the scaffold.
+
+The smoke test calls files/options that do not exist as currently checked in:
+- python data/gen/build_dataset.py --n 100 --out data/samples/smoke
+- python -m src.tokenizer.custom_tokens --check
+- accelerate launch src/train/train_xattn.py --config configs/smoke.yaml
+- python eval/bootstrap_ci.py --metrics-from runs/exp_smoke/metrics.json
+
+bootstrap_ci.py currently requires --predictions and --out, not --metrics-from.
+
+Recommendation:
+Update the smoke test after the missing modules are implemented, and make it run
+from a fresh clone with no local-only files.
+
+6. Medium: opaque eval mode is not actually neutral.
+
+The plan treats opaque mode as structure-without-name signal. The implementation
+maps each journey and actor to a stable ID. Because training-time dropout also
+exposes opaque mode, the model can learn that a stable opaque ID corresponds to
+a specific journey or actor class.
+
+Stripped mode remains the valid headline metric. Treat opaque/full as debug only
+unless opaque IDs are randomized or otherwise made non-decodable.
+
+Recommended next actions:
+
+1. Copy or generate PLAN.md into the repo root, or update repo docs to point to
+   a pod-visible plan path.
+2. Add the missing Day 1 implementation files first: custom tokens, fencer,
+   feature bucketer, generators, build_dataset.py, and dataset card.
+3. Add minimal trainers only after a local dataset smoke test passes.
+4. Reconcile run_next_experiment.py with AGENT_INSTRUCTIONS.md for ownership of
+   experiments.jsonl, sweep_state.yaml, and CI report filenames.
+5. Replace the smoke-test block with commands that are guaranteed to run against
+   this repo state.

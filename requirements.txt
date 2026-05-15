@@ -1,0 +1,35 @@
+# Pinned for the 3-day POC. RunPod base image already provides torch + CUDA.
+# Versions known to play together as of 2026-05.
+
+# Core HF stack
+transformers==4.46.3
+accelerate==1.1.1
+peft==0.13.2
+datasets==3.1.0
+tokenizers==0.20.3
+safetensors==0.4.5
+
+# 8-bit optimizer
+bitsandbytes==0.44.1
+
+# Eval / stats
+scikit-learn==1.5.2
+numpy==1.26.4
+scipy==1.14.1
+
+# Config / state
+pyyaml==6.0.2
+jsonlines==4.0.0
+pydantic==2.9.2
+
+# Experiment tracking
+wandb==0.18.7
+
+# Data generation
+anthropic==0.39.0    # narrator (Claude)
+tqdm==4.66.6
+faker==30.8.2        # synthetic identifiers before fencing
+
+# Linters / type-checkers (optional, for CI later)
+# ruff==0.7.4
+# mypy==1.13.0
