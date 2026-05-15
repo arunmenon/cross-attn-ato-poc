@@ -19,6 +19,7 @@ the corresponding `followup.txt`, not here.
 | 005 | path-a-batch-3       | 2026-05-15 | 5        | closed         | a126761        |
 | 006 | followup-on-005      | 2026-05-15 | 3        | closed         | 3981d96        |
 | 007 | path-a-batch-4       | 2026-05-15 | 5        | closed         | d9a4f7f        |
+| 008 | pod-readiness        | 2026-05-16 | 6        | closed         | 8852a59        |
 
 ---
 
