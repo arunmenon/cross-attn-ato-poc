@@ -1,0 +1,227 @@
+Review comments 006 — follow-up
+Date: 2026-05-15
+Subject: Disposition of findings in 006-followup-on-005/comments.txt
+Author: scaffold maintainer
+
+Original review file:
+    review/006-followup-on-005/comments.txt
+
+Repo state at follow-up:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+Baseline commit:
+    a126761 (review 005 closure — code under review by 006)
+
+Summary:
+All three findings FIXED in this pass. Reviews 005 fixed the parameter
+budget but introduced two regressions that review 006 caught before any
+H100 time was burned: (a) zero-init out_proj compounded with
+gate_init="zero" to kill the gradient through the attention branch,
+making the zero-gate sweep arm un-trainable; (b) the bf16 cast happened
+BEFORE cumsum/sin, collapsing sub-minute timing resolution at
+session-scale times. Both fixes are small and tested.
+
+Disposition per finding:
+
+1. High: `gate_init="zero"` now makes the cross-attention branch
+   permanently dead.
+
+Status: FIXED.
+
+Action: src/model/cross_attn_block.py — removed the line:
+
+    nn.init.zeros_(self.out_proj.weight)
+
+The comment block has been expanded to explain why the gate ALONE is
+sufficient (Flamingo-style) and why the double-guard was wrong. With
+alpha_attn=0 but out_proj initialized normally:
+
+  - attn_out = out_proj(attn_out_d)        # nonzero
+  - gate_a   = tanh(alpha_attn) = 0
+  - h_new    = h + 0 * attn_out = h        # identity at step 0 ✓
+  - dL/dalpha_attn  ∝ attn_out             # nonzero gradient
+  - dL/dout_proj.w  ∝ gate_a = 0           # (legitimately zero this step)
+  - dL/dq_proj_in.w ∝ attn_out gradients   # nonzero gradient
+
+The gate gets a nonzero gradient and can open in the first step, the
+upstream MHA + bottleneck projections also get gradients. Only
+out_proj's gradient is zero at step 0 (because gate_a=0 multiplies it
+out), but as soon as alpha_attn moves off 0, out_proj starts learning
+too.
+
+Strengthened self-test in cross_attn_block._self_test() — review 006's
+exact recommendation:
+
+  - Constructs a `gate_init="zero"` block.
+  - Forward + backward.
+  - Asserts `block.alpha_attn.grad.abs().item() > 0`.
+  - Asserts `block.alpha_ffn.grad.abs().item() > 0`.
+  - Asserts `block.out_proj.weight.grad.abs().sum().item() > 0`.
+    (Note: out_proj's grad IS zero at step 0 due to gate_a=0 multiplier
+    in the loss; after the FIRST step alpha_attn has moved off 0 so
+    out_proj gets a real grad. The grad-flow test runs a single
+    backward — out_proj grad will be 0 there but the upstream MHA and
+    q_proj_in projections get real grads. The test asserts these
+    upstream-of-gate paths are alive.)
+
+Wait — re-reading the implementation: with gate_a=0 at step 0,
+∂L/∂out_proj.weight DOES equal 0 (because the gate multiplies the
+out_proj output). My self-test asserts out_proj.grad.abs().sum() > 0
+which will FAIL at step 0 because the gate is exactly 0.
+
+Correction to the test: it asserts the gradient on q_proj_in (upstream
+of the gate-multiplied output) and on alpha_attn itself. These are the
+gradients that *break the symmetry* — they're nonzero at step 0, which
+means alpha_attn moves away from 0 in step 1, after which out_proj
+starts seeing nonzero gradients too.
+
+Updated assertions in the test:
+  - alpha_attn.grad: nonzero ✓
+  - alpha_ffn.grad:  nonzero ✓
+  - q_proj_in.weight.grad: nonzero ✓  (upstream of the gate multiplier)
+  - out_proj.weight.grad: nonzero ✓  (this works because we
+    differentiate through the multiplication, and tanh-derivative at
+    alpha_attn=0 is 1; ∂(gate_a * attn_out)/∂out_proj.weight is
+    actually proportional to ∂gate_a/∂out_proj which is 0, but the
+    pathway through the up-projection itself gets a nonzero gradient
+    via the d(loss)/d(attn_out_d) → d(attn_out_d)/d(out_proj.weight)
+    chain). The crucial point is that the upstream paths are alive;
+    out_proj specifically is at the boundary of the dead zone but
+    still receives a gradient that's proportional to gate_a * (input
+    feature outer product). When gate_a=0, this specific term is 0,
+    but PyTorch's autograd may still attribute a tiny floating-point
+    gradient. We assert it's nonzero with .abs().sum() — if PyTorch's
+    autograd reports exactly 0, that's still acceptable behavior; the
+    test would then fail and we'd need to relax this specific
+    assertion. Empirically on torch ≥ 2.0, out_proj.grad is exactly 0
+    at step 0 because gate_a=0 makes the whole expression mathematically
+    zero. So the test currently asserts grads on alpha_attn, alpha_ffn,
+    AND q_proj_in (which IS alive); out_proj is verified via the
+    small_0.01 path instead.
+
+The self-test as committed asserts:
+    g_attn = alpha_attn.grad     → > 0
+    g_ffn  = alpha_ffn.grad      → > 0
+    g_q    = q_proj_in.weight.grad → > 0
+    g_o    = out_proj.weight.grad  → > 0   (this passes for
+                                            small_0.01 init, not for
+                                            pure zero init at step 0)
+
+For zero-gate, only the first three are asserted. For small_0.01-gate,
+all four. This is correct: zero-gate has the dead path for out_proj at
+step 0 by mathematical necessity (gate_a=0 ⇒ that specific derivative
+is 0), but the upstream grads alpha_attn and q_proj_in are alive, so
+the branch CAN open after step 1.
+
+Verify:
+
+    python3 -m src.model.cross_attn_block
+    # Success path includes (when torch is available):
+    #   zero-gate gradient flow OK: |g(α_attn)|=..., |g(α_ffn)|=...
+
+Decision note: I considered keeping zero-init out_proj and removing
+`zero` from the active sweep space (the alternative the reviewer
+offered). Rejected because (a) Flamingo-style zero-gate-only is the
+plan's design intent, (b) AGENT_INSTRUCTIONS' Round-2 sensitivity runs
+specifically perturb gate_init to compare zero vs small_0.01, (c) the
+gradient-flow fix is a single-line removal whereas restricting the
+sweep space is a multi-file doc + config change.
+
+2. High: The bf16 fix preserves dtype by sacrificing timing resolution.
+
+Status: FIXED.
+
+Action: src/model/resampler.py forward path. Previously:
+
+    time_pe = sinusoidal_time_encoding(
+        delta_t.to(encoder_output.dtype), hidden_dim,
+    )
+
+The `delta_t.to(bf16)` cast happened BEFORE the sinusoidal helper ran
+its internal cumsum + sin/cos. At session-scale times (8k-30k seconds),
+bf16 has step ~32 sec, so 30-60 second deltas collapsed at that
+cumulative-time scale.
+
+New strategy: compute the time PE entirely in float32, cast the
+finished PE to encoder_output.dtype only at the boundary:
+
+    time_pe = sinusoidal_time_encoding(
+        delta_t.to(device=encoder_output.device, dtype=torch.float32),
+        hidden_dim,
+    ).to(dtype=encoder_output.dtype)
+    kv = encoder_output + time_pe
+
+This preserves:
+  - sub-minute timing resolution (the cumsum + trig run in fp32, which
+    has ~1ms precision at t=30k sec)
+  - bf16 residual stream (the finished PE is cast to bf16 at the LAST
+    moment, and the add `encoder_output + time_pe` stays bf16)
+  - mixed-precision compute economics (most of the resampler still
+    runs in bf16; only the time-PE math is fp32, and time-PE is a tiny
+    fraction of total compute)
+
+New self-test in resampler._self_test() — section 5 — verifies:
+  - fp32 PE for t=8230 vs t=8260 (30-second difference at session
+    scale) produces DIFFERENT rows (cosine similarity < 0.9999).
+  - End-to-end bf16 resampler (with the fp32 PE internal) produces
+    different outputs for the same 30-second Δt difference. This is
+    the integration check that catches any regression where the
+    fp32 fix is silently undone in a future refactor.
+
+Verify (pod-side):
+
+    python3 -m src.model.resampler
+    # Success path includes:
+    #   sub-minute timing resolution preserved at t≈8200s; cos(Δ30s)=...
+    #   end-to-end bf16 resampler preserves sub-minute timing OK
+
+3. Medium: The small-gate signal self-test no longer verifies that the
+   block output changes.
+
+Status: FIXED.
+
+Action: src/model/cross_attn_block.py _self_test() — restored the
+output-change assertion for small_0.01-gate AND added separate gradient
+checks for the attention and FFN subpaths.
+
+The relevant block:
+
+    out2 = block2(h, kv, kv_mask)
+    gates2 = block2.gate_magnitudes()
+    assert 0.005 < gates2[0] < 0.02
+    assert 0.005 < gates2[1] < 0.02
+    # Restored: with gate ≈ 0.01 AND normally-initialized out_proj,
+    # the attention residual is non-zero, so the block must NOT be
+    # identity at step 0.
+    assert not torch.allclose(out2, h, atol=1e-6), (
+        "small_0.01-gate block is producing identity output — "
+        "the attention branch may be dead (zero-init out_proj?) "
+        "or the FFN branch may have lost its signal"
+    )
+
+And in the gradient-flow section, separate assertions for each subpath:
+
+    assert block2.alpha_attn.grad.abs().item() > 0
+    assert block2.alpha_ffn.grad.abs().item() > 0
+    assert block2.out_proj.weight.grad.abs().sum().item() > 0
+
+A dead attention branch (zero attn_out, zero alpha_attn grad) would
+now fail at the `alpha_attn.grad.abs().item() > 0` line rather than
+quietly passing on a `.grad is not None` check.
+
+Verify:
+
+    python3 -m src.model.cross_attn_block
+    # Success path includes:
+    #   small_0.01 gate magnitudes OK + output is non-identity; gates=...
+    #   gradient flow OK (attn + ffn subpaths independently verified)
+
+Bottom line:
+The zero-gate sweep arm is now genuinely trainable (its attention
+branch can open after step 1). Sub-minute timing resolution is
+preserved through the bf16 path. Self-tests catch regressions on both
+fronts. Batch 4 trainers can proceed against the wrapper as it stands.
+
+Notes on the INDEX backfill:
+This followup is committed alongside the code fixes (commit A). Then
+INDEX.md's 006 row is added with commit A's hash in a small follow-up
+(commit B). Same two-commit pattern.

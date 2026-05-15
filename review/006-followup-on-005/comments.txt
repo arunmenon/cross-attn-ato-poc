@@ -1,0 +1,275 @@
+Review comments 006
+Date: 2026-05-15
+Subject: Follow-up verification of review 005 fixes
+
+Reviewed file(s):
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/005-path-a-batch-3/comments.txt
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/005-path-a-batch-3/followup.txt
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/model/cross_attn_block.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/model/resampler.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/model/qwen_xattn_wrapper.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/INDEX.md
+
+Repo root used for comparison:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+Summary:
+The review-005 followup addresses the obvious parameter-budget overrun and
+adds the requested explicit generate() failure. However, the cross-attention
+fix creates a dead zero-gate sweep arm: zero gate plus zero-initialized
+out_proj gives the structured attention branch no gradient path. The bf16
+fix also keeps dtype by doing the time math in bf16, which loses the
+sub-minute timing resolution the architecture is supposed to preserve. Fix
+both before Batch 4 trainers launch H100 sweeps.
+
+Verification run:
+
+1. Review-005 fix range
+
+Command:
+    git log --oneline --decorate --max-count=12
+    git show --stat --oneline a126761
+    git diff --stat 778c752..a126761
+    git diff --name-only 778c752..a126761
+
+Actual output:
+    6d92ae5 (HEAD -> main) INDEX: record closing commit for review 005
+    a126761 Address review 005: param budget + bf16 + test determinism + generate()
+    778c752 Path A Batch 3: model architecture surgery (4 files)
+    38e9840 INDEX: record closing commit for review 004 + tidy row 003
+    5916a53 Address review 004: leakage + budget + retry + protocol fixes
+    19b9ecd Path A Batch 2: data generation pipeline (6 files)
+    940f5bc INDEX: record closing commit for review 003
+    87070cf Address review 003: single-hash INDEX + fix CODEX_PROMPT commands
+    22918ee Save reusable Codex review prompt to review/CODEX_PROMPT.md
+    3cc9d05 Restructure review/ folder: per-review subdirs + INDEX + README
+    b903809 Path A Batch 1: tokenizer foundations
+    67ee1e7 Initial scaffold: Day-0 harness + v3 plan + reviews 001/002
+
+    a126761 Address review 005: param budget + bf16 + test determinism + generate()
+     review/005-path-a-batch-3/comments.txt | 279 +++++++++++++++++++++++++++++++++
+     review/005-path-a-batch-3/followup.txt | 232 +++++++++++++++++++++++++++
+     src/model/cross_attn_block.py          | 254 ++++++++++++++++++++++++------
+     src/model/qwen_xattn_wrapper.py        | 173 ++++++++++++++++++++
+     src/model/resampler.py                 |  80 ++++++++--
+     5 files changed, 954 insertions(+), 64 deletions(-)
+
+     review/005-path-a-batch-3/comments.txt | 279 +++++++++++++++++++++++++++++++++
+     review/005-path-a-batch-3/followup.txt | 232 +++++++++++++++++++++++++++
+     src/model/cross_attn_block.py          | 254 ++++++++++++++++++++++++------
+     src/model/qwen_xattn_wrapper.py        | 173 ++++++++++++++++++++
+     src/model/resampler.py                 |  80 ++++++++--
+     5 files changed, 954 insertions(+), 64 deletions(-)
+
+    review/005-path-a-batch-3/comments.txt
+    review/005-path-a-batch-3/followup.txt
+    src/model/cross_attn_block.py
+    src/model/qwen_xattn_wrapper.py
+    src/model/resampler.py
+
+Disposition:
+    PASS. Review 005 is closed in INDEX at a126761, with 6d92ae5 as the
+    housekeeping INDEX-backfill commit.
+
+2. Torch-free local checks
+
+Command:
+    git diff --check 778c752..a126761
+    PYTHONDONTWRITEBYTECODE=1 python3 -c "from pathlib import Path; files=['src/model/cross_attn_block.py','src/model/resampler.py','src/model/qwen_xattn_wrapper.py']; import ast; [ast.parse(Path(f).read_text(), filename=f) for f in files]; print('ast syntax OK')"
+    PYTHONDONTWRITEBYTECODE=1 python3 -m src.model.cross_attn_block
+    PYTHONDONTWRITEBYTECODE=1 python3 -m src.model.qwen_xattn_wrapper
+    PYTHONDONTWRITEBYTECODE=1 python3 -m src.model.resampler
+
+Actual output:
+    git diff --check produced no output.
+
+    ast syntax OK
+
+    param estimate at H=4096: per_block=33,589,250
+      every_4 (6 blocks): 201,535,500
+      every_8 (3 blocks): 100,767,750
+      late_only (4 blocks): 134,357,000
+    param budget OK for all three sweep arms
+    torch not installed; cross_attn_block forward-pass self-test skipped (runs on the pod)
+
+    compute_insertion_layers OK for every_4/every_8/late_only
+
+    Production-scale trainable-param budget (Qwen3-8B, H=4096, 36 layers):
+      every_4   : total=  214.4M  (blocks=201.5M, lora_on_q=4.7M, enc+resampler+kv_proj≈8.2M)
+      every_8   : total=  113.6M  (blocks=100.8M, lora_on_q=4.7M, enc+resampler+kv_proj≈8.2M)
+      late_only : total=  147.2M  (blocks=134.4M, lora_on_q=4.7M, enc+resampler+kv_proj≈8.2M)
+    Stage-1 trainable-param budget OK for all sweep arms
+    torch not installed; wrapper integration self-test skipped (runs on the pod)
+
+    torch not installed; resampler self-test skipped (runs on the pod)
+
+Disposition:
+    PASS for syntax and torch-free parameter estimates. PyTorch, bf16, real
+    Qwen3 hooks, PEFT, and live forward-pass behavior still require pod-side
+    verification.
+
+3. Parameter-budget helper values
+
+Command:
+    PYTHONDONTWRITEBYTECODE=1 python3 -c "from src.model.cross_attn_block import estimate_block_param_count; from src.model.qwen_xattn_wrapper import estimate_wrapper_trainable_params; print('block', estimate_block_param_count(4096));\nfor p in ('every_4','every_8','late_only'):\n    e=estimate_wrapper_trainable_params(insertion_pattern=p,n_hidden_layers=36,hidden_size=4096)\n    print(p, e['total'], e['xattn_blocks_total'], e['lora_on_q'])"
+
+Actual output:
+    block 33589250
+    every_4 214407180 201535500 4718592
+    every_8 113639430 100767750 4718592
+    late_only 147228680 134357000 4718592
+
+Disposition:
+    PASS for review-005 finding 1's arithmetic target. The primary every_4
+    arm is back inside the intended budget.
+
+4. bf16 timing-resolution check (torch-free bfloat16 rounding simulation)
+
+Command:
+    PYTHONDONTWRITEBYTECODE=1 python3 - <<'PY'
+    import struct
+
+    def bf16_round(x):
+        bits = struct.unpack('>I', struct.pack('>f', float(x)))[0]
+        lsb = (bits >> 16) & 1
+        rounding_bias = 0x7FFF + lsb
+        bits = (bits + rounding_bias) & 0xFFFFFFFF
+        bf = bits & 0xFFFF0000
+        return struct.unpack('>f', struct.pack('>I', bf))[0]
+
+    for x in [8192, 8192+30, 8192+60, 10000, 10000+30, 10000+60,
+              16384, 16384+30, 16384+60, 30720, 30720+30, 30720+60]:
+        print(x, '->', bf16_round(x))
+    PY
+
+Actual output:
+    8192 -> 8192.0
+    8222 -> 8192.0
+    8252 -> 8256.0
+    10000 -> 9984.0
+    10030 -> 10048.0
+    10060 -> 10048.0
+    16384 -> 16384.0
+    16414 -> 16384.0
+    16444 -> 16384.0
+    30720 -> 30720.0
+    30750 -> 30720.0
+    30780 -> 30720.0
+
+Disposition:
+    FAIL for the current resampler approach of casting delta_t to bf16 before
+    cumsum/sinusoidal encoding. At session-scale times, 30-60 second changes
+    can collapse.
+
+Review findings:
+
+1. High: `gate_init="zero"` now makes the cross-attention branch permanently dead.
+
+Status: OPEN, blocker for the zero-gate sweep arm.
+
+Details:
+The review-005 fix added a bottleneck and zero-initialized
+`self.out_proj.weight` in every `GatedCrossAttnDense`
+(`src/model/cross_attn_block.py:151-155`). That is not just a
+"belt-and-braces" identity guard. Combined with `gate_init="zero"`, it removes
+all first-step gradient paths into the attention branch:
+
+    attn_out = out_proj(attn_out_d) = 0 because out_proj.weight == 0
+    gate_a = tanh(alpha_attn) = 0 because alpha_attn == 0
+    h = h + gate_a * attn_out = h
+
+Then `d loss / d alpha_attn` is proportional to `attn_out`, which is zero,
+and `d loss / d out_proj.weight` is proportional to `gate_a`, which is also
+zero. q_proj_in, kv_proj_in, and the bottleneck MHA are behind the same dead
+product. The FFN gate can still learn because its FFN output is not zero, but
+that path has no structured K/V signal. This invalidates the planned
+Round-2 `gate_init=zero` sensitivity runs in `AGENT_INSTRUCTIONS.md`; those
+runs will train an x-attn wrapper whose actual cross-attention branch never
+opens.
+
+The current self-test does not catch this. It only checks that gradient
+objects are non-None for a `small_0.01` block (`src/model/cross_attn_block.py:307-313`),
+not that `alpha_attn.grad.abs().sum()` or `out_proj.weight.grad.abs().sum()`
+is nonzero for the zero-gate configuration. A zero tensor gradient still
+passes `is not None`.
+
+Recommendation:
+Remove the zero-init on `out_proj.weight` and rely on the gate for exact
+identity, which is the Flamingo-style mechanism. With `alpha_attn=0` and a
+normally initialized attention output, the first backward pass gives
+`alpha_attn` a nonzero gradient, so the gate can open. Add a pod-side test for
+`gate_init="zero"`:
+
+    block = GatedCrossAttnDense(hidden_dim=32, cross_dim=8, n_heads=4,
+                                dim_feedforward=16, gate_init="zero")
+    out = block(h, kv, kv_mask)
+    assert torch.allclose(out, h, atol=1e-6)
+    loss = out.sum()
+    loss.backward()
+    assert block.alpha_attn.grad.abs().sum() > 0
+
+If you choose to keep zero-init out_proj, remove `zero` from the active sweep
+space and document that only `small_0.01` can train the attention branch.
+
+2. High: The bf16 fix preserves dtype by sacrificing timing resolution.
+
+Status: OPEN, should be fixed before H100 training.
+
+Details:
+The resampler now casts `delta_t` to `encoder_output.dtype` before computing
+the sinusoidal time encoding (`src/model/resampler.py:128-130`). In production
+that dtype is bf16. This avoids a float32 upcast, but it makes the cumulative
+time calculation and sin/cos arguments bf16. That is too coarse for the plan's
+timing signal. docs/batch-3-architecture.md says the time base was chosen to
+preserve sub-minute timing while still spanning session-scale durations. The
+rounding check above shows why bf16 cumsum breaks that: around 8k-30k seconds,
+30-60 second changes often round to the same value before the sinusoidal
+encoding is computed.
+
+The new self-test only asserts that the output dtype is bf16
+(`src/model/resampler.py:247-265`). It does not assert that the bf16 path
+retains enough timing information or stays close to a float32 time-encoding
+reference.
+
+Recommendation:
+Compute the time encoding in float32 on the same device, then cast the
+finished positional encoding to the residual dtype before the add:
+
+    time_pe = sinusoidal_time_encoding(
+        delta_t.to(device=encoder_output.device, dtype=torch.float32),
+        hidden_dim,
+    ).to(dtype=encoder_output.dtype)
+    kv = encoder_output + time_pe
+
+This keeps the mixed-precision residual stream bf16 while preserving timing
+resolution during cumsum and trig. Add a test that compares the fp32 reference
+PE for cumulative times separated by 30 and 60 seconds at 10k and 30k seconds,
+then checks the final cast does not collapse the rows before attention.
+
+3. Medium: The small-gate signal self-test no longer verifies that the block output changes.
+
+Status: OPEN, test coverage gap.
+
+Details:
+Before the review-005 fix, the cross-attn block self-test asserted
+`small_0.01` was not identity. The new test removed that assertion and now
+only checks the gate magnitudes (`src/model/cross_attn_block.py:291-305`).
+The comment still says "small_0.01-gate produces signal", but gate magnitude
+alone is not signal. Because `out_proj` starts at zero, the attention residual
+is exactly zero on the first forward even with `small_0.01`; only the FFN
+branch can move the output. If the FFN branch later regresses, this test would
+still pass while the block is identity.
+
+Recommendation:
+Restore an output-level assertion for the small-gate case:
+
+    assert not torch.allclose(out2, h, atol=1e-6)
+
+Then add separate gradient-value assertions for attention and FFN subpaths so
+the test catches dead branches rather than only allocated gradient tensors.
+
+Bottom line:
+Review 005 fixed the parameter count on paper, but the current fix makes the
+zero-gate cross-attention arm non-trainable and computes timing PE in bf16
+where session-scale deltas lose the resolution this POC depends on. Those two
+should be corrected before Batch 4 trainer work or pod sweeps proceed.

@@ -117,17 +117,25 @@ def _build_resampler(hidden_dim: int, n_slots: int, n_layers: int,
             """
             # Add time encoding to K/V before attending.
             #
-            # bf16 safety (review 005 finding #2): delta_t typically
-            # arrives as float32 from collate; the encoder + resampler
-            # parameters are bf16 when the wrapper is .to(bfloat16).
-            # If we add a float32 time_pe to a bf16 encoder_output, the
-            # result silently upcasts to float32 (PyTorch's promotion
-            # rule) — defeating mixed-precision. Compute time_pe in the
-            # encoder_output dtype to keep the residual stream
-            # consistent.
+            # Mixed-precision strategy (review 005 #2 + review 006 #2):
+            # We need BOTH (a) the residual-stream add to stay in
+            # encoder_output's dtype (typically bf16 in production) and
+            # (b) the cumulative-time + sinusoidal math to keep
+            # sub-minute resolution at session-scale times.
+            #
+            # bf16 has only ~7 bits of mantissa, so at t≈30k seconds the
+            # bf16 step is ~32 sec — round-trips through cumsum or sin/cos
+            # at bf16 would collapse 30-60 second deltas to the same
+            # value. (Verified in review 006's bf16_round simulation.)
+            # So: COMPUTE the time encoding in float32, then CAST the
+            # finished PE to encoder_output.dtype before the add. The PE
+            # itself is a small additive signal so the bf16 cast there
+            # is acceptable; what we cannot afford is bf16 inside the
+            # cumsum.
             time_pe = sinusoidal_time_encoding(
-                delta_t.to(encoder_output.dtype), hidden_dim,
-            )                                                            # (B, N, H)
+                delta_t.to(device=encoder_output.device, dtype=torch.float32),
+                hidden_dim,
+            ).to(dtype=encoder_output.dtype)                            # (B, N, H)
             kv = encoder_output + time_pe
 
             B = encoder_output.size(0)
@@ -263,6 +271,53 @@ def _self_test() -> None:
         f"time_pe dtype cast is broken"
     )
     print(f"bf16 dtype safety OK; output dtype = {out_bf16.dtype}")
+
+    # 5. **Sub-minute timing resolution preserved through fp32 PE math**
+    # (review 006 finding #2). At session-scale times (8k-30k seconds),
+    # bf16 has step size ~32 sec, so doing cumsum/sin in bf16 would
+    # collapse 30-60 second deltas. The internal fp32 path must
+    # preserve them.
+    H_pe = 32  # small dim for fast test
+    # Pairs of session-scale Δt sequences differing by ~30s at large t:
+    delta_t_a = torch.tensor([[100.0, 200.0, 7900.0, 30.0]])  # cumulative: 100, 300, 8200, 8230
+    delta_t_b = torch.tensor([[100.0, 200.0, 7900.0, 60.0]])  # cumulative: 100, 300, 8200, 8260
+    pe_a = sinusoidal_time_encoding(delta_t_a, H_pe, time_base=10_000.0)
+    pe_b = sinusoidal_time_encoding(delta_t_b, H_pe, time_base=10_000.0)
+    # Last position differs by 30s; PE rows must NOT be identical.
+    assert not torch.allclose(pe_a[0, -1], pe_b[0, -1]), (
+        "fp32 sub-minute timing resolution lost; "
+        "30s Δt difference at t≈8200s collapses"
+    )
+    # And the difference should be non-trivial (cosine sim < 1.0 by a
+    # meaningful margin).
+    cos = torch.nn.functional.cosine_similarity(
+        pe_a[0, -1:].flatten(), pe_b[0, -1:].flatten(), dim=0,
+    ).item()
+    assert cos < 0.9999, (
+        f"fp32 PE rows for t=8230 vs t=8260 are too similar (cos={cos:.6f}); "
+        f"timing signal is essentially absent"
+    )
+    print(f"sub-minute timing resolution preserved at t≈8200s; cos(Δ30s)={cos:.4f}")
+
+    # And the same check on the full resampler bf16 path (PE computed in
+    # fp32, cast to bf16 only at the very end before the add).
+    enc_bf16_a = torch.zeros(1, 4, H_pe, dtype=torch.bfloat16)
+    enc_bf16_b = torch.zeros(1, 4, H_pe, dtype=torch.bfloat16)
+    res_pe = PerceiverResampler(
+        hidden_dim=H_pe, n_slots=4, n_layers=1, n_heads=4,
+        dim_feedforward=16, dropout=0.0,
+    ).to(torch.bfloat16)
+    res_pe.eval()
+    mask_pe = torch.ones(1, 4, dtype=torch.long)
+    with torch.no_grad():
+        out_a = res_pe(enc_bf16_a, delta_t_a, mask_pe)
+        out_b = res_pe(enc_bf16_b, delta_t_b, mask_pe)
+    # Different time inputs produce different outputs end-to-end.
+    assert not torch.allclose(out_a, out_b), (
+        "end-to-end bf16 resampler collapses 30s Δt at session-scale t; "
+        "fp32 time-PE strategy is broken"
+    )
+    print("end-to-end bf16 resampler preserves sub-minute timing OK")
 
 
 if __name__ == "__main__":

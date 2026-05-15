@@ -144,15 +144,23 @@ def _build_gated_xattn(hidden_dim: int, cross_dim: int, n_heads: int,
                 nn.Linear(dim_feedforward, hidden_dim),
                 nn.Dropout(dropout),
             )
-            # Per-block scalar gates.
+            # Per-block scalar gates. The gate ALONE provides exact
+            # identity at step 0 when gate_init="zero": tanh(0) = 0 and
+            # `h + 0 * attn_out = h` for any attn_out.
+            #
+            # Review 006 finding #1: an earlier revision also
+            # zero-initialized self.out_proj.weight as "belt-and-braces"
+            # — but that compounds with the zero gate to kill the
+            # gradient through the entire attention branch:
+            #   d L / d alpha_attn ∝ attn_out (= 0 when out_proj is zero)
+            #   d L / d out_proj.weight ∝ gate_a (= 0 when alpha_attn=0)
+            # Both gradients vanish, so the zero-gate sweep arm becomes
+            # permanently dead. The gate alone is the Flamingo-style
+            # mechanism: out_proj uses standard init, alpha_attn=0
+            # ensures step-0 identity, and the first backward gives
+            # alpha_attn a nonzero gradient so the gate can open.
             self.alpha_attn = nn.Parameter(torch.tensor(init_val, dtype=torch.float32))
             self.alpha_ffn = nn.Parameter(torch.tensor(init_val, dtype=torch.float32))
-
-            # Zero-init the up-projection so that at step 0 the cross-attn
-            # contribution is exactly zero regardless of how the gate
-            # behaves under tiny numerical noise. This is a belt-and-braces
-            # safety on top of gate_init="zero".
-            nn.init.zeros_(self.out_proj.weight)
 
         def forward(self, h, kv, kv_key_padding_mask):
             """h: (B, T, H); kv: (B, K, H); kv_key_padding_mask: (B, K).
@@ -273,8 +281,8 @@ def _self_test() -> None:
     kv_mask = torch.zeros(2, K, dtype=torch.bool)
     out = block(h, kv, kv_mask)
     assert out.shape == h.shape
-    # With α=0 AND zero-init out_proj, the cross-attn residual is exactly
-    # zero. ffn residual is also zero (gate_f=0). So output == input.
+    # With α=0 the gate kills the cross-attn AND ffn residual sums,
+    # so the block is exactly identity at step 0.
     assert torch.allclose(out, h, atol=1e-6), \
         "zero-gate init must produce identity at step 0"
     gates = block.gate_magnitudes()
@@ -288,29 +296,75 @@ def _self_test() -> None:
         "zero-gate init drifts under extreme kv values"
     print("zero-gate identity holds under extreme kv values")
 
-    # 3. small_0.01-gate produces signal
+    # 2b. **Zero-gate must still admit gradient through the attention
+    # branch** (review 006 finding #1). Without out_proj zero-init,
+    # ∂L/∂alpha_attn ∝ attn_out which is generally nonzero, so the gate
+    # gets a real gradient and the attention path can open after step 0.
+    block_zero_grad = GatedCrossAttnDense(
+        hidden_dim=H, cross_dim=8, n_heads=4, dim_feedforward=16,
+        gate_init="zero",
+    )
+    h2 = torch.randn(2, T, H, requires_grad=True)
+    out_zg = block_zero_grad(h2, kv, kv_mask)
+    loss_zg = out_zg.sum()
+    loss_zg.backward()
+    # Both gates must have nonzero gradient so the attention branch
+    # can actually open during training. A None grad would pass the
+    # naive `is not None` check; we assert magnitude > 0.
+    g_attn = block_zero_grad.alpha_attn.grad
+    g_ffn = block_zero_grad.alpha_ffn.grad
+    assert g_attn is not None and g_attn.abs().item() > 0, (
+        f"zero-gate alpha_attn has no/zero gradient: {g_attn}; "
+        f"attention branch is dead"
+    )
+    assert g_ffn is not None and g_ffn.abs().item() > 0, (
+        f"zero-gate alpha_ffn has no/zero gradient: {g_ffn}; "
+        f"FFN branch is dead"
+    )
+    # The downstream projections must also be alive.
+    g_out_proj = block_zero_grad.out_proj.weight.grad
+    g_q_proj_in = block_zero_grad.q_proj_in.weight.grad
+    assert g_out_proj is not None and g_out_proj.abs().sum().item() > 0, (
+        "out_proj has no gradient under zero-gate init"
+    )
+    assert g_q_proj_in is not None and g_q_proj_in.abs().sum().item() > 0, (
+        "q_proj_in has no gradient under zero-gate init"
+    )
+    print(f"zero-gate gradient flow OK: |g(α_attn)|={g_attn.abs().item():.2e}, "
+          f"|g(α_ffn)|={g_ffn.abs().item():.2e}")
+
+    # 3. small_0.01-gate produces signal AND output differs from input
     block2 = GatedCrossAttnDense(
         hidden_dim=H, cross_dim=8, n_heads=4, dim_feedforward=16,
         gate_init="small_0.01",
     )
     out2 = block2(h, kv, kv_mask)
-    # NOTE: out_proj is zero-init, so the FIRST forward will also be
-    # identity-ish even with small_0.01 gates (because attn_out=0 from
-    # the zero-init up-projection). We still get FFN signal though.
-    # Check that the FFN gate is being applied (so output != input).
-    # The simplest robust check: gate magnitude is ~0.01.
     gates2 = block2.gate_magnitudes()
     assert 0.005 < gates2[0] < 0.02, f"unexpected attn gate magnitude: {gates2[0]}"
     assert 0.005 < gates2[1] < 0.02, f"unexpected ffn gate magnitude: {gates2[1]}"
-    print(f"small_0.01 gate magnitudes OK; gates={gates2}")
+    # Restored from pre-005 version: with the gate ≈ 0.01 AND a normally-
+    # initialized out_proj, the attention residual is non-zero, so the
+    # block must NOT be identity at step 0 (review 006 finding #3).
+    assert not torch.allclose(out2, h, atol=1e-6), (
+        "small_0.01-gate block is producing identity output — "
+        "the attention branch may be dead (zero-init out_proj?) "
+        "or the FFN branch may have lost its signal"
+    )
+    print(f"small_0.01 gate magnitudes OK + output is non-identity; gates={gates2}")
 
-    # 4. Gradient flows
+    # 4. Gradient flows for small-gate config
     loss = out2.sum()
     loss.backward()
-    assert block2.alpha_attn.grad is not None, "alpha_attn has no gradient"
-    assert block2.alpha_ffn.grad is not None, "alpha_ffn has no gradient"
+    # Verify ATTENTION and FFN gradients separately so a dead attn branch
+    # doesn't hide behind a live FFN branch (review 006 finding #3).
+    assert block2.alpha_attn.grad is not None and block2.alpha_attn.grad.abs().item() > 0, \
+        "alpha_attn has no/zero gradient under small_0.01 init"
+    assert block2.alpha_ffn.grad is not None and block2.alpha_ffn.grad.abs().item() > 0, \
+        "alpha_ffn has no/zero gradient under small_0.01 init"
+    assert block2.out_proj.weight.grad is not None and block2.out_proj.weight.grad.abs().sum().item() > 0, \
+        "out_proj has no/zero gradient under small_0.01 init"
     assert h.grad is not None, "input hidden state has no gradient"
-    print("gradient flow OK")
+    print("gradient flow OK (attn + ffn subpaths independently verified)")
 
     # 5. KV padding mask honored
     # Use a block whose out_proj has been nudged out of the zero-init
