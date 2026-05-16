@@ -243,6 +243,7 @@ def build(
     leakage_audit_n: int = 200,
     llm_model: str | None = None,
     concurrency: int = 8,
+    narrator_temp: float = 0.3,
 ) -> dict:
     """Build a dataset of `n` journeys into `out_dir`. Returns a summary dict.
 
@@ -300,6 +301,7 @@ def build(
             journeys, tracker=tracker, model=llm_model,
             max_workers=concurrency,
             progress_callback=_print_progress,
+            narrator_temp=narrator_temp,
         )
     elif mode == "template":
         narratives = []
@@ -404,6 +406,12 @@ def main() -> int:
                         help="parallel narrator workers when --mode=llm "
                              "(default 8, ~3-4x faster than sequential at 25k). "
                              "Ignored when --mode=template.")
+    parser.add_argument("--narrator-temp", type=float, default=0.3,
+                        help="initial-attempt narrator temperature. Default 0.3 "
+                             "(matches the original 25k train run for stable "
+                             "formatting). Bump to ~0.5 when generating EVAL data "
+                             "to reduce narrator-style correlation with train. "
+                             "Retries always escalate to max(0.7, base+0.4).")
     args = parser.parse_args()
 
     if args.llm_provider is not None:
@@ -419,6 +427,7 @@ def main() -> int:
         leakage_audit_n=args.leakage_audit_n,
         llm_model=args.llm_model,
         concurrency=args.concurrency,
+        narrator_temp=args.narrator_temp,
     )
     print(json.dumps(summary, indent=2))
     return 0

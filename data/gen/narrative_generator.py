@@ -339,7 +339,10 @@ leakage scan; empty list on the initial call.
 """
 
 
-def _real_openai_call(model: str, max_tokens: int, timeout: int) -> NarratorFn:
+def _real_openai_call(
+    model: str, max_tokens: int, timeout: int,
+    base_temperature: float = 0.3,
+) -> NarratorFn:
     """Build a NarratorFn that calls the OpenAI API. Default provider.
 
     The OpenAI Chat Completions API uses a different message shape than
@@ -348,6 +351,12 @@ def _real_openai_call(model: str, max_tokens: int, timeout: int) -> NarratorFn:
     the SAME prefix is sent for >1024 tokens (our system prompt is
     ~350 tokens, below threshold; caching may not fire — see
     docs/batch-2-data-generators.md cost discussion).
+
+    `base_temperature` controls the initial-attempt temperature (default
+    0.3 = stable formatting, matches the original 25k train run). Bump
+    to 0.5 for eval generation to reduce narrator-style correlation
+    with the training distribution. Retries always escalate to
+    max(0.7, base + 0.4) so leaky outputs get escape velocity.
     """
     try:
         import openai
@@ -381,7 +390,7 @@ def _real_openai_call(model: str, max_tokens: int, timeout: int) -> NarratorFn:
                 f"without using any of them or their variants. Stay strictly "
                 f"within the HARD RULES above."
             )
-        temperature = 0.3 if attempt == 0 else 0.7
+        temperature = base_temperature if attempt == 0 else max(0.7, base_temperature + 0.4)
 
         # gpt-5.4 family uses `max_completion_tokens`, not the legacy
         # `max_tokens` param (same naming shift OpenAI made for o-series
@@ -413,9 +422,14 @@ def _real_openai_call(model: str, max_tokens: int, timeout: int) -> NarratorFn:
     return call
 
 
-def _real_anthropic_call(model: str, max_tokens: int, timeout: int) -> NarratorFn:
+def _real_anthropic_call(
+    model: str, max_tokens: int, timeout: int,
+    base_temperature: float = 0.3,
+) -> NarratorFn:
     """Build a NarratorFn that calls the Anthropic API. Raises if the
     SDK / API key is unavailable.
+
+    `base_temperature` matches the OpenAI factory — see _real_openai_call.
     """
     try:
         import anthropic
@@ -451,9 +465,9 @@ def _real_anthropic_call(model: str, max_tokens: int, timeout: int) -> NarratorF
                 f"without using any of them or their variants. Stay strictly "
                 f"within the HARD RULES above."
             )
-        # Initial attempt uses low temperature for stable formatting; retries
-        # use higher temperature to escape stuck outputs.
-        temperature = 0.3 if attempt == 0 else 0.7
+        # Initial attempt uses base_temperature for stable formatting;
+        # retries escalate to escape stuck outputs.
+        temperature = base_temperature if attempt == 0 else max(0.7, base_temperature + 0.4)
 
         resp = client.messages.create(
             model=model,
@@ -486,6 +500,7 @@ def generate_narratives_concurrent(
     narrator_fn: NarratorFn | None = None,
     max_workers: int = 8,
     progress_callback: Callable[[int, int, float], None] | None = None,
+    narrator_temp: float = 0.3,
 ) -> list[str]:
     """Concurrent batch wrapper around generate_narrative.
 
@@ -531,9 +546,11 @@ def generate_narratives_concurrent(
     if narrator_fn is not None:
         call = narrator_fn
     elif provider == "openai":
-        call = _real_openai_call(resolved_model, max_tokens, timeout)
+        call = _real_openai_call(resolved_model, max_tokens, timeout,
+                                 base_temperature=narrator_temp)
     elif provider == "anthropic":
-        call = _real_anthropic_call(resolved_model, max_tokens, timeout)
+        call = _real_anthropic_call(resolved_model, max_tokens, timeout,
+                                    base_temperature=narrator_temp)
     else:
         raise ValueError(f"no narrator dispatch for provider={provider!r}")
 
@@ -613,6 +630,7 @@ def generate_narrative(
     max_retries: int = DEFAULT_MAX_RETRIES,
     cache_dir: Path = DEFAULT_CACHE_DIR,
     narrator_fn: NarratorFn | None = None,
+    narrator_temp: float = 0.3,
 ) -> str:
     """Produce one LLM narrative for `journey`. Returns the body string
     (no verdict footer; serializer appends that).
@@ -659,9 +677,11 @@ def generate_narrative(
     if narrator_fn is not None:
         call = narrator_fn
     elif provider == "openai":
-        call = _real_openai_call(model, max_tokens, timeout)
+        call = _real_openai_call(model, max_tokens, timeout,
+                                 base_temperature=narrator_temp)
     elif provider == "anthropic":
-        call = _real_anthropic_call(model, max_tokens, timeout)
+        call = _real_anthropic_call(model, max_tokens, timeout,
+                                    base_temperature=narrator_temp)
     else:
         # Defensive: _resolve_provider_and_model already raises on unknown
         # providers, so reaching here means someone added a new value
