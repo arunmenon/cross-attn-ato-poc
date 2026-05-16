@@ -84,6 +84,18 @@ def load_paired_dataset(data_dir: str | Path):
       <data_dir>/train.jsonl        — train split
       <data_dir>/eval.jsonl         — eval split
 
+    `structured_events` is serialized to a JSON string at load time.
+    Background: build_dataset.py writes events as a list-of-dicts where
+    each dict's keys depend on the event type (a `login` dict has
+    `auth_strength`, a `txn` dict has `amount_bucket` + `merchant`,
+    etc.). Dataset.from_json then asks pyarrow to infer a uniform
+    schema across all list elements and fails with
+    `DatasetGenerationError: An error occurred while generating the
+    dataset`. Caught at first vertical-slice run on the pod
+    (2026-05-16). Arms that need events (train_xattn,
+    train_structured_as_text, train_event_only_classifier) call
+    `parse_structured_events(row)` on the per-row JSON string.
+
     Returns: a dict of HF Datasets keyed by "train" / "eval" (if both
     splits exist) or just {"train": ds} for the single-file case.
     """
@@ -93,19 +105,36 @@ def load_paired_dataset(data_dir: str | Path):
     if not d.exists():
         raise FileNotFoundError(f"dataset directory not found: {d}")
 
+    def _read_jsonl(path: Path):
+        rows: list[dict] = []
+        with path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                r = json.loads(line)
+                # Serialize the heterogeneous events list to a string so
+                # pyarrow doesn't try to unify across event types. Arms
+                # that need it call parse_structured_events() on demand.
+                ev = r.get("structured_events")
+                if isinstance(ev, list):
+                    r["structured_events"] = json.dumps(ev)
+                rows.append(r)
+        return Dataset.from_list(rows)
+
     splits: dict[str, "Dataset"] = {}
     train_path = d / "train.jsonl"
     eval_path = d / "eval.jsonl"
     single_path = d / "data.jsonl"
 
     if train_path.exists():
-        splits["train"] = Dataset.from_json(str(train_path))
+        splits["train"] = _read_jsonl(train_path)
         if eval_path.exists():
-            splits["eval"] = Dataset.from_json(str(eval_path))
+            splits["eval"] = _read_jsonl(eval_path)
         else:
             splits["eval"] = None  # type: ignore[assignment]
     elif single_path.exists():
-        splits["train"] = Dataset.from_json(str(single_path))
+        splits["train"] = _read_jsonl(single_path)
         splits["eval"] = None  # type: ignore[assignment]
     else:
         raise FileNotFoundError(
@@ -113,6 +142,27 @@ def load_paired_dataset(data_dir: str | Path):
         )
 
     return splits
+
+
+def parse_structured_events(row: dict) -> list[dict]:
+    """Per-row inverse of the JSON-string serialization done in
+    `load_paired_dataset`. Returns the events as a Python list.
+    Arms that need event tensors (x-attn, structured-as-text, event-only)
+    call this on each batch row inside their collator.
+
+    Idempotent: accepts either the JSON-string form (post-load) or the
+    raw list-of-dict form (e.g., a row constructed in-memory by tests).
+    """
+    ev = row.get("structured_events")
+    if ev is None:
+        return []
+    if isinstance(ev, list):
+        return ev
+    if isinstance(ev, str):
+        return json.loads(ev)
+    raise TypeError(
+        f"structured_events should be list or JSON-string, got {type(ev).__name__}"
+    )
 
 
 # ---------------------------------------------------------------------------
