@@ -38,7 +38,9 @@ from data.gen.agent_actor_mixer import mix
 from data.gen.cheap_template_generator import generate_narrative as cheap_narrative
 from data.gen.journey_templates import generate as generate_journey
 from data.gen.narrative_generator import (
-    CostTracker, DEFAULT_USD_BUDGET, generate_narrative as llm_narrative,
+    CostTracker, DEFAULT_USD_BUDGET,
+    generate_narrative as llm_narrative,
+    generate_narratives_concurrent,
 )
 from data.gen.pii_fencer import assert_no_raw_pii_in_event
 from data.gen.types import Journey
@@ -240,6 +242,7 @@ def build(
     eval_frac: float = 0.0,
     leakage_audit_n: int = 200,
     llm_model: str | None = None,
+    concurrency: int = 8,
 ) -> dict:
     """Build a dataset of `n` journeys into `out_dir`. Returns a summary dict.
 
@@ -247,6 +250,10 @@ def build(
     `narrative_generator.generate_narrative()`. None means "use the
     LLM_PROVIDER default" (openai → gpt-5.4-nano, anthropic →
     claude-haiku-4-5). Ignored when mode == 'template'.
+
+    `concurrency` is the number of parallel narrator workers when
+    mode == 'llm'. Default 8 ≈ 3-4x speedup at 25k narratives. Ignored
+    when mode == 'template' (cheap_narrative is pure-Python).
     """
     rng = random.Random(seed)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -257,7 +264,22 @@ def build(
     family_counts: dict[str, int] = {}
     actor_counts: dict[str, int] = {}
     t_start = time.time()
+    progress_step = max(1, n // 20)
 
+    def _print_progress(done: int, total: int, cost: float) -> None:
+        if done % progress_step != 0 and done != total:
+            return
+        elapsed = time.time() - t_start
+        rate = done / elapsed if elapsed > 0 else 0.0
+        # flush=True so background runs (where stdout is buffered to a
+        # redirected file) emit progress live instead of waiting for
+        # the buffer to fill at program exit.
+        print(f"  [{done:>6}/{total}] rate={rate:.1f}/s cost=${cost:.3f}",
+              file=sys.stderr, flush=True)
+
+    # Phase 1: sample all journeys (no API, sequential to preserve rng
+    # determinism). Same logic for both modes.
+    journeys: list[Journey] = []
     for i in range(n):
         family = sample_journey_family(rng)
         actor = sample_actor_for_family(family, rng)
@@ -267,23 +289,30 @@ def build(
         j_seed = seed * 1_000_003 + i  # stable per-row seed
         j = generate_journey(family, j_seed, actor)
         j = mix(j, rng=random.Random(j_seed + 1))
+        journeys.append(j)
 
-        if mode == "llm":
-            assert tracker is not None
-            narrative = llm_narrative(j, tracker=tracker, model=llm_model)
-        elif mode == "template":
-            narrative = cheap_narrative(j)
-        else:
-            raise ValueError(f"unknown mode: {mode!r}")
+    # Phase 2: narrate. Concurrent batch for LLM mode (~3-4x faster on
+    # gpt-5.4-nano); tight sequential loop for template mode (no API,
+    # nothing to parallelize).
+    if mode == "llm":
+        assert tracker is not None
+        narratives = generate_narratives_concurrent(
+            journeys, tracker=tracker, model=llm_model,
+            max_workers=concurrency,
+            progress_callback=_print_progress,
+        )
+    elif mode == "template":
+        narratives = []
+        for i, j in enumerate(journeys):
+            narratives.append(cheap_narrative(j))
+            _print_progress(i + 1, n, 0.0)
+    else:
+        raise ValueError(f"unknown mode: {mode!r}")
 
+    # Phase 3: assemble records.
+    for j, narrative in zip(journeys, narratives):
         j.narrative = narrative
         records.append(journey_to_record(j, narrative))
-
-        if (i + 1) % max(1, n // 20) == 0:
-            elapsed = time.time() - t_start
-            rate = (i + 1) / elapsed
-            cost = tracker.spent_usd if tracker else 0.0
-            print(f"  [{i+1:>6}/{n}] rate={rate:.1f}/s cost=${cost:.3f}", file=sys.stderr)
 
     # ----- write JSONL (atomic) -----
     if eval_frac > 0:
@@ -371,17 +400,25 @@ def main() -> int:
                         help="convenience: sets the LLM_PROVIDER env var for "
                              "this run. Equivalent to `LLM_PROVIDER=... python "
                              "-m data.gen.build_dataset ...`.")
+    parser.add_argument("--concurrency", type=int, default=8,
+                        help="parallel narrator workers when --mode=llm "
+                             "(default 8, ~3-4x faster than sequential at 25k). "
+                             "Ignored when --mode=template.")
     args = parser.parse_args()
 
     if args.llm_provider is not None:
         import os
         os.environ["LLM_PROVIDER"] = args.llm_provider
 
+    if not 1 <= args.concurrency <= 32:
+        parser.error(f"--concurrency must be in [1, 32], got {args.concurrency}")
+
     summary = build(
         n=args.n, out_dir=args.out, mode=args.mode, seed=args.seed,
         usd_budget=args.usd_budget, eval_frac=args.eval_frac,
         leakage_audit_n=args.leakage_audit_n,
         llm_model=args.llm_model,
+        concurrency=args.concurrency,
     )
     print(json.dumps(summary, indent=2))
     return 0

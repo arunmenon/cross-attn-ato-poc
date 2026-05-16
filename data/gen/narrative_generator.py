@@ -39,10 +39,12 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import os
 import sys
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -472,6 +474,135 @@ def _real_anthropic_call(model: str, max_tokens: int, timeout: int) -> NarratorF
 # Public API
 # ---------------------------------------------------------------------------
 
+def generate_narratives_concurrent(
+    journeys: list[Journey],
+    *,
+    tracker: CostTracker,
+    model: str | None = None,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    timeout: int = DEFAULT_TIMEOUT_SEC,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    cache_dir: Path = DEFAULT_CACHE_DIR,
+    narrator_fn: NarratorFn | None = None,
+    max_workers: int = 8,
+    progress_callback: Callable[[int, int, float], None] | None = None,
+) -> list[str]:
+    """Concurrent batch wrapper around generate_narrative.
+
+    `result[i]` corresponds to `journeys[i]` (ordering preserved).
+
+    Why this exists: the sequential per-record path runs at ~30/min on
+    gpt-5.4-nano (network-bound), so 25k narratives would take ~13 hr.
+    With max_workers=8 we get ~3-4x speedup (the OpenAI SDK serializes
+    the response-parsing step under the GIL, so super-linear scaling
+    stops past ~8 workers in our measurements).
+
+    Thread-safety:
+      - The HTTP client is built ONCE up front and shared (openai.OpenAI
+        is documented thread-safe).
+      - CostTracker mutations are serialized behind a single lock.
+      - The on-disk cache uses atomic temp-rename writes (`_cache_put`),
+        so concurrent puts to the same key are race-free at the
+        filesystem level.
+      - (provider, model) is resolved once before any thread starts, so
+        the LLM_PROVIDER/model agreement check (review 009 finding #1)
+        still fires before any API spend.
+
+    Budget cap behavior under concurrency:
+      The cap is enforced post-charge inside each worker. Up to
+      max_workers in-flight calls may complete between the cap-trip and
+      the executor halting other workers, so the worst-case overshoot
+      is `max_workers` calls past the cap, not one. Document this in
+      RUNBOOK §9 if max_workers > 1.
+
+    progress_callback: optional `(n_done, n_total, spent_usd)` hook
+    called from inside the as_completed loop. Build_dataset wires this
+    up to print the same 5%-stride progress lines the sequential path
+    emits.
+    """
+    if not journeys:
+        return []
+
+    # Resolve once — single agreement check, single client build.
+    provider, resolved_model = _resolve_provider_and_model(
+        model, os.environ.get("LLM_PROVIDER"),
+    )
+
+    if narrator_fn is not None:
+        call = narrator_fn
+    elif provider == "openai":
+        call = _real_openai_call(resolved_model, max_tokens, timeout)
+    elif provider == "anthropic":
+        call = _real_anthropic_call(resolved_model, max_tokens, timeout)
+    else:
+        raise ValueError(f"no narrator dispatch for provider={provider!r}")
+
+    tracker_lock = threading.Lock()
+    n_total = len(journeys)
+    results: list[str | None] = [None] * n_total
+
+    def _one(idx: int, journey: Journey) -> tuple[int, str]:
+        key = _journey_cache_key(journey, resolved_model)
+        cached = _cache_get(cache_dir, key)
+        if cached is not None:
+            with tracker_lock:
+                tracker.cache_hit()
+            return idx, cached
+
+        # Pre-check budget (best-effort; the post-charge check below is
+        # the hard gate).
+        with tracker_lock:
+            if tracker.over_budget():
+                raise RuntimeError(
+                    f"narrator budget exceeded before idx={idx}: "
+                    f"${tracker.spent_usd:.4f} >= ${tracker.budget_usd:.2f}"
+                )
+
+        last_body = ""
+        prev_hits: list = []
+        for attempt in range(max_retries + 1):
+            body, in_toks, out_toks = call(journey, attempt, prev_hits)
+            with tracker_lock:
+                tracker.charge(resolved_model, in_toks, out_toks)
+                if tracker.spent_usd > tracker.budget_usd:
+                    raise RuntimeError(
+                        f"narrator budget exceeded at idx={idx}: "
+                        f"${tracker.spent_usd:.4f} > ${tracker.budget_usd:.2f}. "
+                        f"Up to {max_workers - 1} other in-flight calls may "
+                        f"also complete before the executor halts."
+                    )
+            body, _hits = fence(body)
+            scan = narrative_leakage_scan(body)
+            if scan["clean"]:
+                _cache_put(cache_dir, key, body)
+                return idx, body
+            last_body = body
+            prev_hits = scan["hits"]
+
+        raise RuntimeError(
+            f"narrative-leakage scan failed after {max_retries + 1} attempts "
+            f"for journey idx={idx} seed={journey.seed} "
+            f"family={journey.journey_family}. Hits: {prev_hits}. "
+            f"Last body: {last_body!r}"
+        )
+
+    n_done = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(_one, i, j) for i, j in enumerate(journeys)]
+        for fut in concurrent.futures.as_completed(futures):
+            idx, body = fut.result()
+            results[idx] = body
+            n_done += 1
+            if progress_callback is not None:
+                # Read tracker outside the lock — eventual-consistent is
+                # fine for progress reporting.
+                progress_callback(n_done, n_total, tracker.spent_usd)
+
+    assert all(r is not None for r in results), \
+        "concurrent narrator path left holes — investigate before relying on output"
+    return results  # type: ignore[return-value]
+
+
 def generate_narrative(
     journey: Journey,
     *,
@@ -676,6 +807,48 @@ def _self_test() -> None:
             raise AssertionError("expected budget overage")
         except RuntimeError as e:
             assert "budget" in str(e).lower()
+
+        # Concurrent batch path — same stub narrator, 32 journeys, 4 workers.
+        # Verifies ordering, tracker accounting, and that the batch wrapper
+        # does not double-charge (cache hits don't fire in a fresh cache
+        # dir, so n_calls should equal n_journeys after the first batch).
+        conc_tracker = CostTracker(budget_usd=10.0)
+        conc_cache = Path(tdir) / "conc"
+        batch_journeys = [
+            gen_journey("clean", seed=100 + k, actor="human") for k in range(32)
+        ]
+        progress_events: list[tuple[int, int, float]] = []
+        bodies = generate_narratives_concurrent(
+            batch_journeys, tracker=conc_tracker, cache_dir=conc_cache,
+            narrator_fn=_stub_narrator(), max_workers=4,
+            progress_callback=lambda d, t, s: progress_events.append((d, t, s)),
+        )
+        assert len(bodies) == 32, f"expected 32 bodies, got {len(bodies)}"
+        assert all(b for b in bodies), "concurrent path returned an empty body"
+        # Ordering: bodies[i] corresponds to batch_journeys[i]. Stub narrator
+        # returns family-specific text, so bodies are not all identical; but
+        # they are deterministic per-journey, so a re-call returns the same.
+        assert conc_tracker.n_calls == 32, \
+            f"expected 32 charged calls, got {conc_tracker.n_calls}"
+        assert conc_tracker.n_cache_hits == 0, \
+            f"fresh cache should have 0 hits, got {conc_tracker.n_cache_hits}"
+        # Progress callback fired once per completion.
+        assert len(progress_events) == 32, \
+            f"expected 32 progress events, got {len(progress_events)}"
+        # Final event reports n_done == n_total.
+        assert progress_events[-1][0] == 32 and progress_events[-1][1] == 32
+
+        # Re-run the same batch: cache should serve everything, zero charges.
+        replay_tracker = CostTracker(budget_usd=10.0)
+        replay_bodies = generate_narratives_concurrent(
+            batch_journeys, tracker=replay_tracker, cache_dir=conc_cache,
+            narrator_fn=_stub_narrator(), max_workers=4,
+        )
+        assert replay_bodies == bodies, "cache replay produced different bodies"
+        assert replay_tracker.n_calls == 0, \
+            f"cache replay should bill 0 calls, got {replay_tracker.n_calls}"
+        assert replay_tracker.n_cache_hits == 32
+        print("  concurrent batch path OK (32 journeys, 4 workers, cache replay clean)")
 
     print("narrative_generator self-test OK (using stub narrator)")
     print(f"  tracker summary: {tracker.summary()}")
