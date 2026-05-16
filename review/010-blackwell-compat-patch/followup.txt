@@ -1,0 +1,167 @@
+Review comments 010 -- follow-up
+Date: 2026-05-16
+Subject: Disposition of findings in 010-blackwell-compat-patch/comments.txt
+Author: scaffold maintainer
+
+Original review file:
+    review/010-blackwell-compat-patch/comments.txt
+
+Repo state at follow-up:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+Baseline commit:
+    925b997 (the Blackwell-compat patch that was the scope of this review)
+
+Summary:
+All three High findings FIXED in this pass. The unrunnable bnb sanity
+command is replaced with a self-contained heredoc that actually
+executes an optimizer step on the GPU (catching "no kernel image"
+errors that __init__ misses). The bitsandbytes version contract now
+agrees across all three artifacts (requirements.txt / preflight /
+RUNBOOK -- all say 0.45.0+). The documented `adamw_8bit` fallback is
+now executable: `build_optimizer` in src/train/common.py has the new
+branch routing to `bnb.optim.AdamW8bit`, so the RUNBOOK §10 recovery
+recipe runs end-to-end without trainer-side error.
+
+Disposition per finding:
+
+1. High: The Blackwell bitsandbytes sanity command fails before it
+   checks anything (`NameError: name 'torch' is not defined`).
+
+Status: FIXED.
+
+Action: replaced the broken `python3 -c "..."` one-liner in RUNBOOK §10
+with a multi-line `python3 - <<'PY' ... PY` heredoc that:
+
+  - Imports torch FIRST and prints `torch.version.cuda` +
+    `torch.cuda.get_device_capability(0)` for the reviewer's expected
+    "(10, 0) or (12, 0)" check.
+  - Asserts `torch.cuda.is_available()` so a CPU-only pod fails loud
+    instead of silently producing meaningless output.
+  - Imports bitsandbytes, prints `bnb.__version__`.
+  - Constructs a bf16 CUDA parameter + a synthetic gradient.
+  - Builds `PagedAdamW8bit` AND calls `.step()` + `torch.cuda.synchronize()`.
+    The reviewer specifically flagged that __init__ alone does not
+    trigger the "no kernel image is available" path -- that error
+    surfaces at .step(). Now it does.
+  - Prints `PagedAdamW8bit.step() OK on <gpu name>` so the operator
+    knows the kernel actually executed, not just that the class
+    imported.
+
+Comment block also added explaining WHY the step matters (so a future
+reader doesn't shorten the heredoc back to the broken form).
+
+Verify (pod-side, after `pip install -r requirements.txt`):
+    bash -c "$(awk '/python3 - <</,/^  ```/' RUNBOOK.md | sed -n '/^  python3/,/^  PY/p' | sed 's/^  //')"
+    # Or just copy-paste the block from RUNBOOK.md §10.
+    # Expected last line: PagedAdamW8bit.step() OK on NVIDIA RTX PRO 6000 (or similar)
+
+2. High: Preflight still allows bitsandbytes 0.43 even though Blackwell
+   now requires 0.45+.
+
+Status: FIXED.
+
+Action: aligned all three version contracts at 0.45.0:
+
+  - `scripts/preflight_check.py:check_bitsandbytes` default raised from
+    `min_version: str = "0.43.0"` -> `"0.45.0"`. Added a docstring
+    explaining why and pointing at this review.
+  - RUNBOOK §10 line that said "`paged_adamw_8bit` requires
+    `bitsandbytes>=0.43`" rewritten to "requires `bitsandbytes>=0.45.0`
+    (Blackwell paged-kernel floor -- review 010)" plus a one-line
+    reminder that requirements.txt and preflight agree.
+  - requirements.txt already had `>=0.45.0,<0.46` from commit 925b997;
+    unchanged here.
+
+The reviewer's alternative -- making preflight
+`torch.cuda.get_device_capability(0)`-aware so Hopper keeps a lower
+floor -- DEFERRED. Rationale: we have no concrete Hopper deployment
+right now (H100/H200 SXM both Unavailable on Secure Cloud, the actual
+pod is RTX PRO 6000 Blackwell), and adding architecture-conditional
+version logic to preflight is reversible later. A single floor of
+0.45.0 is also harmless on Hopper because 0.45.x still has Hopper
+kernels. If a future deployment needs to pin Hopper to bnb < 0.45 for
+some reason, that's the time to add the conditional.
+
+Verify (laptop, no torch needed):
+    python3 -c "
+    from pathlib import Path
+    import re
+    print('req:      ', re.search(r'^bitsandbytes.*$', Path('requirements.txt').read_text(), re.M).group(0))
+    print('preflight:', re.search(r'def check_bitsandbytes\(min_version: str = \"([^\"]+)\"\)', Path('scripts/preflight_check.py').read_text()).group(1))
+    print('runbook still says >=0.43:', 'bitsandbytes>=0.43' in Path('RUNBOOK.md').read_text())
+    print('runbook says >=0.45:      ', 'bitsandbytes>=0.45.0' in Path('RUNBOOK.md').read_text())
+    "
+    # Expected:
+    # req:       bitsandbytes>=0.45.0,<0.46
+    # preflight: 0.45.0
+    # runbook still says >=0.43: False
+    # runbook says >=0.45:       True
+
+3. High: The documented non-paged 8-bit fallback is not wired into the
+   trainer factory.
+
+Status: FIXED.
+
+Action: implemented `adamw_8bit` in `build_optimizer`
+(`src/train/common.py:227-258`) so the RUNBOOK §10 fallback recipe is
+actually executable from a trainer config. The build_optimizer accept
+list now reads: paged_adamw_8bit, adamw_8bit, adamw.
+
+Code change:
+
+    elif optimizer_name == "adamw_8bit":
+        import bitsandbytes as bnb
+        opt = bnb.optim.AdamW8bit(
+            trainable, lr=lr, weight_decay=weight_decay,
+        )
+
+Also tightened the unknown-optimizer error message to list the three
+supported values, so a typo in a config produces a useful failure
+message instead of just the literal string.
+
+Docstring rewritten to document all three modes with memory-footprint
+guidance: paged_adamw_8bit (default, ~5 B/param), adamw_8bit (fallback,
+~5 B/param non-paged), adamw (full fp32, ~12 B/param, last resort).
+
+RUNBOOK §10 recovery recipe updated in lockstep:
+  - Old text: "fall back to non-paged 8-bit optimizer (`AdamW8bit`
+    instead of `PagedAdamW8bit`) in the trainer configs"
+  - New text: "set `optimizer: adamw_8bit` in the trainer config
+    (instead of the default `paged_adamw_8bit`). `build_optimizer()`
+    in `src/train/common.py` accepts that value and routes to
+    `bnb.optim.AdamW8bit`. Avoid `optimizer: adamw` unless 8-bit
+    kernels are also broken -- that path uses full-fp32 optimizer
+    state (~4x memory)."
+
+This closes the reviewer's "If keeping the 8-bit fallback, add a
+pod-side smoke check for both paged_adamw_8bit and adamw_8bit"
+recommendation halfway: both branches are now reachable from config.
+A full pod-side smoke for both is a useful addition but DEFERRED to
+review 011 if it turns out we need to flip between them. The plain
+RUNBOOK §10 sanity script tests the paged path; if it fails, the
+adamw_8bit path is the documented next step and is now executable.
+
+Verify (laptop, no torch needed):
+    python3 -c "
+    import re
+    src = open('src/train/common.py').read()
+    assert 'optimizer_name == \"adamw_8bit\"' in src
+    assert 'bnb.optim.AdamW8bit' in src
+    print('adamw_8bit branch present, routes to bnb.optim.AdamW8bit')
+    "
+
+    python3 -m src.train.common
+    # torch/transformers self-tests still skipped locally (no torch
+    # installed on this venv); pod-side both branches will run.
+
+Bottom line:
+The bnb sanity command, version contract, and fallback recipe now form
+a coherent boot checklist: bnb 0.45+ enforced at preflight, the actual
+kernel exercised at .step(), and if the kernel fails, the documented
+fallback maps to a real code path. Safe to use this as the RunPod boot
+checklist for Task #32 vertical slice.
+
+Notes on the INDEX backfill:
+This followup is committed alongside the code/doc fixes (commit A).
+Then INDEX.md's 010 row is added with commit A's hash in a small
+follow-up (commit B). Same two-commit pattern.

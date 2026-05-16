@@ -333,7 +333,7 @@ If RunPod billing is approaching $300 with the POC incomplete, pause and escalat
 
 - **`HF_HOME=/workspace/.hf`** must be set *before* importing `transformers` or it caches to container disk and loses on restart.
 - **`TOKENIZERS_PARALLELISM=false`** — without it, Accelerate prints warnings on every batch.
-- **`paged_adamw_8bit`** requires `bitsandbytes>=0.43`. The `preflight_check.py` validates the version.
+- **`paged_adamw_8bit`** requires `bitsandbytes>=0.45.0` (Blackwell paged-kernel floor — review 010). `preflight_check.py:check_bitsandbytes` validates this, and `requirements.txt` pins `>=0.45.0,<0.46` so the three contracts agree. Below 0.45 on Blackwell GPUs the paged path silently falls back to non-paged, ~2x'ing optimizer memory.
 - **Adding new tokens to Qwen3-8B** requires `model.resize_token_embeddings(len(tokenizer))` *after* tokenizer.add_special_tokens. Forgetting this produces silent NaN.
 - **Cross-attention KV cache** is not natively supported by the base Qwen3 `forward()`; our `qwen_xattn_wrapper.py` patches it. If you see `KeyError: 'cross_kv'` during generation, the wrapper isn't being used.
 - **W&B offline mode**: set `WANDB_MODE=offline` before training. Sync later with `wandb sync /workspace/.wandb/offline-run-*`.
@@ -341,12 +341,28 @@ If RunPod billing is approaching $300 with the POC incomplete, pause and escalat
   ```bash
   # GPU + CUDA version sanity (expect SM_100 or SM_120 + CUDA 12.8+)
   nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv
-  python3 -c "import torch; print(torch.version.cuda, torch.cuda.get_device_capability(0))"
-  # bitsandbytes Blackwell kernel check
-  python3 -c "import bitsandbytes as bnb; print('bnb', bnb.__version__); import bitsandbytes.optim as o; opt = o.PagedAdamW8bit([torch.nn.Parameter(torch.randn(8, device='cuda'))]); print('paged_adamw_8bit instantiates OK')"
+  # bitsandbytes Blackwell kernel check — proves the paged-optimizer
+  # kernel actually executes on the GPU, not just that the class imports.
+  # A bad bnb build raises "no kernel image is available" at .step(), not
+  # at __init__, so we must run one step before declaring victory.
+  python3 - <<'PY'
+  import torch
+  print("torch.version.cuda:", torch.version.cuda)
+  print("compute_capability :", torch.cuda.get_device_capability(0))
+  assert torch.cuda.is_available(), "CUDA not visible to torch"
+  import bitsandbytes as bnb
+  import bitsandbytes.optim as bnb_optim
+  print("bitsandbytes:", bnb.__version__)
+  p = torch.nn.Parameter(torch.randn(8, device="cuda", dtype=torch.bfloat16))
+  p.grad = torch.randn_like(p)
+  opt = bnb_optim.PagedAdamW8bit([p], lr=1e-4)
+  opt.step()
+  torch.cuda.synchronize()
+  print("PagedAdamW8bit.step() OK on", torch.cuda.get_device_name(0))
+  PY
   ```
-  If bnb fails to import or PagedAdamW8bit raises `RuntimeError: CUDA error` / "no kernel image is available" on Blackwell:
+  If bnb fails to import or PagedAdamW8bit's `.step()` raises `RuntimeError: CUDA error` / "no kernel image is available" on Blackwell:
   1. `pip install --upgrade "bitsandbytes>=0.45.0,<0.46"` — pip may have selected a pre-built wheel without SM_120 kernels.
   2. If that still fails: `pip install bitsandbytes --upgrade --pre` to get nightly wheels with broader Blackwell coverage.
-  3. Last resort: fall back to non-paged 8-bit optimizer (`AdamW8bit` instead of `PagedAdamW8bit`) in the trainer configs — costs ~2x optimizer memory but works on any bnb build with bf16 kernels. On 96 GB Blackwell that's still fine for our workload.
+  3. Last resort: set `optimizer: adamw_8bit` in the trainer config (instead of the default `paged_adamw_8bit`). `build_optimizer()` in `src/train/common.py` accepts that value and routes to `bnb.optim.AdamW8bit` — non-paged but still 8-bit, so memory stays close to the paged path. Avoid `optimizer: adamw` unless 8-bit kernels are also broken — that path uses full-fp32 optimizer state (~4x memory).
 - **Community Cloud preemption**: Community hosts can reclaim the GPU. We treat this as expected, not exceptional: `backup_to_external.sh` rsyncs the top-3 + jsonl + summaries every 30 min, atomic checkpoint writes mean partial files are never visible, and `experiments.jsonl` lets the auto-research loop resume from wherever it stopped. Worst case is ~30 min of work lost. If you're preempted, just re-rent any GPU in the same region, run §1.3 bootstrap, and the loop picks back up.

@@ -215,10 +215,18 @@ def find_label_token_position(input_ids: list[int], tokenizer) -> int:
 
 def build_optimizer(model, *, lr: float, weight_decay: float = 0.0,
                     optimizer_name: str = "paged_adamw_8bit"):
-    """Build the optimizer per PLAN.md Training pipeline. Default is
-    paged_adamw_8bit which cuts AdamW optimizer state from 12 bytes/param
-    to ~5 bytes/param via bitsandbytes' 8-bit quantization + paged
-    state."""
+    """Build the optimizer per PLAN.md Training pipeline.
+
+    Supported values for `optimizer_name`:
+      paged_adamw_8bit  default; ~5 B/param via bnb 8-bit + paged state.
+      adamw_8bit        non-paged 8-bit fallback; ~5 B/param. Use when
+                        Blackwell paged kernels are unavailable (review
+                        010 finding #3 + RUNBOOK §10 last-resort recipe).
+                        Slightly slower than paged but works on any
+                        bnb 0.45+ build with bf16 kernels.
+      adamw             full torch AdamW; ~12 B/param. Use only when
+                        both 8-bit paths are broken.
+    """
     trainable = [p for p in model.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)
     if n_trainable == 0:
@@ -229,11 +237,19 @@ def build_optimizer(model, *, lr: float, weight_decay: float = 0.0,
         opt = bnb.optim.PagedAdamW8bit(
             trainable, lr=lr, weight_decay=weight_decay,
         )
+    elif optimizer_name == "adamw_8bit":
+        import bitsandbytes as bnb
+        opt = bnb.optim.AdamW8bit(
+            trainable, lr=lr, weight_decay=weight_decay,
+        )
     elif optimizer_name == "adamw":
         import torch
         opt = torch.optim.AdamW(trainable, lr=lr, weight_decay=weight_decay)
     else:
-        raise ValueError(f"unknown optimizer: {optimizer_name!r}")
+        raise ValueError(
+            f"unknown optimizer: {optimizer_name!r}. "
+            f"Supported: paged_adamw_8bit, adamw_8bit, adamw."
+        )
     return opt, n_trainable
 
 

@@ -107,7 +107,15 @@ def check_tokenizer_roundtrip(model_id: str = "Qwen/Qwen3-8B") -> None:
     _ok(f"tokenizer roundtrip OK ({added} new tokens added)")
 
 
-def check_bitsandbytes(min_version: str = "0.43.0") -> None:
+def check_bitsandbytes(min_version: str = "0.45.0") -> None:
+    """Floor raised from 0.43.0 -> 0.45.0 in review 010 follow-up.
+
+    0.45+ ships Blackwell (SM_100 / SM_120) paged-optimizer kernels.
+    Below that, `paged_adamw_8bit` silently falls back to non-paged on
+    Blackwell GPUs and degrades throughput / doubles optimizer memory.
+    The version line in requirements.txt and the bullet in RUNBOOK §10
+    must match this floor.
+    """
     try:
         import bitsandbytes as bnb  # noqa: F401
     except ImportError:
