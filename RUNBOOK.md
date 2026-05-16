@@ -68,9 +68,9 @@ python scripts/preflight_check.py
 ├── .wandb/                     W&B offline logs
 ├── cross_attn_ato_poc/         This repository (git clone — repo-as-root layout)
 ├── data/                       Generated synthetic datasets
-│   ├── train_llm_narrated/     20-30k LLM-narrated pairs
-│   ├── eval_fast_5k/           5k stratified eval
-│   ├── eval_medium_50k/        50k templated medium eval
+│   ├── train_llm_narrated/     LLM-narrated pool: data.jsonl + eval.jsonl (5k stratified)
+│   ├── eval_fast_5k/           Symlink or copy of train_llm_narrated/eval.jsonl
+│   ├── eval_medium_50k/        50k templated medium eval (standalone gen)
 │   └── eval_large/             100-200k templated large eval (optional)
 ├── checkpoints/
 │   ├── qwen3-8b-cpt-light-lora/   Stage-0 LoRA (pre-merge)
@@ -88,7 +88,72 @@ python scripts/preflight_check.py
 
 ### Day 0 (locally, before pod)
 
-Already complete if this file exists.
+Maximize work done on the laptop so the H100 clock starts on training, not setup. Steps that need a GPU or transformers/torch are marked **pod-only**; the rest run from any Python 3.11 venv on the laptop.
+
+**0.1 Pure-Python scaffold smoke (no torch needed)**
+
+```bash
+cd /path/to/cross_attn_ato_poc
+python3 -m venv .venv-local && source .venv-local/bin/activate
+pip install -r requirements.txt          # installs openai + light deps
+python3 -m data.gen.narrative_generator --self-test
+# Expected: "narrative_generator self-test OK (using stub narrator)"
+```
+
+The self-test uses a stub narrator (no API key, no network) and verifies the cost-tracker math against `_PRICING`. Run this before any LLM call — it catches a busted pricing-table edit immediately.
+
+**0.2 Tokenizer sanity — two parts**
+
+```bash
+# Part A (no torch, no model download — runs anywhere):
+python3 -m src.tokenizer.fencer                 # bare invocation = self-test
+python3 -m src.tokenizer.custom_tokens --check  # validates token registry only
+
+# Part B (torch + transformers + Qwen3 download — pod-only):
+python3 scripts/preflight_check.py              # AutoTokenizer roundtrip + resize
+```
+
+Part A asserts the PII fencer is idempotent and the journey/actor/event/PII/bucketed-feature token registry is internally consistent. Neither call loads torch or downloads model weights. Part B exercises `AutoTokenizer.from_pretrained(...)`, embedding-avg init, and `model.resize_token_embeddings(...)` — those require torch + transformers + a ~16 GB Qwen3 base download, so they belong on the pod (Day-1 Hr 0-2, after §1.3 bootstrap).
+
+**0.3 LLM-narrated training set (~$10 with gpt-5.4-nano default)**
+
+```bash
+export OPENAI_API_KEY=...
+# Optional: smoke first with --n 100 --mode template (free, no API)
+python3 -m data.gen.build_dataset --n 100 --out data/samples/smoke --mode template
+
+# Real run: 25k LLM-narrated pairs, with stratified 5k eval carve.
+python3 -m data.gen.build_dataset \
+    --n 25000 \
+    --out data/train_llm_narrated \
+    --mode llm \
+    --eval-frac 0.2 \
+    --usd-budget 12.0           # nano @ 25k ≈ $9.81 uncached; 12.0 leaves slack
+```
+
+`build_dataset.py` writes `train_llm_narrated/data.jsonl` plus `train_llm_narrated/eval.jsonl` (the stratified 5k carve). It does **not** create `data/eval_fast_5k/` as a separate directory — wire that up explicitly:
+
+```bash
+mkdir -p data/eval_fast_5k
+ln -sf ../train_llm_narrated/eval.jsonl data/eval_fast_5k/data.jsonl
+```
+
+**Cost-cap behavior**: `--usd-budget` is checked **after** each API call returns. A single in-flight call can push the running total past the cap by one charge (worst case ~$0.001 at nano). Set the cap with that one-call slack in mind; do not set it equal to the wall.
+
+**0.4 Templated medium eval (free, no API)**
+
+```bash
+python3 -m data.gen.build_dataset --n 50000 --out data/eval_medium_50k --mode template
+```
+
+**0.5 Upload to pod-side storage**
+
+```bash
+# rsync over SSH (dependency-light; the RunPod pod has ssh by default).
+rsync -avh --progress data/ user@<pod>:/workspace/data/
+```
+
+Alternative upload paths (S3, R2, HF private dataset) require extra client tooling on **both** ends — see §8 caveats. `rsync` is the only option that needs nothing beyond ssh.
 
 ### Day 1
 
@@ -206,9 +271,12 @@ git reset --hard <hash>    # destructive — only with intent
 
 Target options (pick one; configure via env var `BACKUP_TARGET`):
 
-- `s3://<bucket>/cross-attn-ato-poc/`  (AWS CLI)
-- `r2://<bucket>/cross-attn-ato-poc/`  (rclone)
-- `hf://datasets/<user>/cross-attn-ato-poc-artifacts/`  (HF private dataset)
+- `s3://<bucket>/cross-attn-ato-poc/`  (requires `awscli` + IAM creds in env)
+- `r2://<bucket>/cross-attn-ato-poc/`  (requires `rclone` configured for R2)
+- `hf://datasets/<user>/cross-attn-ato-poc-artifacts/`  (requires `huggingface_hub` + write token)
+- `rsync://user@host:/path/`           (requires only `ssh` + `rsync` — dependency-light)
+
+Only the rsync target works with a stock RunPod base image out of the box. The other three need a one-time client install + credential provisioning in §1.3 bootstrap if used.
 
 What gets backed up:
 
@@ -228,7 +296,8 @@ What is **not** backed up: failed sweep checkpoints, HF cache, W&B offline logs.
 
 ## 9. Cost guardrails
 
-- LLM narration budget: **$200 hard cap** for the 25k LLM-narrated pairs (`narrative_generator.py` tracks running cost; aborts if exceeded).
+- LLM narration budget: **$200 hard cap** for the 25k LLM-narrated pairs (`narrative_generator.py` tracks running cost; aborts when exceeded). Default narrator is `gpt-5.4-nano` (~$9.81 uncached, ~$8.24 with prompt caching at 25k narratives), so the cap has ~20x headroom over the projected spend.
+- **Cost-cap overshoot is bounded by one API call.** The CostTracker checks the running total *after* each completed call (sunk-cost realism — we cannot un-charge a returned response). Worst case at gpt-5.4-nano: one ~$0.001 overshoot above the cap. Set `--usd-budget` slightly above the wall you actually care about.
 - H100 hours: ~24 hours of GPU usage across 3 days. Reserved pricing ≈ $50-80; on-demand ≈ $100-160.
 - Total POC cost target: < $400 including LLM narration.
 
