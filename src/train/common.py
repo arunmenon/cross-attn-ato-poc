@@ -133,6 +133,15 @@ def load_paired_dataset(data_dir: str | Path):
             splits["eval"] = _read_jsonl(eval_path)
         else:
             splits["eval"] = None  # type: ignore[assignment]
+    elif eval_path.exists():
+        # Eval-only directory layout — used by `data/eval_fast_5k/`
+        # which symlinks just the eval.jsonl carve from
+        # train_llm_narrated. Set splits["train"]=None so the
+        # `splits.get("eval") or splits["train"]` fallback pattern in
+        # the trainers still short-circuits cleanly (Dataset is truthy
+        # when non-empty, None is falsy).
+        splits["train"] = None  # type: ignore[assignment]
+        splits["eval"] = _read_jsonl(eval_path)
     elif single_path.exists():
         splits["train"] = _read_jsonl(single_path)
         splits["eval"] = None  # type: ignore[assignment]
