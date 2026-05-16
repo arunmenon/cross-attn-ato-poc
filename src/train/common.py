@@ -29,11 +29,47 @@ from typing import Any
 # Config loading
 # ---------------------------------------------------------------------------
 
+# PyYAML's YAML-1.1 float resolver requires a decimal point in scientific
+# notation: '5.0e-5' is a float, but '5e-5' (and '1e-4') is parsed as a
+# string. The trainers' configs use the no-dot form throughout the plan,
+# so we post-process loaded configs to coerce scientific-notation strings
+# back to floats. Caught at first vertical-slice run (Task #32, 2026-05-16)
+# when bitsandbytes raised
+#     TypeError: '<=' not supported between instances of 'float' and 'str'
+# from `if not 0.0 <= lr:` because lr came through as '5e-5'.
+import re as _re
+_SCI_NOTATION_RE = _re.compile(r"^[-+]?(?:\d+(?:\.\d*)?|\.\d+)[eE][-+]?\d+$")
+
+
+def _coerce_scientific_floats(node: Any) -> Any:
+    """Recursively walk a parsed YAML structure; convert any string that
+    looks like scientific notation (e.g. '5e-5', '1e-4', '-3.2e+10') to a
+    float. Other strings are left alone. Mutates dicts/lists in place
+    and returns the node for convenience.
+    """
+    if isinstance(node, dict):
+        for k, v in node.items():
+            node[k] = _coerce_scientific_floats(v)
+        return node
+    if isinstance(node, list):
+        for i, v in enumerate(node):
+            node[i] = _coerce_scientific_floats(v)
+        return node
+    if isinstance(node, str) and _SCI_NOTATION_RE.match(node):
+        return float(node)
+    return node
+
+
 def load_config(path: str | Path) -> dict[str, Any]:
     """Load and validate a trainer config (YAML). Schema is the one in
     src/auto_research/experiment_template.yaml; scripts/run_next_experiment.py
     validates before invoking the trainer, so trainers can assume the
-    config is well-formed."""
+    config is well-formed.
+
+    Coerces scientific-notation strings (PyYAML quirk — see
+    _SCI_NOTATION_RE comment) to floats so callers can rely on
+    `cfg["training"]["lr"]` being a number.
+    """
     import yaml
 
     p = Path(path)
@@ -43,6 +79,7 @@ def load_config(path: str | Path) -> dict[str, Any]:
         cfg = yaml.safe_load(f)
     if not isinstance(cfg, dict):
         raise ValueError(f"config must be a YAML mapping; got {type(cfg).__name__}")
+    _coerce_scientific_floats(cfg)
     return cfg
 
 
