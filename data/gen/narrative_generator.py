@@ -1,7 +1,11 @@
 """LLM-narrated paired-text generator.
 
-Calls Anthropic's API (Claude) to produce an analyst-style narrative for
-each Journey. Defense-in-depth against narrative-leakage:
+Calls OpenAI's API by default (gpt-5.4-nano — cheapest in the GPT-5.4
+family at ~$0.0004/call on our token shape, ~$10 for the full 25k
+training set). Anthropic remains supported as an alternative provider
+via the `LLM_PROVIDER` env var or by passing a `claude-*` model name.
+
+Defense-in-depth against narrative-leakage:
 
   1. **Prompt-side ban**: the system prompt explicitly forbids the
      narrator from using class names (fraud, legit, ATO, SIM-swap,
@@ -19,9 +23,13 @@ each Journey. Defense-in-depth against narrative-leakage:
 The verdict footer is NOT LLM-generated. It is deterministically
 appended by the pipeline based on `journey.label` and `journey.journey_family`.
 
-If `ANTHROPIC_API_KEY` is not set, this module raises with a clear
-message pointing the user to `cheap_template_generator` for the offline
-path.
+Provider selection:
+  - LLM_PROVIDER=openai (default) + OPENAI_API_KEY → gpt-5.4-nano
+  - LLM_PROVIDER=anthropic + ANTHROPIC_API_KEY → claude-haiku-4-5
+  - Provider can also be inferred from the model name's prefix
+    (gpt-* → openai, claude-* → anthropic).
+  - If neither key is set, this module raises with a clear pointer
+    to cheap_template_generator for the offline path.
 
 CLI:
     python -m data.gen.narrative_generator --self-test
@@ -49,18 +57,44 @@ from src.tokenizer.fencer import fence
 # ---------------------------------------------------------------------------
 
 DEFAULT_CACHE_DIR = Path("data/cache/narratives")
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"  # cheap; ~$0.005/narrative target
 DEFAULT_MAX_TOKENS = 300
 DEFAULT_TIMEOUT_SEC = 30
 DEFAULT_USD_BUDGET = 200.0
 DEFAULT_MAX_RETRIES = 2
 
-# Rough cost estimates (USD per call, Haiku 4.5):
-# - Input ~400 tokens × $0.80/M = $0.00032
-# - Output ~250 tokens × $4.00/M = $0.00100
-# Total: ~$0.0013/call (well under $0.005 target).
-_HAIKU_INPUT_USD_PER_TOKEN = 0.80 / 1_000_000
-_HAIKU_OUTPUT_USD_PER_TOKEN = 4.00 / 1_000_000
+# Provider switch — set LLM_PROVIDER env var to "openai" (default) or "anthropic".
+# Defaults are chosen for cost: gpt-5.4-nano is ~10x cheaper than gpt-5.4-mini
+# and ~3.4x cheaper than claude-haiku-4-5 at the 25k-narrative scale (see
+# docs/batch-2-data-generators.md cost section).
+DEFAULT_PROVIDER = "openai"
+DEFAULT_OPENAI_MODEL = "gpt-5.4-nano"
+DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
+
+# Pricing table, USD per token. Last verified 2026-05-16 from
+# developers.openai.com/api/docs/models/* (gpt-5.4 family). Anthropic
+# pricing carried over from the prior default.
+#
+# Keys must match the `model` string the trainer passes to CostTracker.charge().
+# "cached_in" is the price for tokens served from OpenAI's prompt-cache (90%
+# off standard input). The tracker treats cache hits as `cached_in` priced.
+_PRICING: dict[str, dict[str, float]] = {
+    "gpt-5.4-nano":              {"in": 0.20  / 1e6, "out": 1.25 / 1e6, "cached_in": 0.02  / 1e6},
+    "gpt-5.4-mini":              {"in": 0.75  / 1e6, "out": 4.50 / 1e6, "cached_in": 0.075 / 1e6},
+    "gpt-5.4":                   {"in": 2.50  / 1e6, "out": 15.0 / 1e6, "cached_in": 0.25  / 1e6},
+    "claude-haiku-4-5-20251001": {"in": 0.80  / 1e6, "out": 4.00 / 1e6, "cached_in": 0.08  / 1e6},
+}
+
+# Back-compat: some external callers may set narrative_generator.DEFAULT_MODEL.
+# We honour it by re-deriving the provider from the model name string.
+DEFAULT_MODEL = DEFAULT_OPENAI_MODEL
+
+
+def _provider_for_model(model: str) -> str:
+    if model.startswith("gpt-"):
+        return "openai"
+    if model.startswith("claude-"):
+        return "anthropic"
+    raise ValueError(f"cannot infer provider from model name {model!r}")
 
 
 SYSTEM_PROMPT = """You are an internal risk-analyst describing a payments session in plain English.
@@ -119,14 +153,24 @@ class CostTracker:
     budget_usd: float = DEFAULT_USD_BUDGET
     breakdown: dict[str, float] = field(default_factory=dict)
 
-    def charge(self, model: str, input_tokens: int, output_tokens: int) -> float:
-        if model.startswith("claude-haiku"):
-            cost = (input_tokens * _HAIKU_INPUT_USD_PER_TOKEN
-                    + output_tokens * _HAIKU_OUTPUT_USD_PER_TOKEN)
+    def charge(self, model: str, input_tokens: int, output_tokens: int,
+               cached_input_tokens: int = 0) -> float:
+        """Charge for one API call. `cached_input_tokens` is the subset of
+        `input_tokens` that was served from the provider's prompt cache
+        (OpenAI's prompt caching reports this in `usage.prompt_tokens_details.cached_tokens`;
+        Anthropic uses `cache_read_input_tokens`).
+
+        Cost = (input - cached) × in_price + cached × cached_in_price + output × out_price.
+        """
+        prices = _PRICING.get(model)
+        if prices is None:
+            # Conservative default for unknown models — assume frontier pricing.
+            cost = (input_tokens * 3.0 / 1e6 + output_tokens * 15.0 / 1e6)
         else:
-            # Conservative default for other models
-            cost = (input_tokens * 3.0 / 1_000_000
-                    + output_tokens * 15.0 / 1_000_000)
+            uncached_in = max(0, input_tokens - cached_input_tokens)
+            cost = (uncached_in * prices["in"]
+                    + cached_input_tokens * prices["cached_in"]
+                    + output_tokens * prices["out"])
         self.spent_usd += cost
         self.n_calls += 1
         self.breakdown[model] = self.breakdown.get(model, 0.0) + cost
@@ -245,6 +289,75 @@ leakage scan; empty list on the initial call.
 """
 
 
+def _real_openai_call(model: str, max_tokens: int, timeout: int) -> NarratorFn:
+    """Build a NarratorFn that calls the OpenAI API. Default provider.
+
+    The OpenAI Chat Completions API uses a different message shape than
+    Anthropic — system + user roles inside `messages`, not a separate
+    `system` arg. Prompt caching is automatic on supported models when
+    the SAME prefix is sent for >1024 tokens (our system prompt is
+    ~350 tokens, below threshold; caching may not fire — see
+    docs/batch-2-data-generators.md cost discussion).
+    """
+    try:
+        import openai
+    except ImportError as e:
+        raise RuntimeError(
+            "openai package not installed. Run `pip install openai>=1.0` "
+            "or use cheap_template_generator for offline narration."
+        ) from e
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set. Export it, or use "
+            "cheap_template_generator for offline narration."
+        )
+
+    client = openai.OpenAI(api_key=api_key, timeout=timeout)
+
+    def call(journey: Journey, attempt: int, prev_hits: list) -> tuple[str, int, int]:
+        user_msg = _serialize_events_for_prompt(journey)
+
+        # Retry-time feedback — same shape as Anthropic path.
+        system = SYSTEM_PROMPT
+        if attempt > 0 and prev_hits:
+            banned_phrases = sorted({h[0] for h in prev_hits})
+            system = (
+                f"{SYSTEM_PROMPT}\n\n"
+                f"RETRY FEEDBACK (attempt {attempt}): a previous attempt at "
+                f"this narrative was REJECTED because it used these banned "
+                f"phrases or stems: {banned_phrases}. Rewrite the narrative "
+                f"without using any of them or their variants. Stay strictly "
+                f"within the HARD RULES above."
+            )
+        temperature = 0.3 if attempt == 0 else 0.7
+
+        resp = client.chat.completions.create(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_msg},
+            ],
+        )
+        body = resp.choices[0].message.content if resp.choices else ""
+        # Token counts — OpenAI reports prompt_tokens / completion_tokens.
+        # Cached-token sub-count (when present) is consumed by
+        # CostTracker.charge via the `cached_input_tokens` kwarg, but the
+        # narrator interface stays single-int. We expose total input here
+        # and rely on the SDK's standard `prompt_tokens` for the cache-naive
+        # cost approximation. (Tighter accounting would refactor the
+        # NarratorFn signature to return cached_in too — deferred.)
+        usage = resp.usage
+        in_toks = usage.prompt_tokens if usage else 0
+        out_toks = usage.completion_tokens if usage else 0
+        return (body or "").strip(), in_toks, out_toks
+
+    return call
+
+
 def _real_anthropic_call(model: str, max_tokens: int, timeout: int) -> NarratorFn:
     """Build a NarratorFn that calls the Anthropic API. Raises if the
     SDK / API key is unavailable.
@@ -326,7 +439,8 @@ def generate_narrative(
                         `tracker.over_budget()` BEFORE calling to avoid
                         blowing the cap.
         narrator_fn:    optional injected narrator (for testing); when
-                        None, the real Anthropic client is used.
+                        None, the OpenAI or Anthropic client is chosen
+                        based on LLM_PROVIDER env var or model prefix.
 
     Raises:
         RuntimeError if budget is exceeded or narrator produces leaky
@@ -344,7 +458,21 @@ def generate_narrative(
         tracker.cache_hit()
         return cached
 
-    call = narrator_fn or _real_anthropic_call(model, max_tokens, timeout)
+    # Provider dispatch: pick OpenAI or Anthropic based on the model name
+    # prefix (gpt-* / claude-*) or the LLM_PROVIDER env var override.
+    if narrator_fn is not None:
+        call = narrator_fn
+    else:
+        override = os.environ.get("LLM_PROVIDER")
+        provider = override.lower() if override else _provider_for_model(model)
+        if provider == "openai":
+            call = _real_openai_call(model, max_tokens, timeout)
+        elif provider == "anthropic":
+            call = _real_anthropic_call(model, max_tokens, timeout)
+        else:
+            raise ValueError(
+                f"unknown LLM_PROVIDER={provider!r}; expected 'openai' or 'anthropic'"
+            )
 
     last_body = ""
     prev_hits: list = []

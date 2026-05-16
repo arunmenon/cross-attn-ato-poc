@@ -25,8 +25,11 @@ pydantic==2.9.2
 # Experiment tracking
 wandb==0.18.7
 
-# Data generation
-anthropic==0.39.0    # narrator (Claude)
+# Data generation — narrator provider (pick one; both are import-safe)
+# Default: openai → gpt-5.4-nano (~$10 for 25k narratives at our token shape).
+# Alt:     anthropic → claude-haiku-4-5 (~$34 for 25k narratives).
+openai>=1.50.0,<2.0
+anthropic==0.39.0
 tqdm==4.66.6
 faker==30.8.2        # synthetic identifiers before fencing
 

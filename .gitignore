@@ -15,6 +15,10 @@ data/eval_fast_5k/
 data/eval_medium_50k/
 data/eval_large/
 data/samples/
+# LLM-narrator response cache. Hash-keyed by structured-stream content;
+# re-running build_dataset is free once these are populated. Optional to
+# upload alongside the dataset to give the pod a resumable cache.
+data/cache/
 checkpoints/
 
 # Auto-research runtime
