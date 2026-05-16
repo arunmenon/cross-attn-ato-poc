@@ -2,21 +2,32 @@
 # Versions known to play together as of 2026-05.
 
 # Core HF stack
-transformers==4.46.3
+# transformers floor raised from 4.46.3 -> 4.51 after the first pod
+# bootstrap on 2026-05-16 failed with "Transformers does not recognize
+# this architecture" against Qwen/Qwen3-8B. Qwen3 model_type support
+# landed in transformers 4.51. The original pin was scaffolded before
+# Qwen3 shipped and would have blocked any deployment, not just Blackwell.
+transformers>=4.51,<5.0
 accelerate==1.1.1
 peft==0.13.2
 datasets==3.1.0
-tokenizers==0.20.3
+# tokenizers tracks transformers' bundled requirement (>=0.21 for
+# transformers 4.51+; >=0.22 for 4.57+). Pin loose so pip resolves
+# the right pair.
+tokenizers>=0.21,<1.0
 safetensors==0.4.5
 
 # 8-bit optimizer
-# bitsandbytes 0.45+ ships Blackwell (SM_100 / SM_120) kernels for the
-# paged optimizers. Below 0.45 the `paged_adamw_8bit` path silently falls
-# back to the non-paged variant on Blackwell GPUs, ~2x'ing optimizer
-# memory and degrading throughput. Range pin so 0.45.x patch fixes flow
-# in without another edit; harmless on H100/H200 Hopper hosts.
+# Upper bound raised from <0.46 to <0.50 after the 2026-05-16 pod boot.
+# Background: bnb 0.45.5 ships libbitsandbytes_cuda118.so and
+# libbitsandbytes_cuda12x.so but NOT libbitsandbytes_cuda130.so. The
+# RunPod Pytorch 2.8.0 Blackwell image pulls torch 2.12 with the CUDA
+# 13 runtime, so bnb 0.45.x falls back to CPU-only ("compiled without
+# GPU support") on that image. bnb 0.49+ ships the cuda130 binary.
+# Range bottom is still 0.45 because that is the Blackwell paged-kernel
+# floor; harmless on H100/H200 Hopper where any 0.45+ build works.
 # Required for the RTX PRO 6000 Blackwell and B200 / B300 paths.
-bitsandbytes>=0.45.0,<0.46
+bitsandbytes>=0.45.0,<0.50
 
 # Eval / stats
 scikit-learn==1.5.2
