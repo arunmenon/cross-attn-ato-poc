@@ -239,8 +239,15 @@ def build(
     usd_budget: float = DEFAULT_USD_BUDGET,
     eval_frac: float = 0.0,
     leakage_audit_n: int = 200,
+    llm_model: str | None = None,
 ) -> dict:
-    """Build a dataset of `n` journeys into `out_dir`. Returns a summary dict."""
+    """Build a dataset of `n` journeys into `out_dir`. Returns a summary dict.
+
+    `llm_model` is the narrator model id passed through to
+    `narrative_generator.generate_narrative()`. None means "use the
+    LLM_PROVIDER default" (openai → gpt-5.4-nano, anthropic →
+    claude-haiku-4-5). Ignored when mode == 'template'.
+    """
     rng = random.Random(seed)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -263,7 +270,7 @@ def build(
 
         if mode == "llm":
             assert tracker is not None
-            narrative = llm_narrative(j, tracker=tracker)
+            narrative = llm_narrative(j, tracker=tracker, model=llm_model)
         elif mode == "template":
             narrative = cheap_narrative(j)
         else:
@@ -345,7 +352,7 @@ def main() -> int:
     parser.add_argument("--n", type=int, required=True, help="number of journeys to generate")
     parser.add_argument("--out", type=Path, required=True, help="output directory")
     parser.add_argument("--mode", choices=("llm", "template"), default="template",
-                        help="narrative source: 'llm' (Anthropic API) or 'template' (no LLM)")
+                        help="narrative source: 'llm' (OpenAI/Anthropic API) or 'template' (no LLM)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--usd-budget", type=float, default=DEFAULT_USD_BUDGET,
                         help="hard cap on LLM-narrator spend (mode=llm only)")
@@ -353,12 +360,28 @@ def main() -> int:
                         help="fraction to split into eval.jsonl (stratified by journey_family). 0=single data.jsonl")
     parser.add_argument("--leakage-audit-n", type=int, default=200,
                         help="number of records to audit for narrative leakage")
+    parser.add_argument("--llm-model", default=None,
+                        help="narrator model id (e.g., 'gpt-5.4-nano', "
+                             "'gpt-5.4-mini', 'claude-haiku-4-5-20251001'). "
+                             "Default: provider's default (LLM_PROVIDER env var). "
+                             "Provider is inferred from the model prefix; "
+                             "LLM_PROVIDER + this flag must agree.")
+    parser.add_argument("--llm-provider", default=None,
+                        choices=("openai", "anthropic"),
+                        help="convenience: sets the LLM_PROVIDER env var for "
+                             "this run. Equivalent to `LLM_PROVIDER=... python "
+                             "-m data.gen.build_dataset ...`.")
     args = parser.parse_args()
+
+    if args.llm_provider is not None:
+        import os
+        os.environ["LLM_PROVIDER"] = args.llm_provider
 
     summary = build(
         n=args.n, out_dir=args.out, mode=args.mode, seed=args.seed,
         usd_budget=args.usd_budget, eval_frac=args.eval_frac,
         leakage_audit_n=args.leakage_audit_n,
+        llm_model=args.llm_model,
     )
     print(json.dumps(summary, indent=2))
     return 0

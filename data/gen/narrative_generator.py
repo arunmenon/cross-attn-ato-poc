@@ -84,8 +84,8 @@ _PRICING: dict[str, dict[str, float]] = {
     "claude-haiku-4-5-20251001": {"in": 0.80  / 1e6, "out": 4.00 / 1e6, "cached_in": 0.08  / 1e6},
 }
 
-# Back-compat: some external callers may set narrative_generator.DEFAULT_MODEL.
-# We honour it by re-deriving the provider from the model name string.
+# Back-compat alias. New call sites should pass model=None and let
+# _resolve_provider_and_model() pick the provider's default.
 DEFAULT_MODEL = DEFAULT_OPENAI_MODEL
 
 
@@ -95,6 +95,54 @@ def _provider_for_model(model: str) -> str:
     if model.startswith("claude-"):
         return "anthropic"
     raise ValueError(f"cannot infer provider from model name {model!r}")
+
+
+def _default_model_for_provider(provider: str) -> str:
+    if provider == "openai":
+        return DEFAULT_OPENAI_MODEL
+    if provider == "anthropic":
+        return DEFAULT_ANTHROPIC_MODEL
+    raise ValueError(
+        f"unknown LLM_PROVIDER={provider!r}; expected 'openai' or 'anthropic'"
+    )
+
+
+def _resolve_provider_and_model(
+    model: str | None,
+    env_override: str | None,
+) -> tuple[str, str]:
+    """Pick (provider, model) given an optional caller-supplied model and
+    an optional LLM_PROVIDER env override. Review 009 finding #1.
+
+    Resolution rules:
+      - No model + no env  → DEFAULT_PROVIDER + that provider's default model.
+      - Env only           → env's provider + that provider's default model.
+      - Model only         → infer provider from the model-name prefix.
+      - Both               → infer provider from the model; if that disagrees
+                             with the env override, raise. This catches the
+                             "LLM_PROVIDER=anthropic + model=gpt-..." footgun
+                             that review 009 caught (Anthropic was being
+                             asked to serve an OpenAI model name).
+    """
+    env_override = env_override.lower() if env_override else None
+
+    if model is None and env_override is None:
+        provider = DEFAULT_PROVIDER
+        return provider, _default_model_for_provider(provider)
+
+    if model is None:
+        # env_override is set, by elimination
+        return env_override, _default_model_for_provider(env_override)
+
+    inferred = _provider_for_model(model)
+    if env_override is not None and env_override != inferred:
+        raise ValueError(
+            f"LLM_PROVIDER={env_override!r} disagrees with model={model!r} "
+            f"(which implies provider={inferred!r}). Pass a model name that "
+            f"matches LLM_PROVIDER, or unset LLM_PROVIDER and rely on "
+            f"model-prefix inference."
+        )
+    return inferred, model
 
 
 SYSTEM_PROMPT = """You are an internal risk-analyst describing a payments session in plain English.
@@ -423,7 +471,7 @@ def generate_narrative(
     journey: Journey,
     *,
     tracker: CostTracker,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     timeout: int = DEFAULT_TIMEOUT_SEC,
     max_retries: int = DEFAULT_MAX_RETRIES,
@@ -438,6 +486,12 @@ def generate_narrative(
         tracker:        CostTracker that records spend; consult
                         `tracker.over_budget()` BEFORE calling to avoid
                         blowing the cap.
+        model:          explicit model id ("gpt-5.4-nano" / "claude-haiku-4-5-...").
+                        Default None means: pick the default model for whichever
+                        provider LLM_PROVIDER selects (openai → gpt-5.4-nano,
+                        anthropic → claude-haiku-4-5-20251001). Caller-supplied
+                        model + LLM_PROVIDER override that disagree raise.
+                        Review 009 finding #1.
         narrator_fn:    optional injected narrator (for testing); when
                         None, the OpenAI or Anthropic client is chosen
                         based on LLM_PROVIDER env var or model prefix.
@@ -445,6 +499,8 @@ def generate_narrative(
     Raises:
         RuntimeError if budget is exceeded or narrator produces leaky
         text that cannot be regenerated within max_retries.
+        ValueError   if LLM_PROVIDER and the model name imply different
+        providers.
     """
     if tracker.over_budget():
         raise RuntimeError(
@@ -452,27 +508,31 @@ def generate_narrative(
             f"${tracker.budget_usd:.2f}"
         )
 
+    provider, model = _resolve_provider_and_model(
+        model, os.environ.get("LLM_PROVIDER"),
+    )
+
     key = _journey_cache_key(journey, model)
     cached = _cache_get(cache_dir, key)
     if cached is not None:
         tracker.cache_hit()
         return cached
 
-    # Provider dispatch: pick OpenAI or Anthropic based on the model name
-    # prefix (gpt-* / claude-*) or the LLM_PROVIDER env var override.
+    # Provider dispatch — resolved above, so the model string and the
+    # client factory always agree.
     if narrator_fn is not None:
         call = narrator_fn
+    elif provider == "openai":
+        call = _real_openai_call(model, max_tokens, timeout)
+    elif provider == "anthropic":
+        call = _real_anthropic_call(model, max_tokens, timeout)
     else:
-        override = os.environ.get("LLM_PROVIDER")
-        provider = override.lower() if override else _provider_for_model(model)
-        if provider == "openai":
-            call = _real_openai_call(model, max_tokens, timeout)
-        elif provider == "anthropic":
-            call = _real_anthropic_call(model, max_tokens, timeout)
-        else:
-            raise ValueError(
-                f"unknown LLM_PROVIDER={provider!r}; expected 'openai' or 'anthropic'"
-            )
+        # Defensive: _resolve_provider_and_model already raises on unknown
+        # providers, so reaching here means someone added a new value
+        # without updating the dispatch.
+        raise ValueError(
+            f"no narrator dispatch for provider={provider!r}"
+        )
 
     last_body = ""
     prev_hits: list = []
@@ -537,6 +597,26 @@ def _self_test() -> None:
     from data.gen.journey_templates import generate as gen_journey
     import tempfile
 
+    # Review 009 finding #1: provider/model dispatch resolution. These run
+    # without any API key and without the openai/anthropic SDKs being
+    # installed (we only construct the (provider, model) tuple — we never
+    # build a client).
+    assert _resolve_provider_and_model(None, None) == ("openai", DEFAULT_OPENAI_MODEL)
+    assert _resolve_provider_and_model(None, "anthropic") == ("anthropic", DEFAULT_ANTHROPIC_MODEL)
+    assert _resolve_provider_and_model(None, "openai") == ("openai", DEFAULT_OPENAI_MODEL)
+    assert _resolve_provider_and_model("gpt-5.4-mini", None) == ("openai", "gpt-5.4-mini")
+    assert _resolve_provider_and_model("claude-haiku-4-5-20251001", None) \
+        == ("anthropic", "claude-haiku-4-5-20251001")
+    # Agreement: env matches model -> OK.
+    assert _resolve_provider_and_model("gpt-5.4-nano", "openai") == ("openai", "gpt-5.4-nano")
+    # Disagreement: env says anthropic, model is gpt-* -> must raise.
+    try:
+        _resolve_provider_and_model("gpt-5.4-nano", "anthropic")
+        raise AssertionError("expected ValueError for provider/model disagreement")
+    except ValueError as e:
+        assert "disagree" in str(e), f"unexpected message: {e}"
+    print("  provider/model resolution OK (review 009 finding #1)")
+
     with tempfile.TemporaryDirectory() as tdir:
         cache_dir = Path(tdir) / "narr"
         tracker = CostTracker(budget_usd=10.0)
@@ -557,6 +637,31 @@ def _self_test() -> None:
         assert text2 == text, "cache should return identical body"
         assert tracker.n_cache_hits == 1, f"expected 1 cache hit, got {tracker.n_cache_hits}"
         assert tracker.n_calls == 1, f"expected 1 API call, got {tracker.n_calls}"
+
+        # Anthropic-default path: setting LLM_PROVIDER=anthropic without an
+        # explicit model must route the stub call with the haiku model
+        # (the bug review 009 caught was that this used to pass gpt-5.4-nano).
+        prev = os.environ.get("LLM_PROVIDER")
+        os.environ["LLM_PROVIDER"] = "anthropic"
+        try:
+            ant_tracker = CostTracker(budget_usd=10.0)
+            generate_narrative(
+                j, tracker=ant_tracker, cache_dir=Path(tdir) / "ant",
+                narrator_fn=_stub_narrator(),
+            )
+            # Stub doesn't track which model it was called with, but the
+            # tracker.breakdown is keyed by the resolved model string.
+            charged_models = list(ant_tracker.breakdown.keys())
+            assert charged_models == [DEFAULT_ANTHROPIC_MODEL], (
+                f"expected Anthropic default to bill {DEFAULT_ANTHROPIC_MODEL!r}, "
+                f"got {charged_models}"
+            )
+        finally:
+            if prev is None:
+                os.environ.pop("LLM_PROVIDER", None)
+            else:
+                os.environ["LLM_PROVIDER"] = prev
+        print("  Anthropic-default dispatch OK (review 009 finding #1)")
 
         # Budget cap
         cap = CostTracker(budget_usd=0.0)

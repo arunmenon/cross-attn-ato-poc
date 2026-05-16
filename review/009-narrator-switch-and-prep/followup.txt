@@ -1,0 +1,242 @@
+Review comments 009 -- follow-up
+Date: 2026-05-16
+Subject: Disposition of findings in 009-narrator-switch-and-prep/comments.txt
+Author: scaffold maintainer
+
+Original review file:
+    review/009-narrator-switch-and-prep/comments.txt
+
+Repo state at follow-up:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+Baseline commit:
+    c895120 (RUNBOOK pre-pod local-prep section + 4 corrections;
+             closing commit of review 008's INDEX entry was 8852a59,
+             but c895120 is what review 009 was actually scoped over)
+
+Summary:
+All four findings FIXED in this pass. The High-severity provider/model
+dispatch bug is closed with a single resolution function plus an
+agreement check that rejects "LLM_PROVIDER=anthropic + model=gpt-..."
+loud at startup. The two doc findings (data.jsonl vs train.jsonl,
+preflight overclaim) are corrected verbatim against what the code
+actually does. The Medium dependency-bloat finding is closed by adding
+requirements-local.txt and pointing RUNBOOK §0.1 at it instead of the
+full pod-side requirements.txt.
+
+Disposition per finding:
+
+1. High: LLM_PROVIDER=anthropic dispatches to Anthropic with the OpenAI
+   default model.
+
+Status: FIXED.
+
+Action: rewrote the resolution path in narrative_generator.py.
+
+  - New helper `_default_model_for_provider(provider) -> str` maps
+    "openai" -> DEFAULT_OPENAI_MODEL, "anthropic" -> DEFAULT_ANTHROPIC_MODEL,
+    else raises with a clear message.
+
+  - New helper `_resolve_provider_and_model(model, env_override)` is the
+    single source of truth for picking (provider, model). Resolution
+    rules:
+        no model + no env  -> DEFAULT_PROVIDER + that provider's default
+        env only           -> env's provider + that provider's default
+        model only         -> infer provider from name prefix
+        both               -> infer from model; if env disagrees, raise
+
+  - `generate_narrative()` signature changed: `model: str = DEFAULT_MODEL`
+    -> `model: str | None = None`. The function now calls
+    `_resolve_provider_and_model(...)` at the top, then uses the
+    resolved (provider, model) pair for BOTH the cache key and the
+    client factory. They can no longer drift apart.
+
+  - The disagreement raise uses ValueError, not RuntimeError, because
+    it is a programmer/config error, not a runtime budget failure.
+
+CLI surface (build_dataset.py):
+
+  - Added `--llm-model` flag (e.g., gpt-5.4-nano, gpt-5.4-mini,
+    claude-haiku-4-5-20251001). Passed through to `build(...)` which
+    forwards to `llm_narrative(..., model=llm_model)`. Default None ->
+    provider default.
+
+  - Added `--llm-provider {openai,anthropic}` convenience flag. Sets
+    os.environ["LLM_PROVIDER"] before calling build, equivalent to
+    prepending `LLM_PROVIDER=...` to the command line.
+
+  - Provider/model agreement is enforced inside generate_narrative()
+    via the same _resolve_provider_and_model() path, so the CLI cannot
+    bypass the check.
+
+Verify (run locally; all three pass green):
+
+    python3 -m data.gen.narrative_generator --self-test
+    # Output tail:
+    #   provider/model resolution OK (review 009 finding #1)
+    #   Anthropic-default dispatch OK (review 009 finding #1)
+    #   narrative_generator self-test OK (using stub narrator)
+
+    python3 -c "
+    import os, sys
+    os.environ['LLM_PROVIDER'] = 'anthropic'
+    sys.path.insert(0, '.')
+    from data.gen.narrative_generator import _resolve_provider_and_model
+    try:
+        _resolve_provider_and_model('gpt-5.4-nano', os.environ.get('LLM_PROVIDER'))
+        print('FAIL: should have raised')
+    except ValueError as e:
+        print('OK rejected:', str(e)[:80])
+    "
+    # OK rejected: LLM_PROVIDER='anthropic' disagrees with model='gpt-5.4-nano' (which implies prov
+
+    python3 -m data.gen.build_dataset --n 5 --out /tmp/rev009_disagree \
+        --mode llm --llm-provider anthropic --llm-model gpt-5.4-nano
+    # ValueError raised at startup -- no API call attempted; tmp dir
+    # never gets a train.jsonl.
+
+Self-test extensions (no-network unit assertions added per the
+reviewer's recommendation):
+
+  - All six (provider, model) resolution rules above.
+  - Live end-to-end stub call under LLM_PROVIDER=anthropic confirms the
+    CostTracker.breakdown is keyed by DEFAULT_ANTHROPIC_MODEL, not the
+    OpenAI default. This was the verbatim regression Codex caught with
+    its monkeypatch probe.
+
+2. Medium: RUNBOOK.md gives the wrong training filename for eval-frac
+   builds.
+
+Status: FIXED.
+
+Action: corrected the storage-layout diagram and §0.3 prose to match
+build_dataset.py's actual outputs:
+
+  - Diagram now reads:
+        train_llm_narrated/   LLM-narrated pool: train.jsonl + eval.jsonl
+                              (build_dataset --eval-frac 0.2 -> ~20k train + 5k stratified eval)
+  - §0.3 prose now says: "writes train_llm_narrated/train.jsonl plus
+    train_llm_narrated/eval.jsonl" and explicitly contrasts the
+    eval-frac=0 layout (single data.jsonl).
+  - Symlink command target changed from `data/eval_fast_5k/data.jsonl`
+    to `data/eval_fast_5k/eval.jsonl` to match what `src/train/common.py`
+    looks for in the split layout (it accepts either `eval.jsonl` or
+    `train.jsonl + eval.jsonl`, never `data.jsonl` for the eval-only
+    case).
+
+Verify (laptop):
+
+    python3 -m data.gen.build_dataset --n 20 --out /tmp/rev009_layout \
+        --mode template --eval-frac 0.2 --seed 9
+    ls /tmp/rev009_layout
+    # build_summary.json  eval.jsonl  train.jsonl    (no data.jsonl)
+
+3. High: The tokenizer/preflight section claims checks that
+   preflight_check.py does not perform.
+
+Status: FIXED (doc narrowed to match code).
+
+Action: rewrote §0.2 Part B paragraph to describe what preflight
+actually does and to name the real tokenizer-contract gate (which lives
+in the trainer).
+
+  - Removed the misleading "AutoTokenizer.from_pretrained + resize +
+    embedding init" claim. Replaced with "tokenizer download + 6-token
+    decode roundtrip" -- the literal scope of
+    scripts/preflight_check.py:check_tokenizer_roundtrip.
+  - Added explicit "what Part B does NOT do" list: no
+    custom_tokens.install(), no 65-token install, no model load, no
+    resize_token_embeddings(). Marked review 009 finding #3.
+  - Pointed at src/train/common.py:get_label_token_ids() as the
+    fail-fast contract for " fraud"/" legit" tokenization (already in
+    place from review 007 finding #1) and at the trainers' explicit
+    model.resize_token_embeddings(len(tok)) after custom_tokens.install.
+  - Explicit warning: "A pod that passes preflight can still fail at
+    first trainer launch if the embedding-resize path regresses, so
+    treat the trainer smoke (Task #32) as the real gate."
+
+Reviewer's recommended upgrade -- extending preflight_check.py into the
+full tokenizer-contract gate -- is DEFERRED. Doing so requires loading
+the Qwen3 base for resize_token_embeddings() to be meaningful, which is
+~16 GB of weight download and several minutes of wall time even before
+the trainer starts. The trainer already calls those exact lines at
+startup (src/train/train_xattn.py and friends), so escalating preflight
+would duplicate the same checks, double the boot time, and only catch
+problems that the trainer would also catch within 30 seconds of its
+own launch. The doc narrowing is the surgical fix; the upgrade would be
+a separate enhancement.
+
+Verify (laptop, no torch needed):
+
+    python3 -m src.tokenizer.fencer
+    # fencer self-test OK: {...}
+    python3 -m src.tokenizer.custom_tokens --check
+    # custom-token registry OK: ...
+
+Pod-side gate is unchanged (preflight + trainer-startup contract).
+
+4. Medium: The "pure-Python local smoke" asks a laptop to install the
+   full pod requirements.
+
+Status: FIXED.
+
+Action: added requirements-local.txt with narrator-only deps, pointed
+RUNBOOK §0.1 at it.
+
+  - New file `requirements-local.txt`:
+        openai>=1.50.0,<2.0
+        anthropic==0.39.0
+        faker==30.8.2
+        tqdm==4.66.6
+        pyyaml==6.0.2
+        jsonlines==4.0.0
+        pydantic==2.9.2
+        numpy==1.26.4
+        scipy==1.14.1
+        scikit-learn==1.5.2
+    Header explains the split: laptop subset for pre-pod prep vs full
+    pod stack in requirements.txt (transformers / accelerate / peft /
+    bitsandbytes / wandb / safetensors / datasets / tokenizers).
+
+  - RUNBOOK §0.1 `pip install` line changed from `-r requirements.txt`
+    to `-r requirements-local.txt` and the inline comment is now
+    accurate. Added a paragraph clarifying which packages are NOT
+    pulled by the local file and that running the full trainer
+    requires `requirements.txt` (pod-side, not laptop).
+
+  - Softened the misleading "verifies the full pricing-table math"
+    claim: the self-test exercises the stub path and a tiny stub
+    charge, not a live API.
+
+Verify (laptop):
+
+    python3 -m venv /tmp/rev009_local_venv
+    source /tmp/rev009_local_venv/bin/activate
+    pip install -r requirements-local.txt
+    python3 -m data.gen.narrative_generator --self-test
+    # Self-test green; transformers/accelerate/bitsandbytes are NOT
+    # installed in the venv; nothing fails on a missing import.
+
+Not part of this followup but worth noting for future review:
+The narrator's OpenAI path computes cost from `usage.prompt_tokens` and
+does not pass `cached_input_tokens` through to `CostTracker.charge`
+yet. The NarratorFn signature returns (body, in_toks, out_toks) only.
+This was acknowledged in narrative_generator.py:346-352 as a deferred
+refactor. The visible effect at 25k narratives is that we slightly
+over-estimate spend when prompt-caching fires (~10-15% high), which is
+conservative for budget purposes and does not affect any blocking
+behavior. Not blocking review 009 close; flag for review 010 if it
+ever matters.
+
+Bottom line:
+The OpenAI default itself was unblocked by Codex (model + endpoint +
+pricing all check out against the official docs). The four integration
+problems around the switch are now fixed: provider/model dispatch
+agrees, the documented filenames match the code, preflight's actual
+scope is described accurately, and the laptop install pulls only the
+laptop subset. Ready to run §0.1-§0.5 of RUNBOOK against a real
+OPENAI_API_KEY when you are.
+
+Notes on the INDEX backfill:
+This followup is committed alongside the code/doc fixes (commit A).
+Then INDEX.md's 009 row is added with commit A's hash in a small
+follow-up (commit B). Same two-commit pattern.

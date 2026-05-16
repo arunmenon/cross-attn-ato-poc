@@ -68,9 +68,10 @@ python scripts/preflight_check.py
 ├── .wandb/                     W&B offline logs
 ├── cross_attn_ato_poc/         This repository (git clone — repo-as-root layout)
 ├── data/                       Generated synthetic datasets
-│   ├── train_llm_narrated/     LLM-narrated pool: data.jsonl + eval.jsonl (5k stratified)
-│   ├── eval_fast_5k/           Symlink or copy of train_llm_narrated/eval.jsonl
-│   ├── eval_medium_50k/        50k templated medium eval (standalone gen)
+│   ├── train_llm_narrated/     LLM-narrated pool: train.jsonl + eval.jsonl
+│   │                           (build_dataset --eval-frac 0.2 → ~20k train + 5k stratified eval)
+│   ├── eval_fast_5k/           Symlink to train_llm_narrated/eval.jsonl
+│   ├── eval_medium_50k/        50k templated medium eval (standalone gen, single data.jsonl)
 │   └── eval_large/             100-200k templated large eval (optional)
 ├── checkpoints/
 │   ├── qwen3-8b-cpt-light-lora/   Stage-0 LoRA (pre-merge)
@@ -95,12 +96,17 @@ Maximize work done on the laptop so the H100 clock starts on training, not setup
 ```bash
 cd /path/to/cross_attn_ato_poc
 python3 -m venv .venv-local && source .venv-local/bin/activate
-pip install -r requirements.txt          # installs openai + light deps
+pip install -r requirements-local.txt    # narrator SDKs + faker/tqdm/pyyaml/numpy/scipy/sklearn — NO transformers/accelerate/bitsandbytes
 python3 -m data.gen.narrative_generator --self-test
-# Expected: "narrative_generator self-test OK (using stub narrator)"
+# Expected (last three lines):
+#   provider/model resolution OK (review 009 finding #1)
+#   Anthropic-default dispatch OK (review 009 finding #1)
+#   narrative_generator self-test OK (using stub narrator)
 ```
 
-The self-test uses a stub narrator (no API key, no network) and verifies the cost-tracker math against `_PRICING`. Run this before any LLM call — it catches a busted pricing-table edit immediately.
+`requirements-local.txt` is the laptop-side subset; `requirements.txt` is the pod-side superset (adds transformers / accelerate / peft / bitsandbytes / wandb / safetensors). Do **not** install `requirements.txt` locally unless you also intend to run the full trainer — none of the pre-pod steps need it.
+
+The self-test uses a stub narrator (no API key, no network) and verifies (a) the (provider, model) resolution agrees with LLM_PROVIDER overrides, (b) cache-hit + budget-cap paths, and (c) that `LLM_PROVIDER=anthropic` actually routes the haiku model id, not the gpt default. It does not exercise real pricing-table math against a live API; pricing is asserted on a tiny stub call only.
 
 **0.2 Tokenizer sanity — two parts**
 
@@ -110,10 +116,12 @@ python3 -m src.tokenizer.fencer                 # bare invocation = self-test
 python3 -m src.tokenizer.custom_tokens --check  # validates token registry only
 
 # Part B (torch + transformers + Qwen3 download — pod-only):
-python3 scripts/preflight_check.py              # AutoTokenizer roundtrip + resize
+python3 scripts/preflight_check.py              # tokenizer download + 6-token decode roundtrip
 ```
 
-Part A asserts the PII fencer is idempotent and the journey/actor/event/PII/bucketed-feature token registry is internally consistent. Neither call loads torch or downloads model weights. Part B exercises `AutoTokenizer.from_pretrained(...)`, embedding-avg init, and `model.resize_token_embeddings(...)` — those require torch + transformers + a ~16 GB Qwen3 base download, so they belong on the pod (Day-1 Hr 0-2, after §1.3 bootstrap).
+Part A asserts the PII fencer is idempotent and the journey/actor/event/PII/bucketed-feature token registry is internally consistent. Neither call loads torch or downloads model weights.
+
+Part B confirms `AutoTokenizer.from_pretrained("Qwen/Qwen3-8B")` succeeds and that a six-token sample round-trips through encode/decode without losing special tokens. It is **narrower** than a full tokenizer-contract check — it does NOT call `src.tokenizer.custom_tokens.install(...)`, it does NOT install all 65 custom tokens, it does NOT load the base model, and it does NOT call `model.resize_token_embeddings(...)` (review 009 finding #3). The full tokenizer/embedding contract is enforced at trainer startup: `src/train/common.py:get_label_token_ids()` fails fast if " fraud" or " legit" is empty, multi-token, or aliased, and the trainers call `model.resize_token_embeddings(len(tok))` after `custom_tokens.install(tok)`. A pod that passes preflight can still fail at first trainer launch if the embedding-resize path regresses, so treat the trainer smoke (Task #32) as the real gate.
 
 **0.3 LLM-narrated training set (~$10 with gpt-5.4-nano default)**
 
@@ -131,12 +139,23 @@ python3 -m data.gen.build_dataset \
     --usd-budget 12.0           # nano @ 25k ≈ $9.81 uncached; 12.0 leaves slack
 ```
 
-`build_dataset.py` writes `train_llm_narrated/data.jsonl` plus `train_llm_narrated/eval.jsonl` (the stratified 5k carve). It does **not** create `data/eval_fast_5k/` as a separate directory — wire that up explicitly:
+`build_dataset.py` with `--eval-frac > 0` writes **`train_llm_narrated/train.jsonl`** plus **`train_llm_narrated/eval.jsonl`** (the stratified 5k carve) and a `build_summary.json` next to them. With `--eval-frac 0` it instead writes a single `data.jsonl`; `src/train/common.py` accepts both layouts. It does **not** create `data/eval_fast_5k/` as a separate directory — wire that up explicitly:
 
 ```bash
 mkdir -p data/eval_fast_5k
-ln -sf ../train_llm_narrated/eval.jsonl data/eval_fast_5k/data.jsonl
+ln -sf ../train_llm_narrated/eval.jsonl data/eval_fast_5k/eval.jsonl
 ```
+
+**Switching narrator provider**: gpt-5.4-nano is the default. To use Anthropic haiku instead:
+
+```bash
+export ANTHROPIC_API_KEY=...
+python3 -m data.gen.build_dataset --n 25000 --out data/train_llm_narrated \
+    --mode llm --eval-frac 0.2 --usd-budget 40.0 \
+    --llm-provider anthropic    # equivalent to LLM_PROVIDER=anthropic
+```
+
+`--llm-model` overrides the per-provider default if you need a specific model id (e.g., `--llm-model gpt-5.4-mini` for the larger OpenAI model). `--llm-provider` and `--llm-model` must agree — passing `--llm-provider anthropic --llm-model gpt-5.4-nano` is rejected loud at startup (review 009 finding #1).
 
 **Cost-cap behavior**: `--usd-budget` is checked **after** each API call returns. A single in-flight call can push the running total past the cap by one charge (worst case ~$0.001 at nano). Set the cap with that one-call slack in mind; do not set it equal to the wall.
 
