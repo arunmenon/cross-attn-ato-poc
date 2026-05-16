@@ -18,8 +18,13 @@ Everything that must survive a pod restart goes on the network volume. Container
 
 ### 1.2 Pod template
 
-- GPU: 1× H100 80GB SXM (or PCIe if SXM unavailable)
-- Base image: `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04` (or equivalent — pin the version, do not use `latest`)
+- GPU: 1× H100 80GB SXM (or PCIe if SXM unavailable). On Community Cloud
+  H200 SXM (141 GB) and RTX PRO 6000 Blackwell (96 GB) are common
+  substitutes — see Blackwell note below.
+- Base image — **architecture-dependent**:
+  - Hopper (H100, H200): `runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04`
+  - Blackwell (B200, B300, RTX PRO 6000 96GB): `runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404` (a.k.a. "Pytorch 2.8.0" tile)
+  - Pin the exact tag — do not use `:latest`. Mixing Hopper image + Blackwell GPU silently degrades to non-optimal kernels for `paged_adamw_8bit` and FlashAttention.
 - Volume mount: network volume → `/workspace`
 - Ports: 8888 (Jupyter, optional), 22 (SSH)
 - Env vars (set in pod template):
@@ -332,3 +337,16 @@ If RunPod billing is approaching $300 with the POC incomplete, pause and escalat
 - **Adding new tokens to Qwen3-8B** requires `model.resize_token_embeddings(len(tokenizer))` *after* tokenizer.add_special_tokens. Forgetting this produces silent NaN.
 - **Cross-attention KV cache** is not natively supported by the base Qwen3 `forward()`; our `qwen_xattn_wrapper.py` patches it. If you see `KeyError: 'cross_kv'` during generation, the wrapper isn't being used.
 - **W&B offline mode**: set `WANDB_MODE=offline` before training. Sync later with `wandb sync /workspace/.wandb/offline-run-*`.
+- **Blackwell (RTX PRO 6000 / B200 / B300) — pod-side checks before the trainer**: confirm the kernel paths are healthy before Task #32 (vertical slice) kicks off; quick to verify, painful to discover at hour 4 of the make-or-break window.
+  ```bash
+  # GPU + CUDA version sanity (expect SM_100 or SM_120 + CUDA 12.8+)
+  nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv
+  python3 -c "import torch; print(torch.version.cuda, torch.cuda.get_device_capability(0))"
+  # bitsandbytes Blackwell kernel check
+  python3 -c "import bitsandbytes as bnb; print('bnb', bnb.__version__); import bitsandbytes.optim as o; opt = o.PagedAdamW8bit([torch.nn.Parameter(torch.randn(8, device='cuda'))]); print('paged_adamw_8bit instantiates OK')"
+  ```
+  If bnb fails to import or PagedAdamW8bit raises `RuntimeError: CUDA error` / "no kernel image is available" on Blackwell:
+  1. `pip install --upgrade "bitsandbytes>=0.45.0,<0.46"` — pip may have selected a pre-built wheel without SM_120 kernels.
+  2. If that still fails: `pip install bitsandbytes --upgrade --pre` to get nightly wheels with broader Blackwell coverage.
+  3. Last resort: fall back to non-paged 8-bit optimizer (`AdamW8bit` instead of `PagedAdamW8bit`) in the trainer configs — costs ~2x optimizer memory but works on any bnb build with bf16 kernels. On 96 GB Blackwell that's still fine for our workload.
+- **Community Cloud preemption**: Community hosts can reclaim the GPU. We treat this as expected, not exceptional: `backup_to_external.sh` rsyncs the top-3 + jsonl + summaries every 30 min, atomic checkpoint writes mean partial files are never visible, and `experiments.jsonl` lets the auto-research loop resume from wherever it stopped. Worst case is ~30 min of work lost. If you're preempted, just re-rent any GPU in the same region, run §1.3 bootstrap, and the loop picks back up.

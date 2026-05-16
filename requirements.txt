@@ -10,7 +10,13 @@ tokenizers==0.20.3
 safetensors==0.4.5
 
 # 8-bit optimizer
-bitsandbytes==0.44.1
+# bitsandbytes 0.45+ ships Blackwell (SM_100 / SM_120) kernels for the
+# paged optimizers. Below 0.45 the `paged_adamw_8bit` path silently falls
+# back to the non-paged variant on Blackwell GPUs, ~2x'ing optimizer
+# memory and degrading throughput. Range pin so 0.45.x patch fixes flow
+# in without another edit; harmless on H100/H200 Hopper hosts.
+# Required for the RTX PRO 6000 Blackwell and B200 / B300 paths.
+bitsandbytes>=0.45.0,<0.46
 
 # Eval / stats
 scikit-learn==1.5.2
