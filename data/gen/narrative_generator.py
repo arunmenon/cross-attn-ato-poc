@@ -381,9 +381,14 @@ def _real_openai_call(model: str, max_tokens: int, timeout: int) -> NarratorFn:
             )
         temperature = 0.3 if attempt == 0 else 0.7
 
+        # gpt-5.4 family uses `max_completion_tokens`, not the legacy
+        # `max_tokens` param (same naming shift OpenAI made for o-series
+        # reasoning models — the older keyword returns HTTP 400 with
+        # 'Unsupported parameter'). Caught by the first live API gate
+        # after the OpenAI switch.
         resp = client.chat.completions.create(
             model=model,
-            max_tokens=max_tokens,
+            max_completion_tokens=max_tokens,
             temperature=temperature,
             messages=[
                 {"role": "system", "content": system},
