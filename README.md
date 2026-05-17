@@ -17,6 +17,8 @@ Runbook: `RUNBOOK.md`.
 
 **Status: COMPLETE.** Baseline #1 (`qwen3-8b-cpt-light-merged`) trained, merged, and evaluated. Pipeline plumbing proven end-to-end. **Key finding: synthetic data saturates AUC; Day 2-3 must pivot to hard-negative FPR as the comparison metric.**
 
+**Durable evidence:** every numeric claim in this section is backed by JSON excerpts in [`docs/day-1-results.md`](docs/day-1-results.md). The trainer outputs (`src/auto_research/runs/*/`) are gitignored on purpose (runtime artifacts on the pod), so `docs/day-1-results.md` checks in the verbatim score/CI/metrics content needed to audit this writeup from a fresh clone (review 012 finding #1).
+
 ### Hr 0-2: Tokens + fencer + bucketer
 
 Code was already shipped in Path A batches 1-2 (commits before Day 0). Task #31 marked complete pre-pod. Pod-side install of the 65-token registry, PII fencer, and bucketed-feature derivation all worked first try after the bnb 0.45+ / transformers 4.51+ / tokenizers 0.21+ pin alignment (review 010 + Day-0 boot fixes).
@@ -45,7 +47,7 @@ The vertical slice paid for itself in surfaced bugs alone. Total slice cost: 4 a
 
 ### Hr 6-10: Scale + Stage-0 CPT-light + merge (Task #33)
 
-**Result: PASS.** 1500 steps on the full 20k train, effective batch 32, paged_adamw_8bit on Blackwell SM_120. Wall time **53 min** (vs PLAN.md's 3-4 hr H100 projection — Blackwell is faster). Final loss 1.2425.
+**Result: PASS.** 1500 steps on the full 20k train, effective batch 32, paged_adamw_8bit on Blackwell SM_120. Wall time **53 min** on RTX PRO 6000 Blackwell (faster than the PLAN.md H100 time budget; *not* a controlled H100 vs Blackwell comparison — different GPU class, different host, single run). Final loss 1.2425. The 53-min figure is `metrics.json:wall_clock_sec` and includes training + adapter save; the merge step (~3 min) ran separately via `scripts/merge_stage0_lora.py`.
 
 Adapter merged via `scripts/merge_stage0_lora.py` into `/workspace/checkpoints/qwen3-8b-cpt-light-merged/` (16 GB across 4 safetensor shards). This serves as both:
 1. **Baseline #1** for the Day-3 comparison
@@ -55,7 +57,7 @@ Adapter merged via `scripts/merge_stage0_lora.py` into `/workspace/checkpoints/q
 
 ### Hr 10-14: CPT-light 3-mode eval + writeup
 
-**Result: saturation discovered. PLAN.md assumption falsified.**
+**Result: saturation discovered.** PLAN.md anticipated this in §Risks ("Synthetic-data saturation — all baselines AUC ceiling") and recommended the mitigations now applied. The narrower assumption that *did* fail: PLAN.md said templated narratives "distribution-shape match training" so the 50k templated medium eval could serve as a cheaper substitute for an LLM-narrated medium eval. The diagnostic below falsifies that specific premise (templated is materially *easier* than LLM-narrated, by a non-overlapping CI margin).
 
 Stage-0 evaluated on the 5k LLM-narrated fast eval × 3 modes (stripped / opaque / full):
 
@@ -69,7 +71,7 @@ Every fraud case scored above every legit case in 5,000 records. Bootstrap CI de
 
 **Two diagnostics confirmed saturation is fundamental, not eval-set-specific:**
 
-1. **vs 50k templated eval** (vertical-slice diagnostic, 100-step adapter): AUC 1.0000 across all 3 modes; templated narratives are deterministic enough that even the under-trained smoke adapter ceilinged. Falsified PLAN.md's "templated narratives distribution-shape match training" premise (CIs do NOT overlap; templated is materially easier than LLM-narrated).
+1. **vs 50k templated eval** (vertical-slice diagnostic, 100-step adapter): AUC 1.0000 across all 3 modes; templated narratives are deterministic enough that even the under-trained smoke adapter ceilinged. CIs do not overlap with the LLM-narrated 5k eval CIs at the smoke checkpoint — i.e., templated is statistically easier than LLM-narrated. This is the specific PLAN.md sub-premise that failed (cf. the section intro above).
 
 2. **vs 15k LLM-narrated eval** (seed=42, different journeys than train; salvaged from a rate-limited 50k gen attempt — see Day-1 friction log): Stage-0 AUC **still 1.0000** across all 3 modes. Bigger eval, different journeys, same model — no change. Saturation is not a sample-size artifact.
 
@@ -87,7 +89,7 @@ Every fraud case scored above every legit case in 5,000 records. Bootstrap CI de
 
 **Slowest cost: OpenAI rate limits, not GPU.** The 25k LLM-narrated train set generated cleanly in 63 min at concurrency=8 (`a39cc5f` patch). The follow-on 50k LLM eval (different seed, different temp) hit OpenAI rate limits hard — concurrency=8 stalled at 5,000/50,000 in 2.5h; concurrency=4 restart did 7,500 cache-replay + then dropped to 14/min for 7h. Salvaged the 15k records that completed and pivoted to "eval is 15k LLM-narrated, not 50k". Lesson: budget for OpenAI account-level rate-limit fatigue separately from the per-call cost projection.
 
-**Cache-key collision on narrator_temp (review 011 finding #3).** The eval gen was supposed to use `--narrator-temp 0.5` for a less-narrator-style-correlated eval surface. The cache key didn't include temperature, so the 7,602 cache hits served back the train-time temp-0.3 narratives. Net result: the 15k eval is temp-0.3 (same narrator style as train), not temp-0.5 as planned. The fix landed in commit `db723c1`; future temp ≠ 0.3 gens produce fresh narratives.
+**Cache-key collision on narrator_temp (review 011 finding #3).** The eval gen was supposed to use `--narrator-temp 0.5` for a less-narrator-style-correlated eval surface. The cache key didn't include temperature, so cache hits served back the train-time temp-0.3 narratives. The final salvaged `data/eval_medium_15k_llm/build_summary.json` records **n_cache_hits=15000 / n_calls=0**, confirming every record came from the train-time temp-0.3 cache. Net result: the 15k eval is temp-0.3 (same narrator style as train), not temp-0.5 as planned. The fix landed in commit `db723c1`; future temp ≠ 0.3 gens produce fresh narratives.
 
 **Five integration bugs in the vertical slice (table above).** Most ate one re-run each — small in isolation, dangerous if they had landed during Day-2 sweep.
 
@@ -124,7 +126,7 @@ Both entries persisted in `src/auto_research/experiments.jsonl`.
 - ✅ `qwen3-8b-cpt-light-merged` exists, loads via AutoModelForCausalLM
 - ✅ `scripts/preflight_xattn.py` runs green against it: wrapper builds, LoRA-on-Q attaches, dummy forward returns finite loss
 - ✅ All event-side trainers wired with `parse_structured_events()` (review 011 finding #1)
-- ✅ 11 reviews closed, 5 commits since (all integration bugs surfaced from real Day-1 work)
+- ✅ 11 reviews closed; Day-1 integration fixes recorded in `4bf30f3` (Day-0 pin bumps), `3218f56` (events JSON-string), `2043d78` (eval-only dir), `43e3c6c` (scientific-notation YAML), `4fddbf8` (`max_completion_tokens`), plus `110f0d1` (x-attn preflight) and `db723c1` (review-011 closure)
 - ✅ Cache: 30,780+ narratives on the laptop, full copy on `/workspace/data/cache/`
 - ✅ Eval surfaces: 5k LLM-narrated (`eval_fast_5k`) + 15k LLM-narrated (`eval_medium_15k_llm`) + 50k templated (`eval_medium_50k` — at ceiling, demoted to "regression test only")
 

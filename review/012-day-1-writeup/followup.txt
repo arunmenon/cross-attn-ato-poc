@@ -1,0 +1,159 @@
+Review comments 012 -- follow-up
+Date: 2026-05-17
+Subject: Disposition of findings in 012-day-1-writeup/comments.txt
+Author: scaffold maintainer
+
+Original review file:
+    review/012-day-1-writeup/comments.txt
+
+Repo state at follow-up:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+Baseline commit:
+    e0f610f (Day-1 writeup added to README.md; last commit before review 012)
+
+Summary:
+All five findings FIXED in this pass. The High evidence-durability
+gap is closed by checking in docs/day-1-results.md, which contains
+verbatim JSON excerpts from every artifact the README references --
+experiments.jsonl, both metrics.json files, all six score JSONs (per
+arm, per mode), and the two diagnostic score files. A fresh clone can
+now audit every numeric claim in README.md Day-1 without needing the
+pod. The four wording findings (PLAN-falsified overstatement,
+H100-vs-Blackwell apples-to-oranges, intermediate 7,602 cache count,
+ambiguous "5 commits since") are each addressed with narrower text.
+
+Disposition per finding:
+
+1. High: The README's headline metric and readiness claims are not
+   auditable from the repo snapshot.
+
+Status: FIXED.
+
+Action: created `docs/day-1-results.md` (13 KB) that checks in
+verbatim JSON excerpts for every numeric claim in README Day-1:
+
+  §1. experiments.jsonl -- both Day-1 entries reproduced in full
+  §2. exp_vslice_001 metrics.json + score_stripped.json + ci_report_stripped.json
+  §3. exp_stage0_001 metrics.json + score_stripped.json + ci_report_stripped.json
+  §4. Diagnostic: 50k templated saturation check (score JSON)
+  §5. Diagnostic: 15k LLM-narrated saturation check (score + ci)
+  §6. build_summary.json file paths + key fields for the three
+      data dirs (the only data artifact that survives gitignore)
+
+Plus a "How this maps to README.md Day-1 claims" table at the bottom
+that ties each numeric README assertion to a specific JSON excerpt
+above. So future review or external reader can trace any number
+without pod access.
+
+README.md gets a new paragraph at the top of Day 1 ("Durable evidence")
+that points at docs/day-1-results.md and explicitly states the
+runtime artifacts are gitignored by design, with the JSON checked-in
+copy being the audit surface.
+
+Verification (no-pod local probe):
+
+    ls docs/day-1-results.md
+    # docs/day-1-results.md   (~13 KB)
+    grep -c '"auc":' docs/day-1-results.md
+    # >0 -- AUC excerpts present
+    python3 -c "
+    import json
+    from pathlib import Path
+    md = Path('docs/day-1-results.md').read_text()
+    # spot-check the headline numbers
+    assert 'wall_clock_sec' in md
+    assert '0.9929' in md  # smoke AUC
+    assert '1.0' in md     # Stage-0 saturation
+    assert '0.0615' in md or '0.0101' in md  # hard-neg FPR
+    print('day-1-results.md contains the headline metrics')
+    "
+
+2. Medium: "PLAN.md assumption falsified" overstates what the PLAN
+   actually got wrong.
+
+Status: FIXED.
+
+Action: rewrote the Hr 10-14 section intro to scope the falsification
+narrowly. Old text said "saturation discovered. PLAN.md assumption
+falsified." The new text:
+
+    Result: saturation discovered. PLAN.md anticipated this in §Risks
+    ("Synthetic-data saturation -- all baselines AUC ceiling") and
+    recommended the mitigations now applied. The narrower assumption
+    that did fail: PLAN.md said templated narratives "distribution-shape
+    match training" so the 50k templated medium eval could serve as a
+    cheaper substitute for an LLM-narrated medium eval. The diagnostic
+    below falsifies that specific premise (templated is materially
+    easier than LLM-narrated, by a non-overlapping CI margin).
+
+Also softened the diagnostic-2 bullet point further down (it had a
+redundant "Falsified PLAN.md's premise" claim that the new section
+intro already handles). The README now consistently says: (a) saturation
+risk was correctly anticipated by PLAN, (b) the specific templated-
+distribution-substitute sub-premise was the part that failed.
+
+3. Minor: The Stage-0 wall-time comparison is not an apples-to-apples
+   hardware conclusion.
+
+Status: FIXED.
+
+Action: rephrased the Stage-0 PASS line as observation, not benchmark:
+
+    Wall time 53 min on RTX PRO 6000 Blackwell (faster than the PLAN.md
+    H100 time budget; not a controlled H100 vs Blackwell comparison --
+    different GPU class, different host, single run). Final loss 1.2425.
+    The 53-min figure is metrics.json:wall_clock_sec and includes
+    training + adapter save; the merge step (~3 min) ran separately
+    via scripts/merge_stage0_lora.py.
+
+Both reviewer asks are addressed: GPU-class disclaimer added, and the
+scope of the 3194-sec figure (training + adapter save, not merge) is
+stated explicitly.
+
+4. Minor: The narrator-temp cache-hit number in the README does not
+   match the final local 15k eval summary.
+
+Status: FIXED.
+
+Action: replaced the standalone "7,602 cache hits" claim with the
+authoritative final-build number, citing the build_summary.json that
+ships with the eval dataset:
+
+    The final salvaged data/eval_medium_15k_llm/build_summary.json
+    records n_cache_hits=15000 / n_calls=0, confirming every record
+    came from the train-time temp-0.3 cache.
+
+The 7,602 intermediate count was the watcher-time mid-flight cache
+state during the rate-limited gen attempt; the salvage rerun did 100%
+cache hits because the n=15000 records all existed in the cache by
+then. The new text uses the build_summary-of-record number that any
+reader can verify from the repo.
+
+5. Minor: "11 reviews closed, 5 commits since" is ambiguous against
+   the current commit graph.
+
+Status: FIXED.
+
+Action: replaced the shorthand with an explicit commit anchor list,
+exactly the form the reviewer recommended:
+
+    11 reviews closed; Day-1 integration fixes recorded in 4bf30f3
+    (Day-0 pin bumps), 3218f56 (events JSON-string), 2043d78 (eval-
+    only dir), 43e3c6c (scientific-notation YAML), 4fddbf8
+    (max_completion_tokens), plus 110f0d1 (x-attn preflight) and
+    db723c1 (review-011 closure).
+
+This makes the writeup stable against new commits landing -- a future
+reader doesn't need to mentally compute "since when" to interpret
+the count.
+
+Bottom line:
+The Day-1 writeup is now auditable from a clean clone. Every metric
+the prose claims traces to a verbatim JSON excerpt in
+docs/day-1-results.md. The four wording findings are reconciled. Safe
+to use README.md as the durable Day-1 record going into Day 2.
+
+Notes on the INDEX backfill:
+This followup is committed alongside the code/doc fixes (commit A).
+Then INDEX.md's 012 row is added with commit A's hash in a small
+follow-up (commit B). Same two-commit pattern.
