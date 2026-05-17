@@ -58,6 +58,23 @@ python scripts/init_auto_research_state.py
 # Preflight: GPU/VRAM/persistence-env/tokenizer/W&B (fails closed if
 # HF_HOME et al. are not under /workspace — review 008 finding #3).
 python scripts/preflight_check.py
+
+# Install the agent CLI for the Task #38 auto-research loop (§6 below).
+# RunPod base image has no node/npm, so install Node 20 LTS first.
+# Default: claude. Alternative: codex (OpenAI) — see "Alternative
+# agent" note in §6.
+apt-get update -qq && apt-get install -y -qq curl ca-certificates
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt-get install -y -qq nodejs
+npm install -g @anthropic-ai/claude-code
+claude --version    # expect 2.1.x or newer
+
+# Auth: cron-driven loop needs ANTHROPIC_API_KEY in /workspace/.env
+# (no TTY in cron). Generate at https://console.anthropic.com/settings/keys
+# and add to /workspace/.env:
+#   export ANTHROPIC_API_KEY=sk-ant-...
+# Alternative for non-cron interactive use: `claude login` once on
+# the pod via SSH (OAuth browser flow).
 ```
 
 `preflight_check.py` exits non-zero on any environment problem. Do **not** proceed past failed preflight.
