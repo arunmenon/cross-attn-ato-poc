@@ -1,0 +1,104 @@
+Review comments 017 -- follow-up
+Date: 2026-05-17
+Subject: Disposition of finding in 017-review-016-response/comments.txt
+Author: scaffold maintainer
+
+Original review file:
+    review/017-review-016-response/comments.txt
+
+Repo state at follow-up:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+Baseline commit:
+    16549b0 (review 016 closing commit) + dd6042f (INDEX backfill).
+
+Codex confirmed cron activation is cleared (conditional on the
+already-documented pod-side `.claude/settings.json` honor test).
+Both of review 016's Blockers are closed. One Minor item was
+flagged: a stale comment.
+
+----------------------------------------------------------------------
+1. Minor: agent_tick.sh still has a stale 25-minute timeout comment.
+
+Status: FIXED.
+
+Codex correctly identified that when I bumped `timeout 25m` →
+`timeout 180m` in response to review 016 Blocker 1, I kept the old
+explanatory comment block above the call ("kill it before the next
+30-min tick fires", "25 min < 30-min tick interval"). The behavioral
+fix was correct but the comment immediately above misled.
+
+Action: scripts/agent_tick.sh:172-176. The stale 3-line block is
+replaced with a brief note that clarifies what "ONE iteration of
+agent work" actually means in this codebase — that step 5 of
+AGENT_INSTRUCTIONS makes a "single iteration" include blocking for
+the full launcher run. The detailed 180m rationale immediately below
+(at lines 178-187, unchanged) carries the math and the SIGTERM
+behavior.
+
+The remaining "25" reference at line 183 ("180m gives ~25 min of
+slack above stress runs") is the new rationale's correct arithmetic
+(180 - 150 = 30 ≈ "~25 min slack"), not a stale reference to the
+old timeout.
+
+Verify (local):
+
+    grep -n "25.min\|25-min\|25 min" scripts/agent_tick.sh
+    # Should report ONLY line 183 (the "~25 min of slack" math),
+    # not the obsolete "25 min < 30-min tick interval" claim.
+
+    bash -n scripts/agent_tick.sh
+    # syntax OK
+
+----------------------------------------------------------------------
+2. PASS items (Codex confirmed correct in this commit)
+
+  - F7 timeout math: 180m > 150m stress cap, with ~30 min slack for
+    post-processing + notes. Codex notes the post-processing on the
+    auto-loop fast eval path is small (not the Day-3 50k/200k eval),
+    so the slack is adequate.
+
+  - F3 grammar: 5/5 Codex-required absolute denies present, 0
+    single-slash absolute regressions, total 69 rules
+    (8 Read / 17 Write / 17 Edit / 27 Bash). Glob semantics
+    (`Read(//workspace/.env*)` covering `.env.local`) confirmed
+    against the Claude Code docs as the right single-directory glob.
+
+  - F3 followup scope narrowing: Codex confirms the language now
+    says "tool-level containment, not OS-level sandboxing" and that
+    the audit-014 followup edits are explicitly tied to review 016,
+    not silent revisions.
+
+  - Followup edit discipline: audit-014/comments.txt was not edited;
+    only the followup.txt's F3 disposition was edited (58 insertions
+    / 27 deletions, all in the F3 paragraph). Audit-014 protocol
+    respected.
+
+----------------------------------------------------------------------
+3. Pod-side activation condition (carried forward unchanged)
+
+Codex's review 017 §6 confirms the local CLI cannot validate the
+deny-list against a logged-in session. The pod's CLI (Task #63) is
+the gating check:
+
+    claude config get permissions     # should print the 69 rules
+    # then have the agent attempt a denied operation; CLI must refuse.
+
+This is unchanged from review 016's followup; not actioned in this
+commit (already carried).
+
+----------------------------------------------------------------------
+4. Commit anchors
+
+This commit:
+    scripts/agent_tick.sh                       (Minor comment fix)
+    review/017-review-016-response/comments.txt (Codex's output, NEW)
+    review/017-review-016-response/followup.txt (this file, NEW)
+
+INDEX backfill (next commit): row 017 added with this commit's hash.
+
+----------------------------------------------------------------------
+5. Status: audit chain 014/015/016/017 closed
+
+Reviews 014, 015, 016, 017 are all closed. No outstanding findings.
+Cron activation for Task #38 is cleared conditional on the pod-side
+`.claude/settings.json` honor test described in section 3.

@@ -170,10 +170,10 @@ if [[ "$DRY_RUN" == "1" ]]; then
 fi
 
 # Pipe the loop prompt into the selected CLI. The CLI is expected to
-# perform ONE iteration of agent work and exit.
-# Wall-clock cap (audit 014 M7): if the CLI hangs (network stall, MCP
-# server wedge, etc.), kill it before the next 30-min tick fires so we
-# don't pile up overlapping CLIs. 25 min < 30-min tick interval.
+# perform ONE iteration of agent work and exit — but per
+# AGENT_INSTRUCTIONS step 5, that single iteration includes blocking
+# on `run_next_experiment.py` for the entire 90- or 150-minute
+# launcher run, so a normal "iteration" can be ~150+ min long.
 echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) launching $CLI"
 # Wall-clock cap for the whole tick (review 016 finding 1 fix). The CLI
 # STAYS ATTACHED through the launcher's experiment run per AGENT_INSTRUCTIONS

@@ -1,0 +1,227 @@
+Review comments 017
+Date: 2026-05-17
+Subject: Verify response to review 016 blockers
+
+Reviewed file(s):
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/_pending-codex-review-017.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/PLAN.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/INDEX.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/016-fix-pass-014-015/followup.txt
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/014-auto-loop-prelaunch-audit/followup.txt
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/.claude/settings.json
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/agent_tick.sh
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/configs/budget.yaml
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/RUNBOOK.md
+
+Repo root used for comparison:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+Summary:
+The response to review 016 correctly closes both Blockers. The outer CLI timeout is now 180 minutes, which clears the normal 90-minute and stress 150-minute launcher paths with slack for local post-processing and notes. The Claude Code settings grammar is now aligned with the documented `//absolute` path syntax, credential paths have Read denies, and the followup text no longer over-promises OS-level sandboxing.
+
+Cron activation is cleared from this review's perspective, conditional on the already-documented pod-side verification that the logged-in pod Claude CLI actually loads `.claude/settings.json`. I found one Minor cleanup item: an obsolete adjacent comment in `agent_tick.sh` still describes the old 25-minute timeout.
+
+Verification run:
+
+1. Diff scope from the requested base.
+
+Command:
+    git log --oneline 7d04064..HEAD
+    git diff --name-only 7d04064..16549b0
+
+Actual output:
+    dd6042f INDEX: record closing commit for review 016
+    16549b0 Address review 016: F7 timeout lifecycle + F3 settings.json grammar
+    07648b1 INDEX: record closing commit for reviews 014 + 015
+
+    .claude/settings.json
+    review/014-auto-loop-prelaunch-audit/followup.txt
+    review/016-fix-pass-014-015/comments.txt
+    review/016-fix-pass-014-015/followup.txt
+    review/INDEX.md
+    scripts/agent_tick.sh
+
+Disposition:
+    PASS. Review used 7d04064 as the explicit base, not the INDEX-recorded 16549b0.
+
+2. F7 timeout math.
+
+Command:
+    grep -n "timeout " scripts/agent_tick.sh
+    grep -n "max_wall_clock_minutes\|stress_run_max_wall_clock_minutes" src/auto_research/configs/budget.yaml scripts/run_next_experiment.py
+
+Actual output:
+    189:printf '%s' "$LOOP_PROMPT" | timeout 180m "$CLI"
+
+    src/auto_research/configs/budget.yaml:40:  max_wall_clock_minutes: 90       # stress run can be larger; see stress_run_max_wall_clock_minutes
+    src/auto_research/configs/budget.yaml:41:  stress_run_max_wall_clock_minutes: 150
+    scripts/run_next_experiment.py:434:    `stress_run_max_wall_clock_minutes` when this experiment is marked
+    scripts/run_next_experiment.py:435:    as a stress run, otherwise `max_wall_clock_minutes`. Review 008
+    scripts/run_next_experiment.py:445:        return int(per_exp.get("stress_run_max_wall_clock_minutes", 150))
+    scripts/run_next_experiment.py:446:    return int(per_exp.get("max_wall_clock_minutes", 90))
+
+Disposition:
+    PASS. 180 minutes is greater than the documented 150-minute stress cap, leaving roughly 30 minutes for post-processing and notes. The auto-loop's per-experiment post-processing is the fast eval path, not the Day-3 top-3 medium evaluation, so that slack is adequate for cron activation.
+
+3. F3 Claude Code settings grammar and sensitive-path coverage.
+
+Command:
+    python3 - <<'PY'
+    import json
+    d = json.loads(open(".claude/settings.json").read())["permissions"]["deny"]
+    required = [
+        "Read(//workspace/.env)",
+        "Read(//workspace/.env*)",
+        "Read(//root/.config/anthropic/**)",
+        "Write(//root/.config/anthropic/**)",
+        "Edit(//root/.config/anthropic/**)",
+    ]
+    missing = [p for p in required if p not in d]
+    print(f"required absolute denies: {len(required) - len(missing)}/{len(required)} present")
+    for m in missing: print(f"  MISSING: {m}")
+    bad = []
+    for r in d:
+        for prefix in ("Write(/workspace/", "Edit(/workspace/", "Read(/workspace/",
+                       "Write(/root/", "Edit(/root/", "Read(/root/"):
+            if r.startswith(prefix):
+                bad.append(r)
+    if bad:
+        print(f"REGRESSION: {len(bad)} single-slash absolute paths still present:")
+        for b in bad: print(f"  {b}")
+    else:
+        print("no single-slash absolute regressions")
+    PY
+
+    python3 - <<'PY'
+    import json
+    s = json.loads(open('.claude/settings.json').read())
+    d = s['permissions']['deny']
+    print('total', len(d))
+    for kind in ('Read(', 'Write(', 'Edit(', 'Bash('):
+        print(kind[:-1], sum(1 for r in d if r.startswith(kind)))
+    PY
+
+Actual output:
+    required absolute denies: 5/5 present
+    no single-slash absolute regressions
+
+    total 69
+    Read 8
+    Write 17
+    Edit 17
+    Bash 27
+
+External docs consulted:
+    https://code.claude.com/docs/en/permissions
+    https://code.claude.com/docs/en/settings
+
+Disposition:
+    PASS. Official Claude Code docs say `//path` is absolute, `/path` is project-root relative, and Read/Edit path rules use gitignore-style matching. Under that grammar, `Read(//workspace/.env*)` is the right single-directory glob for `/workspace/.env` and `/workspace/.env.local`. The file also now correctly narrows its claim to tool-level containment, not OS sandboxing.
+
+4. Followup edit discipline.
+
+Command:
+    rg -n "enforced filesystem containment|tool-level containment|OS-level sandboxing|review 016" review/014-auto-loop-prelaunch-audit/followup.txt
+    git diff --name-only 7d04064..16549b0 -- review/014-auto-loop-prelaunch-audit/comments.txt review/014-auto-loop-prelaunch-audit/followup.txt review/016-fix-pass-014-015/comments.txt review/016-fix-pass-014-015/followup.txt
+    git diff --stat 7d04064..16549b0 -- review/014-auto-loop-prelaunch-audit/followup.txt
+
+Actual output:
+    114:3. Blocker: Agent has no enforced filesystem containment.
+    118:Scope clarification (per review 016 finding 2, accepted):
+    120:Bash tools. It is NOT OS-level sandboxing. A sufficiently determined
+    129:control. The audit-014 framing of "enforced filesystem containment"
+    133:Action: NEW file .claude/settings.json (updated by review 016 follow-
+    157:Caveat (per audit-015 section 3 + review 016 finding 2): the pod's
+    182:        # Absolute paths with `//` prefix (review 016 fix):
+
+    review/014-auto-loop-prelaunch-audit/followup.txt
+    review/016-fix-pass-014-015/comments.txt
+    review/016-fix-pass-014-015/followup.txt
+
+     review/014-auto-loop-prelaunch-audit/followup.txt | 85 ++++++++++++++++-------
+     1 file changed, 58 insertions(+), 27 deletions(-)
+
+Disposition:
+    PASS. audit-014/comments.txt was not edited. The audit-014 followup edit is explicitly tied to review 016 and narrows the F3 claim, which is within the accepted response scope.
+
+5. Local smoke checks.
+
+Command:
+    PY_FILES=$(git diff --name-only 7d04064..16549b0 | grep -E '\.py$' || true)
+    if [ -n "$PY_FILES" ]; then
+        echo "$PY_FILES" | xargs python3 -m py_compile
+    else
+        echo "no Python files changed; py_compile skipped"
+    fi
+    bash -n scripts/agent_tick.sh && echo 'agent_tick syntax OK'
+    python3 - <<'PY'
+    import sys, random
+    sys.path.insert(0, '.')
+    from eval import eval_modes
+    from eval.leakage_checks import narrative_leakage_scan
+    text = '<journey_sim_swap><actor_human><event_login> <amount_bucket=high></journey_sim_swap>'
+    assert 'journey_sim_swap' not in eval_modes.apply(text, 'stripped')[0]
+    assert '<amount_bucket=high>' in eval_modes.apply(text, 'stripped')[0]
+    a = eval_modes.apply(text, 'opaque', rng=random.Random(0))[0]
+    b = eval_modes.apply(text, 'opaque', rng=random.Random(1))[0]
+    assert a != b
+    assert not narrative_leakage_scan('This is fraudulent SIM-swap')['clean']
+    assert narrative_leakage_scan('Device change followed by password reset')['clean']
+    print('layer A smoke OK')
+    PY
+    python3 -m src.tokenizer.custom_tokens --check
+    python3 -m data.gen.feature_bucketer --self-test
+    python3 -m src.tokenizer.fencer
+    python3 -m data.gen.pii_fencer
+
+Actual output:
+    no Python files changed; py_compile skipped
+    agent_tick syntax OK
+    layer A smoke OK
+    custom-token registry OK:
+      n_total                        = 65
+      n_journey                      = 18
+      n_actor                        = 6
+      n_event                        = 7
+      n_pii                          = 8
+      n_bucket                       = 26
+      n_journey_families             = 9
+      n_actor_families               = 6
+      n_bucket_families              = 9
+      n_hard_negative_families       = 3
+      n_fraud_families               = 5
+      n_agent_actor_families         = 5
+    feature_bucketer self-test OK
+    fencer self-test OK: {'<email>': 1, '<device_id>': 1, '<ip>': 1, '<amount>': 1, '<phone>': 1, '<browser>': 1, '<acct_id>': 1}
+    pii_fencer self-test OK (incl. review-004 #2 negative cases)
+
+Disposition:
+    PASS.
+
+6. Local Claude CLI state.
+
+Command:
+    claude --version
+    claude config get permissions
+
+Actual output:
+    2.1.142 (Claude Code)
+    Not logged in - Please run /login
+
+Disposition:
+    PARTIAL. The local CLI version is recent enough to support project settings, but active settings cannot be inspected locally without login. This is already carried as a pod-side activation condition in the followup.
+
+Review findings:
+
+1. Minor: `agent_tick.sh` still has a stale 25-minute timeout comment.
+
+Status: OPEN, minor
+
+Details:
+The functional timeout is correct at `scripts/agent_tick.sh:189`, but the old comment immediately above it still says the cap should "kill it before the next 30-min tick fires" and "`25 min < 30-min tick interval`" at `scripts/agent_tick.sh:174-176`. That is no longer true after the 180-minute fix. The newer comment at `scripts/agent_tick.sh:178-187` explains the real 180-minute rationale, so this is not a behavioral issue and does not block cron activation.
+
+Recommendation:
+Remove or rewrite the stale three-line comment so future maintainers do not infer that the wrapper still prevents overlapping pre-launch CLI hangs before the next cron tick.
+
+Bottom line:
+Review 016's two Blockers are closed. Cron activation is cleared conditional on the planned pod-side `.claude/settings.json` honor test. Only one non-blocking comment cleanup remains.
