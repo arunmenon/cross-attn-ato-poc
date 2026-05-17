@@ -113,47 +113,78 @@ guaranteed-dead PID):
 
 3. Blocker: Agent has no enforced filesystem containment.
 
-Status: FIXED with caveat.
+Status: FIXED at tool level, with explicit scope narrowing.
 
-Action: NEW file .claude/settings.json. Uses Claude Code's
-`permissions.deny` list to block:
+Scope clarification (per review 016 finding 2, accepted):
+This fix provides TOOL-LEVEL containment for Claude's Read/Edit/Write/
+Bash tools. It is NOT OS-level sandboxing. A sufficiently determined
+Bash subprocess can still read sensitive files through shell builtins
+or `python -c` and similar paths the deny list does not enumerate.
+The threat model this addresses is "the agent itself follows
+AGENT_INSTRUCTIONS conventions but hallucinates or misclicks" -- a
+safety net for normal-case errors. If the threat model widens to "a
+compromised or adversarial agent", a sandboxed user account plus
+filesystem ACLs at the OS layer is the proper barrier, and this
+deny list should be considered defense-in-depth, not the primary
+control. The audit-014 framing of "enforced filesystem containment"
+was over-stated for what `.claude/settings.json` actually provides
+at the tool layer.
 
-  - Writes/Edits to launcher-owned state: experiments.jsonl,
+Action: NEW file .claude/settings.json (updated by review 016 follow-
+up to use the correct Claude Code path grammar: `//absolute` for
+filesystem-absolute paths, `/path` for project-root-relative). Uses
+`permissions.deny` to block:
+
+  - Read/Write/Edit on launcher-owned state: experiments.jsonl,
     sweep_state.yaml, budget.yaml, sweep_space.yaml.
-  - Writes/Edits to the deterministic-launcher source files the agent
-    is documented as not modifying: run_next_experiment.py,
+  - Write/Edit on deterministic-launcher source files the agent is
+    documented as not modifying: run_next_experiment.py,
     parse_metrics.py, score_risk.py, leakage_checks.py,
     bootstrap_ci.py, eval_modes.py, eval_mode_dropout.py,
     merge_stage0_lora.py.
-  - Writes/Edits to credential surfaces: /workspace/.env, .env,
-    /root/.config/anthropic/**, /root/.claude/**.
+  - Read/Write/Edit on credential surfaces (absolute paths via
+    `//`): `//workspace/.env`, `//workspace/.env*`,
+    `//root/.config/anthropic/**`, `//root/.claude/**`,
+    `//root/.aws/**`, `//root/.ssh/**`. Plus `.env` (project-
+    relative) as a defense-in-depth.
   - Destructive Bash: `git push`, `git push --force`, `git reset
     --hard`, `git commit -a`, `git commit --all`, `git checkout .`,
     `rm -rf`, `rm -fr`, `sudo`, `chmod 777`, `curl|sh`, `wget|sh`,
-    `cat` of credential paths, `env`/`printenv` (which would dump the
-    inherited OAuth tokens to the log).
+    `cat` of credential paths (both `/` and `//` variants),
+    `env`/`printenv`/`set` (which would dump the inherited OAuth
+    tokens to the log).
 
-Caveat (per audit-015 section 3): the pod's Claude CLI version must
-honor `.claude/settings.json`. The CLI on the pod is the one installed
-in commit 63 (`Install Claude Code CLI on pod for Task #38`). The
-first cron tick after rsync must be verified by attempting a denied
-operation (e.g., have the agent try to `Write` to
-src/auto_research/experiments.jsonl in DRY_RUN) and confirming the CLI
-refuses. If the pod's CLI does not honor the settings, the convention
-in AGENT_INSTRUCTIONS.md still applies, but the floor is weaker -- in
-that case, flag and either upgrade the CLI or add a wrapper script
-that filters tool invocations.
+Caveat (per audit-015 section 3 + review 016 finding 2): the pod's
+Claude CLI version must honor `.claude/settings.json`. Local
+verification is blocked because the local CLI is logged out and
+`claude config get permissions` requires a logged-in session. The
+pod's CLI (installed in Task #63) is logged in via subscription
+OAuth; verification there is straightforward and is the gating
+check before the user adds the crontab entry. The first cron tick
+must be verified by attempting a denied operation (e.g., the agent
+tries `Read("//workspace/.env")` or
+`Write("src/auto_research/experiments.jsonl")` in DRY_RUN) and
+confirming the CLI refuses. If the pod's CLI does not honor the
+settings file, the convention in AGENT_INSTRUCTIONS.md still
+applies, but the floor is weaker -- in that case, upgrade the CLI
+or add a wrapper script that filters tool invocations.
 
-Verify (local, structural only):
+Verify (local, structural only — updated for `//absolute` grammar):
 
     python3 - <<'PY'
     import json
     s = json.loads(open(".claude/settings.json").read())
     d = s["permissions"]["deny"]
     must = [
-        "Write(**/experiments.jsonl)", "Write(**/sweep_state.yaml)",
+        "Write(**/experiments.jsonl)", "Read(**/experiments.jsonl)",
+        "Write(**/sweep_state.yaml)",
         "Bash(git push:*)", "Bash(rm -rf:*)",
-        "Write(/root/.config/anthropic/**)",
+        # Absolute paths with `//` prefix (review 016 fix):
+        "Read(//workspace/.env)", "Read(//workspace/.env*)",
+        "Write(//workspace/.env)", "Edit(//workspace/.env)",
+        "Read(//root/.config/anthropic/**)",
+        "Write(//root/.config/anthropic/**)",
+        "Edit(//root/.config/anthropic/**)",
     ]
     for p in must: assert p in d, f"missing {p!r}"
     print(f"F3 deny list: {len(d)} rules, all critical patterns present")

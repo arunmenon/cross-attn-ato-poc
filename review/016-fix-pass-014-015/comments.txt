@@ -1,0 +1,369 @@
+Review comments 016
+Date: 2026-05-17
+Subject: Verify must-land fix pass for audits 014 and 015
+
+Reviewed file(s):
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/_pending-codex-fix-pass-014-015.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/PLAN.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/INDEX.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/014-auto-loop-prelaunch-audit/followup.txt
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/015-audit-014-meta-review/followup.txt
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/.claude/settings.json
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/agent_tick.sh
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/run_next_experiment.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/AGENT_INSTRUCTIONS.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/train_xattn.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/RUNBOOK.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/README.md
+
+Repo root used for comparison:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+Summary:
+The fix pass closes F1, F2, F4, F5, F6, and the audit-015 AGENT_INSTRUCTIONS objective mismatch. It does not clear cron activation. F7's `timeout 25m` wrapper is incompatible with the documented synchronous 90-minute launcher path, and F3's `.claude/settings.json` does not provide the credential/file containment claimed by the followup under Claude Code's documented permission grammar.
+
+Bottom line up front: do not flip the unattended cron loop yet. Fix the CLI timeout lifecycle and tighten/verify containment first.
+
+Verification run:
+
+1. Diff scope from explicit base.
+
+Command:
+    git log --oneline 2e325e2..HEAD
+    git diff --name-only 2e325e2..HEAD
+
+Actual output:
+    07648b1 INDEX: record closing commit for reviews 014 + 015
+    7d04064 Address reviews 014 + 015: must-land fixes before cron activation
+    15e3dda agent_tick.sh: pre-check GPU lock, source .env, sync LOOP_PROMPT to RUNBOOK §6
+    ed8db5c INDEX: record closing commit for review 013
+
+    .claude/settings.json
+    review/014-auto-loop-prelaunch-audit/comments.txt
+    review/014-auto-loop-prelaunch-audit/followup.txt
+    review/015-audit-014-meta-review/comments.txt
+    review/015-audit-014-meta-review/followup.txt
+    review/INDEX.md
+    scripts/agent_tick.sh
+    scripts/run_next_experiment.py
+    src/auto_research/AGENT_INSTRUCTIONS.md
+    src/train/train_xattn.py
+
+Disposition:
+    PASS. Review focused on the committed fix pass since review 013, with the pending brief used only as context.
+
+2. Required local fix-pass probes.
+
+Command:
+    python3 - <<'PY'
+    src = open("scripts/run_next_experiment.py").read()
+    assert 'm.get("status", "failed")' not in src
+    assert 'parsed_status in ("nan", "oom")' in src
+    print("V1 (F1): launcher escalate-only — OK")
+    PY
+
+    python3 - <<'PY'
+    import os, tempfile
+    from pathlib import Path
+    L = Path(tempfile.mkdtemp()) / "test.lock"
+    def acquire_lock(lockfile=L):
+        try:
+            fd = os.open(str(lockfile), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            os.write(fd, f"{os.getpid()}\n".encode()); return fd
+        except FileExistsError:
+            try: stale = int(lockfile.read_text().strip())
+            except (OSError, ValueError): return None
+            try: os.kill(stale, 0)
+            except ProcessLookupError:
+                lockfile.unlink()
+                fd = os.open(str(lockfile), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                os.write(fd, f"{os.getpid()}\n".encode()); return fd
+            except PermissionError: return None
+            return None
+    L.write_text(f"{os.getpid()}\n")
+    assert acquire_lock() is None
+    L.unlink()
+    pid = os.fork()
+    if pid == 0: os._exit(0)
+    os.waitpid(pid, 0)
+    L.write_text(f"{pid}\n")
+    fd = acquire_lock()
+    assert fd is not None
+    os.close(fd); L.unlink()
+    L.write_text("not a pid\n")
+    assert acquire_lock() is None
+    L.unlink()
+    print("V2 (F2): acquire_lock self-heal — 3/3 cases OK")
+    PY
+
+    python3 - <<'PY'
+    import json
+    s = json.loads(open(".claude/settings.json").read())
+    d = s["permissions"]["deny"]
+    must = [
+        "Write(**/experiments.jsonl)",
+        "Edit(**/experiments.jsonl)",
+        "Write(**/sweep_state.yaml)",
+        "Bash(git push:*)",
+        "Bash(rm -rf:*)",
+        "Write(/root/.config/anthropic/**)",
+        "Bash(env)",
+    ]
+    for p in must:
+        assert p in d, f"deny list missing required pattern: {p!r}"
+    print(f"V3 (F3): {len(d)} deny rules, critical patterns present")
+    PY
+
+    python3 - <<'PY'
+    xs = open("src/train/train_xattn.py").read()
+    assert 'tmp_state = state_path.with_suffix(".pt.tmp")' in xs
+    assert 'torch.save(sd, tmp_state)' in xs
+    assert 'tmp_state.rename(state_path)' in xs
+    print("V4 (F4): atomic torch.save — OK")
+    PY
+
+    python3 - <<'PY'
+    def check(hist, window=4, min_runs=6, thresh=0.005):
+        if len(hist) < min_runs: return None
+        s = [h.get("hn_fpr_worst_stripped") for h in hist]
+        s = [v for v in s if v is not None]
+        if len(s) >= window:
+            recent = s[-window:]
+            if (recent[0] - min(recent)) < thresh:
+                return f"halt first={recent[0]:.4f} best={min(recent):.4f}"
+        return None
+    hist = [
+        {"hn_fpr_worst_stripped": 0.030},
+        {"hn_fpr_worst_stripped": 0.029},
+        {"hn_fpr_worst_stripped": 0.0285},
+        {"hn_fpr_worst_stripped": 0.028},
+        {"hn_fpr_worst_stripped": 0.0278},
+        {},
+        {"hn_fpr_worst_stripped": 0.0275},
+    ]
+    r = check(hist)
+    assert r is not None and "halt" in r
+    assert check([{}] * 7) is None
+    imp = [{"hn_fpr_worst_stripped": 0.10 - 0.01*i} for i in range(7)]
+    assert check(imp) is None
+    print("V5 (F5): convergence None-filter — 3/3 cases OK")
+    PY
+
+Actual output:
+    V1 (F1): launcher escalate-only — OK
+    V2 (F2): acquire_lock self-heal — 3/3 cases OK
+    V3 (F3): 50 deny rules, critical patterns present
+    V4 (F4): atomic torch.save — OK
+    V5 (F5): convergence None-filter — 3/3 cases OK
+
+Disposition:
+    PARTIAL. The literal structural probes pass, but V3 is not sufficient proof of containment. See finding 2.
+
+3. F6/F7/AGENT_INSTRUCTIONS and scaffold smoke.
+
+Command:
+    python3 - <<'PY'
+    src = open("scripts/run_next_experiment.py").read()
+    assert "start_new_session=True" in src
+    assert "os.killpg(proc.pid, signal.SIGTERM)" in src
+    assert "os.killpg(proc.pid, signal.SIGKILL)" in src
+    print("F6 process group + killpg: OK")
+    PY
+
+    python3 - <<'PY'
+    at = open("scripts/agent_tick.sh").read()
+    assert 'timeout 25m "$CLI"' in at
+    assert 'set +e' in at and 'set -e' in at
+    assert '124' in at
+    print("V7 (F7): agent_tick timeout 25m — OK")
+    PY
+
+    python3 - <<'PY'
+    ai = open("src/auto_research/AGENT_INSTRUCTIONS.md").read()
+    assert "top-2 configs by worst-family hard-negative FPR" in ai
+    assert "no worst-family HN-FPR improvement" in ai
+    assert "Worst-family\nHN-FPR-stripped" in ai or "worst-family HN-FPR" in ai.lower()
+    assert "HN-FPR-worst [CI]" in ai
+    bad_lines = []
+    for i, line in enumerate(ai.splitlines(), 1):
+        if 'AUC-stripped' in line and not any(k in line.lower() for k in ('sanity', 'saturated', 'auc_stripped_sanity')):
+            bad_lines.append((i, line.strip()))
+    if len(bad_lines) > 2:
+        print("WARNING — possibly stale AUC references:")
+        for i, l in bad_lines:
+            print(f"  L{i}: {l}")
+    else:
+        print(f"V8 (NEW HIGH): AGENT_INSTRUCTIONS AUC->HN-FPR — OK ({len(bad_lines)} acceptable AUC refs)")
+    PY
+
+    python3 - <<'PY'
+    import sys, random
+    sys.path.insert(0, '.')
+    from eval import eval_modes
+    from eval.leakage_checks import narrative_leakage_scan
+    text = '<journey_sim_swap><actor_human><event_login> <amount_bucket=high></journey_sim_swap>'
+    assert 'journey_sim_swap' not in eval_modes.apply(text, 'stripped')[0]
+    assert '<amount_bucket=high>' in eval_modes.apply(text, 'stripped')[0]
+    a = eval_modes.apply(text, 'opaque', rng=random.Random(0))[0]
+    b = eval_modes.apply(text, 'opaque', rng=random.Random(1))[0]
+    assert a != b
+    assert not narrative_leakage_scan('This is fraudulent SIM-swap')['clean']
+    assert narrative_leakage_scan('Device change followed by password reset')['clean']
+    print('V9: Layer A smoke — OK (this fix pass did not touch eval surfaces)')
+    PY
+
+    python3 - <<'PY'
+    import importlib.util, sys
+    sys.path.insert(0, '.')
+    spec = importlib.util.spec_from_file_location('rne', 'scripts/run_next_experiment.py')
+    rne = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rne)
+    p = {'hn_account_recovery': 0.05, 'hn_large_purchase': 0.01, 'hn_travel': 0.0}
+    assert rne._hn_worst(p) == 0.05
+    assert abs(rne._hn_mean(p) - 0.02) < 1e-9
+    import tempfile
+    old_lock = rne.LOCKFILE
+    tmp = tempfile.mkdtemp()
+    rne.LOCKFILE = type(rne.LOCKFILE)(tmp) / "x.lock"
+    fd = rne.acquire_lock()
+    assert fd is not None
+    rne.release_lock(fd)
+    assert not rne.LOCKFILE.exists()
+    rne.LOCKFILE = old_lock
+    print("V10: launcher module + helpers — OK")
+    PY
+
+Actual output:
+    F6 process group + killpg: OK
+    V7 (F7): agent_tick timeout 25m — OK
+    V8 (NEW HIGH): AGENT_INSTRUCTIONS AUC->HN-FPR — OK (0 acceptable AUC refs)
+    V9: Layer A smoke — OK (this fix pass did not touch eval surfaces)
+    V10: launcher module + helpers — OK
+
+Disposition:
+    PARTIAL. F6 and AGENT_INSTRUCTIONS are correct. V7 proves only that the timeout string exists; the control-flow review shows that timeout is unsafe. See finding 1.
+
+4. General no-GPU checks.
+
+Command:
+    PY_FILES=$(git diff --name-only 2e325e2..HEAD | grep -E '\.py$' || true)
+    if [ -n "$PY_FILES" ]; then
+        echo "$PY_FILES" | xargs python3 -m py_compile
+    else
+        echo "no Python files changed; py_compile skipped"
+    fi
+
+    if [ -d ../.claude/tasks/cross-attn-ato-poc ]; then
+        md5 -q PLAN.md ../.claude/tasks/cross-attn-ato-poc/PLAN.md ~/.claude/plans/i-want-to-do-compressed-bee.md
+    else
+        echo "running outside the project tree; checking in-repo PLAN.md only"
+        md5 -q PLAN.md
+    fi
+
+    python3 -m src.tokenizer.custom_tokens --check
+    python3 -m data.gen.feature_bucketer --self-test
+    python3 -m src.tokenizer.fencer
+    python3 -m data.gen.pii_fencer
+    bash -n scripts/agent_tick.sh && echo 'agent_tick syntax OK'
+
+Actual output:
+    64515f2986ac4ea153e0b7b670d57c3e
+    64515f2986ac4ea153e0b7b670d57c3e
+    64515f2986ac4ea153e0b7b670d57c3e
+    custom-token registry OK:
+      n_total                        = 65
+      n_journey                      = 18
+      n_actor                        = 6
+      n_event                        = 7
+      n_pii                          = 8
+      n_bucket                       = 26
+      n_journey_families             = 9
+      n_actor_families               = 6
+      n_bucket_families              = 9
+      n_hard_negative_families       = 3
+      n_fraud_families               = 5
+      n_agent_actor_families         = 5
+    feature_bucketer self-test OK
+    fencer self-test OK: {'<email>': 1, '<device_id>': 1, '<ip>': 1, '<amount>': 1, '<phone>': 1, '<browser>': 1, '<acct_id>': 1}
+    pii_fencer self-test OK (incl. review-004 #2 negative cases)
+    agent_tick syntax OK
+
+Disposition:
+    PASS. Python compile emitted no output, which is success.
+
+5. Claude Code settings grammar check.
+
+Command:
+    claude --version
+    claude config get permissions
+    python3 - <<'PY'
+    import json
+    rules = json.load(open('.claude/settings.json'))['permissions']['deny']
+    for pattern in ['Read(//workspace/.env)', 'Read(//workspace/.env*)', 'Read(//root/.config/anthropic/**)', 'Write(//root/.config/anthropic/**)', 'Edit(//root/.config/anthropic/**)']:
+        print(pattern, pattern in rules)
+    print('existing credential-adjacent rules:')
+    for r in rules:
+        if 'workspace/.env' in r or 'root/.config/anthropic' in r or r in ('Bash(env)', 'Bash(printenv)'):
+            print(' ', r)
+    PY
+
+Actual output:
+    2.1.142 (Claude Code)
+    Not logged in · Please run /login
+
+    Read(//workspace/.env) False
+    Read(//workspace/.env*) False
+    Read(//root/.config/anthropic/**) False
+    Write(//root/.config/anthropic/**) False
+    Edit(//root/.config/anthropic/**) False
+    existing credential-adjacent rules:
+      Write(/workspace/.env)
+      Edit(/workspace/.env)
+      Write(/root/.config/anthropic/**)
+      Edit(/root/.config/anthropic/**)
+      Bash(cat /root/.config/anthropic/*)
+      Bash(cat /workspace/.env*)
+      Bash(env)
+      Bash(printenv)
+
+External docs consulted:
+    https://code.claude.com/docs/en/settings
+    https://code.claude.com/docs/en/permissions
+
+Disposition:
+    FAIL for the containment claim. The installed local CLI is current enough to support settings, but local active-settings inspection requires login. Official Claude Code docs confirm project `.claude/settings.json` and `permissions.deny` are real, but also confirm that absolute file paths use `//...`, `/path` is project-root relative, and permission rules are not a substitute for OS-level sandboxing of arbitrary subprocesses.
+
+Review findings:
+
+1. Blocker: `agent_tick.sh` kills the normal synchronous experiment path after 25 minutes.
+
+Status: OPEN, blocker
+
+Details:
+The new F7 wrapper is incompatible with the loop as documented and prompted. `scripts/agent_tick.sh:70-75` tells the agent to write a config, then run `python scripts/run_next_experiment.py ...`, and only "When it completes" read the metrics and write notes. That means a normal CLI tick is expected to stay alive while the launcher runs the trainer. The same file's comments describe 90-minute experiments (`scripts/agent_tick.sh:13`), and `scripts/run_next_experiment.py:446` still gives normal experiments a 90-minute wall-clock cap.
+
+But `scripts/agent_tick.sh:182` wraps the entire CLI invocation in `timeout 25m "$CLI"`. A successful 90-minute x-attn run is therefore treated as a hung CLI at minute 25. Depending on how the Claude CLI and GNU timeout propagate SIGTERM to child tool processes on the pod, the failure mode is either: kill/interrupt the launcher mid-experiment, orphan the launcher/trainer without the agent, or at minimum prevent the agent from completing the post-run notes/readback phase it was explicitly instructed to do. None of those is safe for unattended cron.
+
+This is not caught by the V7 source probe because the probe only asserts that `timeout 25m` exists. The problem is the lifecycle: the timeout is shorter than the work it wraps.
+
+Recommendation:
+Do not activate cron with this wrapper. Either remove the outer 25-minute timeout, make the agent submit the launcher in a deliberately detached/supervised way and exit quickly, or set the CLI timeout above the maximum launcher wall-clock plus post-processing time and verify signal propagation. The key invariant is that the timeout must not fire during a normal `run_next_experiment.py` run.
+
+2. Blocker: `.claude/settings.json` does not provide the claimed credential and filesystem containment.
+
+Status: OPEN, blocker
+
+Details:
+The fix creates a real `.claude/settings.json`, and Claude Code 2.1.142 supports project settings and `permissions.deny`. The specific rules in this file are still not enough to close audit-014 F3.
+
+First, the credential path rules are mis-anchored for Claude Code's documented path grammar. The docs say `//path` is an absolute filesystem path, while `/path` is relative to the project root. Current rules such as `Write(/workspace/.env)` and `Write(/root/.config/anthropic/**)` therefore do not target `/workspace/.env` or `/root/.config/anthropic/**` as absolute paths.
+
+Second, there are no `Read(...)` deny rules at all. The followup says the agent is denied read access to `/workspace/.env` and `/root/.config/anthropic/**`, but the actual deny list only has Write/Edit rules plus a few Bash patterns (`Bash(cat ...)`, `Bash(env)`, `Bash(printenv)`). Official Claude Code docs recommend `Read(...)` denies for sensitive files and note that permission rules are not OS-level sandboxing for arbitrary subprocess file access. With no `Read(//workspace/.env*)`, no `Read(//root/.config/anthropic/**)`, no sandbox section, and no active pod-side deny test yet, the credential-read side of F3 remains open.
+
+Third, the same limitation applies to state/source containment through Bash. Write/Edit denies protect Claude's file-editing tools, but they are not a hard filesystem boundary for a Bash subprocess that writes files itself. That may be acceptable if the intended barrier is "tool-level deny plus convention", but it is not the enforced filesystem containment claimed by audit-014 F3.
+
+Recommendation:
+Treat F3 as still open. Add correctly anchored `Read/Edit/Write` denies for absolute credential paths using `//...`, add explicit `Read` denies for secrets, and either enable an appropriate sandbox / hook / managed policy or narrow the claim to tool-level containment. Then verify on the pod with an actual denied operation before starting cron.
+
+Bottom line:
+F1, F2, F4, F5, F6, and the AGENT_INSTRUCTIONS HN-FPR migration are in good shape. The cron loop is still blocked by the F7 timeout lifecycle bug and incomplete F3 containment. Fix those before Task #38 activation.

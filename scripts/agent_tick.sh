@@ -175,14 +175,21 @@ fi
 # server wedge, etc.), kill it before the next 30-min tick fires so we
 # don't pile up overlapping CLIs. 25 min < 30-min tick interval.
 echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) launching $CLI"
-# Disable -e for the CLI invocation so we can record the rc without
-# aborting the script (the script's job is to LOG the outcome and exit
-# cleanly so cron sees rc=0 on every tick).
+# Wall-clock cap for the whole tick (review 016 finding 1 fix). The CLI
+# STAYS ATTACHED through the launcher's experiment run per AGENT_INSTRUCTIONS
+# step 5 ("When it completes, read..."). A normal x-attn experiment caps at
+# 90 min (budget.yaml max_wall_clock_minutes); a stress run caps at 150 min;
+# post-processing + notes adds a few minutes. The outer cap must be ABOVE
+# that — 180m gives ~25 min of slack above stress runs, but still bounds a
+# CLI that wedges in pre-launcher state (network stall, MCP server wedge).
+# Default `timeout` sends SIGTERM to the immediate child only, so a wedged
+# launcher orphans cleanly to init and finishes (accelerate trainer is in
+# its own session via start_new_session=True in the launcher per F6).
 set +e
-printf '%s' "$LOOP_PROMPT" | timeout 25m "$CLI"
+printf '%s' "$LOOP_PROMPT" | timeout 180m "$CLI"
 TICK_RC=$?
 set -e
 if [[ $TICK_RC -eq 124 ]]; then
-    echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) CLI TIMED OUT after 25m (rc=124)"
+    echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) CLI TIMED OUT after 180m (rc=124)"
 fi
 echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) tick complete (rc=$TICK_RC)"

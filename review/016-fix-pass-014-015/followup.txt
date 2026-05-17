@@ -1,0 +1,272 @@
+Review comments 016 -- follow-up
+Date: 2026-05-17
+Subject: Disposition of findings in 016-fix-pass-014-015/comments.txt
+Author: scaffold maintainer
+
+Original review file:
+    review/016-fix-pass-014-015/comments.txt
+
+Repo state at follow-up:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+Baseline commit:
+    7d04064 (the fix-pass commit that 016 reviewed) + 07648b1 (INDEX
+    backfill). Both already on main.
+
+Codex confirmed F1, F2, F4, F5, F6, and the audit-015 AGENT_INSTRUCTIONS
+migration as correctly landed. Two Blockers were raised against my
+F7 timeout wrapper and F3 settings.json grammar. Both are accepted.
+This commit fixes them and narrows the F3 followup claim.
+
+----------------------------------------------------------------------
+1. Blocker: agent_tick.sh kills the normal synchronous experiment path
+   after 25 minutes.
+
+Status: FIXED.
+
+Codex correctly identified that my mental model of the agent tick was
+wrong. AGENT_INSTRUCTIONS.md step 5 ("On completion, read...") and
+step 4 ("...the launcher validates, dedups, acquires GPU lock, runs
+accelerate, parses metrics, writes per-experiment results, appends to
+experiments.jsonl, and refreshes sweep_state.yaml") make it explicit:
+the CLI stays attached for the entire 90-min (or 150-min stress)
+launcher run. My `timeout 25m` would have killed every successful
+experiment at minute 25.
+
+V7 in the brief only verified that the timeout token existed; it did
+not verify that the cap was above the launcher's wall-clock cap.
+That was a hole in the verification, also accepted.
+
+Action: scripts/agent_tick.sh:183-193. Changed `timeout 25m` to
+`timeout 180m`. Rationale spelled out in a 7-line block comment
+above the call:
+
+  - Normal x-attn run caps at 90 min (budget.yaml
+    max_wall_clock_minutes).
+  - Stress run caps at 150 min (budget.yaml
+    stress_run_max_wall_clock_minutes).
+  - Post-processing (bootstrap_ci on 5k records) + agent's notes
+    write = a few minutes more.
+  - 180 min gives ~25 min slack above the stress-run cap, which is
+    enough for post-processing + notes. A truly hung CLI still dies
+    in 3 hours instead of ∞.
+  - GNU `timeout` default sends SIGTERM to the immediate child
+    only, so the orphaned launcher continues, the trainer (in its
+    own session via F6's start_new_session=True) continues, and the
+    experiment completes + records correctly even if the CLI itself
+    is killed mid-run. We lose the notes.md only.
+
+Considered alternative: remove the outer cap entirely. Decided
+against it because the original audit-014 F7 motivation (a wedged
+CLI before launcher start would block subsequent ticks via
+agent_tick.sh's GPU-lock pre-check — wait, no, lock pre-check
+correctly skips when launcher started; only LOOSES a tick when
+launcher hasn't started) is partially mitigated by the new F2 lock
+self-heal, but a CLI that wedges in pre-launcher state (network
+stall, MCP server wedge) still costs N ticks of overlap before the
+operator notices. 180m bounds that worst case.
+
+Verify (local):
+
+    grep "timeout 180m" scripts/agent_tick.sh
+    bash -n scripts/agent_tick.sh
+
+----------------------------------------------------------------------
+2. Blocker: .claude/settings.json does not provide the claimed
+   credential and filesystem containment.
+
+Status: PARTIALLY FIXED. Tool-level containment now correctly
+anchored and complete. OS-level containment is out of scope for this
+fix pass and the F3 claim has been narrowed accordingly (audit-014
+followup updated in this commit, see below).
+
+Three sub-issues Codex raised:
+
+(a) Path anchoring grammar wrong.
+    Per https://code.claude.com/docs/en/permissions, `//path` is
+    absolute, `/path` is project-root-relative. My
+    `Write(/workspace/.env)` and `Write(/root/.config/anthropic/**)`
+    targeted project-root-relative paths that don't exist.
+
+    Action: .claude/settings.json now uses `//` for all absolute
+    paths (`//workspace/.env`, `//workspace/.env*`, `//root/.config/
+    anthropic/**`, `//root/.claude/**`, `//root/.aws/**`,
+    `//root/.ssh/**`). The `**/experiments.jsonl` and similar
+    project-relative globs remain as-is (those targets DO live
+    inside the repo and project-root-relative is correct for them).
+
+(b) No Read(...) denies.
+    The audit-014 followup F3 claimed "denies the agent surface
+    READS of the credential paths" but the actual deny list had
+    only Write/Edit + a few Bash(cat ...) patterns. A non-Bash
+    Read tool invocation against `//workspace/.env` would have
+    been permitted.
+
+    Action: Added 8 Read denies — `Read(.env)`,
+    `Read(//workspace/.env)`, `Read(//workspace/.env*)`,
+    `Read(//root/.config/anthropic/**)`, `Read(//root/.claude/**)`,
+    `Read(//root/.aws/**)`, `Read(//root/.ssh/**)`,
+    `Read(**/experiments.jsonl)`. Also added a few additional
+    `Bash(cat //...)` doublets for the absolute-path variant of the
+    pre-existing relative-path Bash denies, plus `Bash(set)` to
+    cover one more env-dump path.
+
+(c) Tool-level vs OS-level claim mis-scoping.
+    Codex correctly noted that permission denies bind the
+    Read/Edit/Write/Bash tool surface, not the OS. A determined Bash
+    subprocess can still read a file via `python -c
+    "print(open('//workspace/.env').read())"` or similar — that
+    bypasses `Bash(cat ...)` denies but is still subject to the
+    `Bash(...)` rule (which I have not restricted further; doing so
+    would break legitimate `python3` subprocess use).
+
+    Action: Narrowed the F3 disposition in
+    review/014-auto-loop-prelaunch-audit/followup.txt: removed the
+    word "enforced" and the implied OS-sandbox framing; now states
+    explicitly "tool-level containment, not OS-level sandboxing".
+    Added a paragraph noting that if the threat model widens beyond
+    "the agent itself trying to follow conventions" to "the agent
+    being adversarial or compromised", a sandboxed user + filesystem
+    ACLs at the OS layer is the proper barrier. For Task #38's
+    threat model (the agent is OUR code following AGENT_INSTRUCTIONS;
+    the deny list is a safety net for hallucination and misclicks,
+    not for a hostile agent), tool-level containment is appropriate
+    but should be called what it is.
+
+    Inline comment in .claude/settings.json's $comment block also
+    spells this out, so anyone editing the file directly sees the
+    framing.
+
+Pod verification (still pending; carried to user handback):
+
+    The local CLI is logged out, so I cannot verify the active deny
+    list against the running CLI. On the pod (Task #38 cron host),
+    after rsync:
+
+      1. Verify the CLI version honors .claude/settings.json:
+         `claude config get permissions` should print the deny list
+         (the pod's CLI is logged in via OAuth, so `config get` will
+         work there).
+      2. First-tick test: have the agent attempt
+         `Read("/workspace/.env")` or
+         `Write("src/auto_research/experiments.jsonl")` — both
+         should be refused with a permission-denied message.
+      3. If either is permitted, the pod's CLI version does not
+         honor the file as expected; stop and either upgrade the
+         CLI or fall back to wrapper-level filtering.
+
+Verify (local structural):
+
+    python3 - <<'PY'
+    import json
+    s = json.loads(open(".claude/settings.json").read())
+    d = s["permissions"]["deny"]
+    # Codex's exact required absolute-path denies all present:
+    for pat in [
+        "Read(//workspace/.env)",
+        "Read(//workspace/.env*)",
+        "Read(//root/.config/anthropic/**)",
+        "Write(//root/.config/anthropic/**)",
+        "Edit(//root/.config/anthropic/**)",
+    ]:
+        assert pat in d, f"missing {pat!r}"
+    # Old (wrong-anchored) absolute paths removed:
+    bad = [r for r in d if r.startswith(("Write(/root/", "Write(/workspace/", "Edit(/root/", "Edit(/workspace/"))]
+    bad = [r for r in bad if not r.startswith(("Write(//", "Edit(//"))]
+    assert not bad, f"single-slash absolute paths remain: {bad}"
+    print(f"F3 grammar fix OK ({len(d)} rules)")
+    PY
+
+----------------------------------------------------------------------
+3. PASS items (Codex confirmed correct in this fix pass)
+
+No action needed for these:
+
+  - F1 (escalate-only on failure path): Codex's V1 probe passes.
+    The `parsed_status in ("nan", "oom")` guard is correctly
+    placed and the old downgrade form is removed.
+  - F2 (lockfile self-heal): Codex's V2 probe passes 3/3 cases
+    (live PID, stale PID, unreadable PID). Note: Codex's question
+    7 (TOCTOU race on PID reuse) — accepted as theoretically real
+    but negligible on a single-tenant pod; not actioned.
+  - F4 (atomic torch.save): V4 passes.
+  - F5 (convergence None-filter): V5 passes 3/3 cases.
+  - F6 (subprocess group + killpg): structural probe passes.
+    Note: Codex's question 5 (30s SIGTERM grace) — accepted as
+    plausibly tight for DDP shutdown but no evidence yet that it's
+    insufficient; will instrument the first stress run and bump if
+    needed.
+  - NEW HIGH (AGENT_INSTRUCTIONS AUC migration): V8 passes with 0
+    stale AUC references in the doc.
+  - V9 (Layer A scaffold smoke): passes; the fix pass did not touch
+    eval surfaces.
+  - V10 (launcher module load + helpers): passes.
+
+----------------------------------------------------------------------
+4. Codex's targeted questions that were NOT individually answered as
+   findings (informational)
+
+The brief asked Codex 8 specific yes/no questions. The comments.txt
+addresses some implicitly via the two Blockers but does not enumerate
+answers. Recording dispositions here for the record:
+
+  Q1 (F1 completeness): no other downgrade paths identified in this
+  fix pass. The success branch at line 742 (`train_metrics.get(
+  "status", "ok")`) is correct for the success path; if the trainer
+  writes "nan" to metrics.json on the success branch (rc==0 but
+  loss-is-nan in log), the parser will have caught it. The
+  `train_metrics.get(..., "ok")` is the right default for rc==0.
+
+  Q2 (F2 TOCTOU PID reuse): accepted as theoretical but negligible
+  on a single-tenant pod. Not actioned.
+
+  Q3 (F3 grammar): ACTIONED in this commit, per Blocker 2 above.
+
+  Q4 (F5 contiguity vs full-history walk): the new walk searches the
+  full xattn_valid_all then takes last `window`. This is semantically
+  correct for the "did the metric stop improving" question: legacy
+  rows aren't relevant data points, so skipping them and then
+  comparing the last window of REAL data points is the right
+  interpretation. Codex did not flag this as a finding, so the
+  semantic is accepted.
+
+  Q5 (F6 30s grace): accepted as possibly tight; instrument the
+  first stress run.
+
+  Q6 (F7 + F2 interaction with the OLD 25m timeout): moot now that
+  the timeout is 180m, which is well above the launcher's worst-case
+  150-min cap plus post-processing.
+
+  Q7 (NEW HIGH completeness): V8's negative scan reported 0 stale
+  AUC references, so this is closed.
+
+  Q8 (regression check vs 001-013): no findings raised; closed.
+
+----------------------------------------------------------------------
+5. Updates to prior followups
+
+This commit also edits review/014-auto-loop-prelaunch-audit/followup.txt
+F3 section to narrow the containment claim per Codex's accepted
+critique (point 2(c) above). The F3 disposition still says FIXED but
+no longer implies OS-level sandboxing. The paragraph is replaced in
+place; the "Verify" stanza below F3 is unchanged.
+
+----------------------------------------------------------------------
+6. Commit anchors
+
+This commit:
+    scripts/agent_tick.sh                    (Blocker 1)
+    .claude/settings.json                    (Blocker 2)
+    review/014-auto-loop-prelaunch-audit/followup.txt  (F3 narrowed)
+    review/016-fix-pass-014-015/followup.txt (this file)
+
+INDEX backfill (next commit): row 016 added with this commit's hash.
+
+----------------------------------------------------------------------
+7. Status for cron activation
+
+After this commit, both Blockers are addressed. The remaining
+condition before cron activation is the pod-side verification of
+.claude/settings.json honor (step in section 2 above). The
+maintainer carries this to the user as a handback condition; the
+user must run the first-tick deny test before adding the crontab
+entry.
