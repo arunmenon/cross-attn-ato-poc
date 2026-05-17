@@ -343,19 +343,25 @@ def check_halt_conditions() -> str | None:
         thresh = conv.get("hn_fpr_improvement_threshold",
                           conv.get("auc_lift_threshold", 0.005))
         if len(xattn_valid_all) >= min_runs:
-            recent = xattn_valid_all[-window:]
-            if len(recent) == window:
-                worst_values = [h.get("hn_fpr_worst_stripped") for h in recent]
-                if all(v is not None for v in worst_values):
-                    # Lower HN-FPR is better. "Improvement" = first - best.
-                    best = min(worst_values)
-                    first = worst_values[0]
-                    if (first - best) < thresh:
-                        return (
-                            f"convergence: no worst-family HN-FPR "
-                            f"improvement >= {thresh} over last {window} "
-                            f"x-attn runs (first={first:.4f}, best={best:.4f})"
-                        )
+            # Audit 014 H5 / audit 015 confirmed: filter Nones first, then
+            # rank against the last `window` VALID HN-FPR records.
+            # `all(v is not None ...)` silently bypassed convergence whenever
+            # a legacy (pre-review-013) row sat in the window.
+            worst_series = [
+                h.get("hn_fpr_worst_stripped") for h in xattn_valid_all
+            ]
+            worst_series = [v for v in worst_series if v is not None]
+            if len(worst_series) >= window:
+                recent_valid = worst_series[-window:]
+                # Lower HN-FPR is better. "Improvement" = first - best.
+                best = min(recent_valid)
+                first = recent_valid[0]
+                if (first - best) < thresh:
+                    return (
+                        f"convergence: no worst-family HN-FPR "
+                        f"improvement >= {thresh} over last {window} "
+                        f"x-attn runs (first={first:.4f}, best={best:.4f})"
+                    )
 
     return None
 
@@ -370,6 +376,30 @@ def acquire_lock() -> int | None:
         os.write(fd, f"{os.getpid()}\n".encode())
         return fd
     except FileExistsError:
+        # Stale-PID self-heal (audit 014 Blocker 2 / audit 015 confirmed).
+        # If the lockfile's PID is no longer alive, the prior owner crashed
+        # (SIGKILL / preempt / power loss) without releasing. Unlink and
+        # retry once. If the PID is alive, or unreadable, leave the lock.
+        try:
+            stale_pid = int(LOCKFILE.read_text().strip())
+        except (OSError, ValueError):
+            return None
+        try:
+            os.kill(stale_pid, 0)
+        except ProcessLookupError:
+            try:
+                LOCKFILE.unlink()
+            except FileNotFoundError:
+                pass
+            try:
+                fd = os.open(str(LOCKFILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                os.write(fd, f"{os.getpid()}\n".encode())
+                print(f"[acquire_lock] cleaned stale lock for dead PID {stale_pid}")
+                return fd
+            except FileExistsError:
+                return None
+        except PermissionError:
+            return None
         return None
 
 
@@ -446,24 +476,35 @@ def launch_trainer(arm: str, config_path: Path, run_dir: Path,
 
     timed_out = False
     with log_path.open("w") as logf:
+        # start_new_session=True puts the trainer in its own process group
+        # so we can SIGTERM/SIGKILL the WHOLE tree on timeout (accelerate
+        # spawns DDP workers + dataloader children that wouldn't die with
+        # proc.kill() alone). Audit 014 H6 / audit 015 confirmed.
         proc = subprocess.Popen(
             cmd, stdout=logf, stderr=subprocess.STDOUT,
             cwd=str(REPO_ROOT),
+            start_new_session=True,
         )
         try:
             rc = proc.wait(timeout=timeout_sec)
         except subprocess.TimeoutExpired:
             timed_out = True
             print(
-                f"TIMEOUT after {timeout_min} min — sending SIGTERM",
+                f"TIMEOUT after {timeout_min} min — SIGTERM to process group",
                 file=sys.stderr,
             )
-            proc.send_signal(signal.SIGTERM)
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
             try:
                 rc = proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
-                print("SIGTERM did not stop process; sending SIGKILL", file=sys.stderr)
-                proc.kill()
+                print("SIGTERM did not stop process group; SIGKILL", file=sys.stderr)
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 rc = proc.wait()
             # Append a marker line to the log so post-parse sees the cause.
             with log_path.open("a") as logf2:
@@ -700,13 +741,19 @@ def _do_run(config_path: Path) -> int:
                 "wall_clock_min": wall_clock_min,
                 "timestamp": dt.datetime.utcnow().isoformat() + "Z",
             }
-            # Read parsed metrics if any
+            # Read parsed metrics if any.
+            # parse_metrics.py defaults status="ok" when no NaN/OOM marker is
+            # found in the log — fine for successful runs, but here we KNOW
+            # the trainer exited non-zero (or timed out). Let the parser only
+            # REFINE the cause (nan, oom) — never downgrade the launcher's
+            # authoritative "failed"/"timeout" back to "ok". Audit 014
+            # Blocker 1 / audit 015 confirmed.
             metrics_json = run_dir / "metrics.json"
             if metrics_json.exists():
                 m = json.loads(metrics_json.read_text())
-                # Don't let parsed status downgrade an explicit timeout.
-                if not timed_out:
-                    record["status"] = m.get("status", "failed")
+                parsed_status = m.get("status")
+                if not timed_out and parsed_status in ("nan", "oom"):
+                    record["status"] = parsed_status
                 record["max_gate_magnitude"] = m.get("max_gate_magnitude")
             append_experiment(record)
             update_sweep_state()

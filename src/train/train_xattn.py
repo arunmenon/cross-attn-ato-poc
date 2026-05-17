@@ -282,7 +282,12 @@ def main():
     # The frozen base is not saved here — checkpoint consumers load the
     # base from base_checkpoint and reapply the wrapper.
     sd = {k: v for k, v in unwrapped.state_dict().items() if not k.startswith("base.base_model")}
-    torch.save(sd, run_dir / "xattn_state.pt")
+    # Atomic write: a concurrent backup_to_external.sh otherwise risks
+    # syncing a half-written .pt to external storage. Audit 014 M4.
+    state_path = run_dir / "xattn_state.pt"
+    tmp_state = state_path.with_suffix(".pt.tmp")
+    torch.save(sd, tmp_state)
+    tmp_state.rename(state_path)
     print(f"wrote {metrics_path} + xattn_state.pt + gate_trajectory.json")
     print(f"max gate magnitude across training: {max_gate_magnitude:.4f}")
     return 0

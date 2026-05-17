@@ -1,0 +1,1173 @@
+Review comments 014
+Date: 2026-05-17
+Subject: Auto-loop pre-launch audit — multi-perspective review prior to Task #38 activation
+
+Reviewer: team-plan multi-specialist audit (correctness-auditor (quality-engineer) + security-auditor + state-auditor (backend-engineer) + best-practices-researcher (deep-researcher))
+
+Reviewed file(s):
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/run_next_experiment.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/parse_metrics.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/agent_tick.sh
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/backup_to_external.sh
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/init_auto_research_state.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/eval/bootstrap_ci.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/eval/score_risk.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/train_xattn.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/common.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/AGENT_INSTRUCTIONS.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/configs/budget.yaml
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/configs/sweep_space.yaml
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/experiments.jsonl
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/sweep_state.yaml
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/RUNBOOK.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/gen/narrative_generator.py (credential paths only)
+
+Repo root used for comparison:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+Summary:
+This audit is scoped strictly to auto-loop pre-launch readiness (Task #38). Per `.claude/tasks/audit-014/_preamble.md`: "If a specialist finds an issue that traces to one of [reviews 001-013], they should note 'regression of review NNN finding M' and treat it as Blocker; otherwise skip." Four specialists ran in parallel (correctness math + bootstrap, security/containment, state/atomicity, best-practices vs Optuna/Ray Tune/W&B/Karpathy/Anthropic harnesses); none of their findings are regressions of prior closures. The consolidated tally is 3 Blockers, 4 Highs, 9 Mediums, 3 Minors, and 4 Informational. Headline blockers: (B1) crashed trainer is silently written as `status="ok"` to experiments.jsonl, poisoning halt counts and ranking; (B2) lockfile cannot self-heal across launcher SIGKILL / pod preemption — every unclean exit wedges the loop until manual `rm`; (B3) agent has no enforced filesystem barrier — AGENT_INSTRUCTIONS.md "do not write" is unenforced convention and `.claude/settings.json` does not exist. Reviews 001-013 are not re-litigated here; the shell-meta defense, the wall-clock cap, the O_EXCL lock atomicity, the HN-FPR ranking math, the per-resample threshold recomputation, and the worst-family composite all verified PASS.
+
+Verification run:
+
+1. Per-resample threshold recomputation in `bootstrap_hard_negative_fpr` (correctness-auditor).
+
+Command:
+    Source read: eval/bootstrap_ci.py:167 plus spy probe via
+    .venv-local/bin/python with score_risk.recall_at_fpr monkey-patched
+    to count and capture thresholds across 200 synthetic predictions, resamples=5.
+
+Actual output:
+    Total recall_at_fpr calls: 6 (expected 1 + 5 = 6)
+    Distinct thresholds: 4 of 6
+    Thresholds: [2.2040, 1.4188, 1.2685, 2.2040, 2.9041, 2.2040]
+
+Disposition:
+    PASS. Threshold is recomputed per resample; CIs reflect joint variability
+    of (resampled scores, resampled threshold). Review 013's headline math
+    closure holds.
+
+2. NaN handling in `_hn_worst` / `_hn_mean` (correctness-auditor).
+
+Command:
+    .venv-local/bin/python -c "from scripts.run_next_experiment import _hn_worst, _hn_mean; ..."
+
+Actual output:
+    _hn_worst NaN handling OK
+    _hn_mean NaN handling OK
+
+Disposition:
+    PASS. Both helpers correctly return None on empty/None/all-NaN input
+    and ignore NaN families in mixed input.
+
+3. Worst-family ranking tie-break in `update_sweep_state` (correctness-auditor).
+
+Command:
+    .venv-local/bin/python -c "ranked = sorted(xattn_completed, key=lambda h:
+    (h['hn_fpr_worst_stripped'], h.get('hn_fpr_mean_stripped', float('inf'))))"
+
+Actual output:
+    Ranked exp_ids: ['B', 'A', 'C']
+
+Disposition:
+    PASS. Tie on worst is correctly broken by lower mean; `float('inf')`
+    default ensures missing-mean rows sort last among ties.
+
+4. Convergence halt window math, four cases (correctness-auditor).
+
+Command:
+    .venv-local/bin/python simulate_halt([improving, flat, late_regression,
+    None_in_window])
+
+Actual output:
+    CONTINUE  (improving)
+    HALT      (flat)
+    CONTINUE  (late regression — masked by mid-window best)
+    CONTINUE (None in window)  (any single None silently disables halt)
+
+Disposition:
+    Cases 1-2 pass. Case 3 is a calibration question (finding 8). Case 4
+    is a real defect (finding 5).
+
+5. Crashed-trainer status flow (correctness-auditor + state-auditor, independent verification).
+
+Command:
+    grep -n 'status.*=\|"status":' scripts/run_next_experiment.py scripts/parse_metrics.py
+    Plus end-to-end repro: build a truncated train.log with no NaN/OOM
+    marker, run parse_log, then simulate rc=137 path of run_next_experiment.py.
+
+Actual output:
+    parse_metrics status: ok
+    launcher initial status: failed
+    after parse_metrics override: ok
+
+Disposition:
+    FAIL. End-to-end confirms a crashed trainer that lacks `OutOfMemoryError`,
+    `loss is nan`, or `gradient overflow` markers in train.log is written
+    to experiments.jsonl with status="ok". Independently surfaced by the
+    correctness and state specialists. See finding 1.
+
+6. Atomic-write inventory across all writers to shared state files (state-auditor).
+
+Command:
+    grep -rn "write_text\|\.open.*['\"]w['\"]\|tmp.rename\|\.rename("
+        scripts/run_next_experiment.py scripts/parse_metrics.py
+        scripts/backup_to_external.sh scripts/init_auto_research_state.py
+        src/train/
+
+Actual output (abridged):
+    scripts/run_next_experiment.py:529-530  tmp.write_text/.rename (ci_report agg)  OK
+    scripts/run_next_experiment.py:549-551  tmp.write_text/.rename (experiments.jsonl) OK
+    scripts/run_next_experiment.py:620-622  tmp.write_text/.rename (sweep_state.yaml) OK
+    scripts/run_next_experiment.py:448      log_path.open("w")     (train.log)        NON-ATOMIC
+    scripts/parse_metrics.py:105-106        tmp.write_text/.rename (metrics.json)     OK
+    src/train/train_xattn.py:240-242        tmp.write_text/.rename (gate_trajectory)  OK
+    src/train/train_xattn.py:277-279        tmp.write_text/.rename (metrics.json)     OK
+    src/train/train_xattn.py:285            torch.save(sd, ...)    (xattn_state.pt)   NON-ATOMIC
+    src/train/common.py:372-376             tmp+rename in write_predictions_jsonl     OK
+    scripts/init_auto_research_state.py:79,92,100  jsonl/yaml.write_text  NON-ATOMIC
+
+Disposition:
+    Two real torn-write hazards (xattn_state.pt and train.log) versus
+    cron-driven backup_to_external.sh. See findings 4 and 13.
+
+7. Hash stability of `canonical_hash` under YAML key reorder / scalar drift (state-auditor).
+
+Command:
+    python3 -c "canonical_hash variants: reorder, exp_id strip, lr 5e-5 vs
+    0.00005, steps 1500 vs 1500.0"
+
+Actual output:
+    reorder: True
+    exp_id stripped: True
+    lr 0.00005 vs 5e-5: True
+    steps 1500 vs 1500.0: False
+
+Disposition:
+    PARTIAL. The 1500 vs 1500.0 hash collision miss is the realistic
+    agent-rewrite hazard. See finding 9.
+
+8. Subprocess interpolation surface and credential exposure (security-auditor).
+
+Command:
+    grep -rn "shell=True\|os.system\|subprocess.call\|subprocess.run\|subprocess.Popen"
+        scripts/ src/auto_research/
+    grep -rn "ANTHROPIC_API_KEY\|OPENAI_API_KEY" scripts/ src/ data/ RUNBOOK.md PLAN.md
+
+Actual output:
+    All Popen/run calls use list-form argv; no shell=True.
+    Trainer path has zero references to API keys; keys appear only in
+    data/gen/narrative_generator.py:384,457 (Day-0 dataset gen, already run)
+    and RUNBOOK.md:72-75,151,174 (doc'd export patterns).
+
+Disposition:
+    PASS for argv injection. PASS for credential exposure in the trainer
+    path. RUNBOOK doc wording flagged separately (finding 17).
+
+9. Lockfile staleness probe (security-auditor + state-auditor + best-practices, three independent traces).
+
+Command:
+    grep -n "stale\|kill.*0\|getpid\|LOCKFILE" scripts/run_next_experiment.py
+        scripts/agent_tick.sh
+    Plus code-level analysis of acquire_lock and agent_tick.sh:132-136.
+
+Actual output:
+    scripts/run_next_experiment.py:60       LOCKFILE declared
+    scripts/run_next_experiment.py:367-374  os.open(O_CREAT|O_EXCL|O_WRONLY)
+                                            os.write(fd, f"{os.getpid()}\n")
+    scripts/agent_tick.sh:132-136           if [[ -f $GPU_LOCK_FILE ]]; cat;
+                                            echo; exit 0
+    Neither code path ever does kill -0 on the PID it wrote/read.
+
+Disposition:
+    FAIL. PID is stamped but never consulted. Three specialists independently
+    flagged this as Blocker/High. See finding 2.
+
+10. Best-practices comparison against 7 reference frameworks (deep-researcher).
+
+Method:
+    ~10-15 min web research per framework (Optuna pruners/heartbeat,
+    Ray Tune fault tolerance, W&B Sweeps + mark_preempting, Karpathy
+    autoresearch, AutoML-Zero, AutoGPT/OpenHands/mini-SWE-agent harnesses,
+    Anthropic cwc-long-running-agents). Guardrail flagged iff adopted by
+    >=3/7 frameworks AND relevant at single-pod single-GPU scope.
+
+Actual output (gaps adopted by >=3 frameworks that we lack):
+    - Stale-PID cleanup: 4/7 → see finding 2
+    - Run resumption from checkpoint: 5/7 → see finding 11
+    - Telemetry / halt-notification: 4/7 → see finding 12
+    - Agent action allowlist: 5/7 → see finding 3
+    - Schema versioning on rows: 3/7 → see finding 14
+    - Reproducibility seed: 4/7 → see finding 15
+    - Audit log binding tick→proposal→result: 6/7 → see finding 16
+    - Healthcheck / CLI timeout: 4/7 → see finding 7
+
+Disposition:
+    Eight gaps identified; all bound to surgical fixes at the
+    wrapper/observability layer (no trainer / launcher core surgery).
+
+Review findings:
+
+1. Blocker: Crashed trainer is recorded as `status="ok"` whenever train.log lacks an explicit NaN/OOM marker.
+
+Status: OPEN, blocker
+
+Details:
+`scripts/parse_metrics.py:76` initializes `status = "ok"` and only
+escalates to `"oom"` or `"nan"` when text-marker regexes match
+(`OutOfMemoryError`, `CUDA out of memory`, `OOM`, `loss is nan`,
+`gradient overflow`). For any crash that does not leave one of these
+markers in train.log (host OOM-killer SIGKILL, accelerate launch error,
+import error, segfault, env-var failure, SIGTERM, distributed deadlock,
+bitsandbytes Blackwell incompat, etc.), `parse_log` returns
+`status="ok"`. On the launcher side, `scripts/run_next_experiment.py:706-709`
+does:
+
+    metrics_json = run_dir / "metrics.json"
+    if metrics_json.exists():
+        m = json.loads(metrics_json.read_text())
+        if not timed_out:
+            record["status"] = m.get("status", "failed")
+
+`m["status"]` is "ok" for any silent crash, so `record["status"]` — which
+was correctly set to `"failed"` on line 698 based on rc != 0 — is
+overwritten with `"ok"`. End-to-end repro confirmed (verification 5).
+The bad row then:
+  - Counts toward `xattn_valid_all` in `check_halt_conditions` (line 302),
+    inflating `max_experiments` and `min_valid_runs_before_halt` counts.
+  - Breaks the `nan_cascade` halt — a single mismarked "ok" mid-cascade
+    silently disables the cascade detector, and the loop keeps burning
+    GPU on NaN-producing configs.
+  - Is invisible to the agent reading sweep_state.yaml.
+  - Is wrong for any post-hoc audit / Day-3 writeup.
+
+The audit brief explicitly called this out as a known-suspected bug
+surfaced by Task #35 debugging. Independently verified by both the
+correctness and state specialists.
+
+Recommendation:
+The fix belongs in `scripts/run_next_experiment.py:706-709`, not in
+parse_metrics.py. parse_metrics's "ok"-by-default is reasonable on its
+own — the launcher's failure branch trusting that default in a context
+where rc != 0 is the bug. Three-line change:
+
+    # rc != 0 here. Only let parsed status escalate to a more-specific
+    # failure type (nan, oom). Never downgrade "failed" to "ok".
+    if not timed_out:
+        parsed = m.get("status")
+        if parsed in ("nan", "oom"):
+            record["status"] = parsed
+        # else: keep "failed"
+
+Defensive belt-and-suspenders in parse_metrics.parse_log:76 — change
+the initial `status = "ok"` to `"unknown"` and escalate to "ok" only
+when `train_runtime` is present in the log (HF Trainer emits this in
+its summary line — proves the trainer reached the end). This is a
+separate fix in parse_metrics; the launcher-side fix above is the
+required one.
+
+Verify:
+    Create a synthetic crash scenario: trainer stub prints "step 1
+    loss 0.5" then exits 1. Run launcher. Expect experiments.jsonl
+    row has status=="failed", not "ok".
+
+Specialists contributing: correctness-auditor, state-auditor (independently corroborated).
+
+2. Blocker: Lockfile cannot self-heal across launcher SIGKILL / pod preemption.
+
+Status: OPEN, blocker
+
+Details:
+`scripts/run_next_experiment.py:367-386` writes the launcher's PID into
+`/workspace/.gpu.lock` using O_EXCL, and `release_lock` is wired into a
+try/finally so a Python-level exception cleans up. But if the launcher
+process itself is killed (OOM-killer SIGKILL, RunPod Community Cloud
+preemption mid-experiment, ssh session kill, host blip) the finally
+never runs and the lockfile remains. `scripts/agent_tick.sh:132-136`
+pre-checks the file's existence — it does NOT check whether the PID
+inside is still alive — so every subsequent 30-min tick reads "lock
+held" and exits silently. The auto-loop is wedged until a human runs
+`rm /workspace/.gpu.lock`.
+
+For a 12-18 hour unattended run on Community Cloud (where RUNBOOK §10
+documents preemption as "expected, not exceptional"), the expected
+behavior of "the loop picks back up" only holds if the lock was
+released cleanly — which is the case the host controls least. The
+lockfile lives on `/workspace` (persistent RunPod volume), so even a
+preemption-then-rebuild leaves the orphaned lock behind.
+
+AGENT_INSTRUCTIONS.md line 199 tells the agent to "surface this to the
+user via README — do not delete the lockfile yourself" — but the agent
+is never invoked because agent_tick.sh's pre-check exits before the
+CLI runs. Discovery-by-SSH-tail is a 30-min-to-12-hour outage depending
+on operator schedule.
+
+The three specialists framed this differently — security-auditor as
+Blocker for unattended cron, state-auditor and best-practices as High —
+but the highest-severity framing (Blocker) is the correct one for the
+"is this safe to flip on for 12-18 hours unattended" question this audit
+is scoping. Cited adoption in reference frameworks: Optuna
+`fail_stale_trials`, Ray Tune cluster auto-restart, Anthropic
+`kill-switch.sh` + `commit-on-stop`, OpenHands sandbox teardown — 4 of 7.
+
+Recommendation:
+Two-layer fix (both layers are short — belt-and-suspenders). In
+`agent_tick.sh:132-136`, do a `kill -0 $LOCK_PID 2>/dev/null` test
+gated on a >=120s lockfile-age threshold to avoid self-eviction races:
+
+    if [[ -f "$GPU_LOCK_FILE" ]]; then
+        LOCK_PID="$(cat "$GPU_LOCK_FILE" 2>/dev/null || echo unknown)"
+        if [[ "$LOCK_PID" =~ ^[0-9]+$ ]] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+            MTIME=$(stat -c %Y "$GPU_LOCK_FILE" 2>/dev/null || \
+                    stat -f %m "$GPU_LOCK_FILE" 2>/dev/null || echo 0)
+            NOW=$(date +%s)
+            if (( NOW - MTIME > 120 )); then
+                echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) reclaiming stale GPU lock (PID=$LOCK_PID is dead, age $(( NOW - MTIME ))s)"
+                rm -f "$GPU_LOCK_FILE"
+            else
+                echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) lock PID=$LOCK_PID not alive but lock is recent ($(( NOW - MTIME ))s); waiting"
+                exit 0
+            fi
+        else
+            echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) GPU lock held (PID=$LOCK_PID); skipping this tick"
+            exit 0
+        fi
+    fi
+
+In `run_next_experiment.acquire_lock`, mirror the same `kill -0` check
+on the FileExistsError branch, gated by the same 120s age threshold,
+then atomically reclaim (unlink + retry once, not in a loop). Either
+layer alone is sufficient; both is the dual-gate idiom the codebase
+already uses elsewhere.
+
+Verify:
+    echo 99999 > /workspace/.gpu.lock           # fake PID
+    touch -d '5 minutes ago' /workspace/.gpu.lock
+    bash scripts/agent_tick.sh
+    # Expect: "stale lock ... removing"; the tick proceeds.
+
+Specialists contributing: security-auditor, state-auditor, best-practices-researcher (three-way corroborated).
+
+3. Blocker: Agent has no enforced filesystem containment — `.claude/settings.json` does not exist.
+
+Status: OPEN, blocker
+
+Details:
+CLAUDE.md / AGENT_INSTRUCTIONS.md / RUNBOOK.md collectively tell the
+agent "do not edit run_next_experiment.py" (AGENT_INSTRUCTIONS:208), "do
+not touch experiments.jsonl or sweep_state.yaml" (AGENT_INSTRUCTIONS:188),
+"git-checkpoint before code edits" (AGENT_INSTRUCTIONS:184). These are
+all written conventions. Nothing in the running environment enforces them:
+
+- No `.claude/settings.json` exists in the repo (`ls .claude/` shows
+  only `tasks/`). Claude Code runs with the default permission model.
+- agent_tick.sh runs `claude` as root per the threat model.
+- The agent therefore has Bash/Write/Edit access to:
+  - `/root/.config/anthropic/` (the subscription-OAuth token — the
+    credential of value after the user's recent switch off API keys)
+  - `/workspace/.env` (if API keys are ever re-added)
+  - `experiments.jsonl` and `sweep_state.yaml` (load-bearing for dedup,
+    halt counts, and ranking — corrupting them poisons the loop)
+  - `data/cache/` (deletion forces narrator re-runs ~$10+)
+  - `git push` to wherever the remote points
+
+A confused agent ("misreads context, gets stuck in a propose-fail loop
+and tries to clean up") is by far the most likely failure mode, not a
+malicious one — but the effect is the same. Concrete loss modes:
+  - Agent "helpfully" deletes an old experiments.jsonl entry to "fix
+    duplicate detection" → silent rewrite of history.
+  - Agent injects a fake winner row → halt-by-convergence picks the
+    fake as Top-1; daily writeup reports it.
+  - Agent marks a real failed run as `status: ok` → nan_cascade halt
+    miscount.
+  - Agent runs `git add -A && git commit && git push` → leaks repo state
+    including any tmp credentials to the public remote.
+  - Agent reads `/root/.config/anthropic/` to "verify auth" and quotes
+    it back into notes.md → token rides in backup_to_external.sh's
+    uploads (compounds with finding 13).
+
+Anthropic's `cwc-long-running-agents` makes the explicit point that
+"asking nicely doesn't reliably stop" an agent — drift toward shortcut
+paths is a documented failure mode of long-running sessions. With ~144
+tick opportunities over 3 days, the empirical rate of "agent reads
+instruction and follows it correctly" is not 100%.
+
+Two specialists framed differently (security as Blocker, best-practices
+as High); the Blocker framing is correct for "safe to flip on
+unattended."
+
+Recommendation:
+Add `.claude/settings.json` at the repo root with a deny-by-default
+hook (PreToolUse `Write|Edit|MultiEdit`) plus an explicit denylist.
+Concrete starting point:
+
+    {
+      "$schema": "https://json.schemastore.org/claude-code-settings.json",
+      "permissions": {
+        "deny": [
+          "Bash(rm -rf*)",
+          "Bash(git push*)",
+          "Bash(git reset --hard*)",
+          "Bash(curl*)",
+          "Bash(wget*)",
+          "Bash(scp*)",
+          "Bash(rsync*)",
+          "Read(/root/.config/**)",
+          "Read(/workspace/.env)",
+          "Read(/etc/shadow)",
+          "Read(~/.ssh/**)",
+          "Edit(src/auto_research/experiments.jsonl)",
+          "Edit(src/auto_research/sweep_state.yaml)",
+          "Write(src/auto_research/experiments.jsonl)",
+          "Write(src/auto_research/sweep_state.yaml)",
+          "Edit(scripts/run_next_experiment.py)",
+          "Edit(scripts/parse_metrics.py)",
+          "Edit(eval/score_risk.py)",
+          "Edit(eval/bootstrap_ci.py)",
+          "Edit(scripts/leakage_checks.py)"
+        ]
+      }
+    }
+
+Pair with `defaultMode: "acceptEdits"` (or equivalent) so the cron-driven
+agent never hangs on a permission prompt — the TTY-less environment
+makes any interactive permission gate equivalent to "halt the loop."
+Validate with one full DRY_RUN tick to confirm no permission prompt
+fires for legitimate paths (write config.yaml, write notes.md, run
+`python scripts/run_next_experiment.py`).
+
+This finding subsumes a separate state-side concern (agent could
+corrupt experiments.jsonl directly; the launcher trusts the file) — the
+denylist above covers it. An optional belt-and-suspenders is a launcher-
+side schema sanity check at startup over experiments.jsonl rows (~15
+lines in `_load_history`), but enforcement via the denylist is the
+primary fix.
+
+Verify:
+    With settings.json in place, attempt `Edit(experiments.jsonl)` via
+    a one-shot claude invocation; expect deny.
+
+Specialists contributing: security-auditor, best-practices-researcher (corroborated). State-auditor's separate concern about experiments.jsonl integrity (originally Medium) is folded here.
+
+4. High: `torch.save(xattn_state.pt)` is non-atomic; backup_to_external.sh can ship a torn 419 MB checkpoint.
+
+Status: OPEN, high
+
+Details:
+`src/train/train_xattn.py:285` writes the trainable state dict directly
+via `torch.save(sd, run_dir / "xattn_state.pt")`. The file is ~419 MB
+and takes several seconds to write at NVMe speeds. No tmp+rename guard.
+
+`scripts/backup_to_external.sh:116-123` runs every 30 minutes and uses
+`aws s3 sync` / `rclone sync` / `huggingface-cli upload` directly on the
+run directory. These tools open each source file and stream-read it. If
+the trainer is mid-`torch.save` at the moment the sync starts reading
+`xattn_state.pt`, the upload contains the prefix of the file as it
+existed at that instant — a torn pickle. The remote copy is then
+committed; the sync tool does not detect end-of-file truncation.
+
+Concrete worst-case ordering:
+  t=0    trainer at step 1450/1500, GPU lock held
+  t=20s  backup_to_external.sh cron fires
+  t=21s  backup starts streaming xattn_state.pt — file is 0 bytes
+  t=45s  trainer reaches line 285 — torch.save begins writing
+  t=50s  backup reads partial bytes as torch.save extends the file
+  t=58s  backup aws s3 cp finishes; remote receives partial bytes
+  → remote `runs/exp_NNN/xattn_state.pt` is corrupt.
+
+Window per write is ~1-2 seconds for 419 MB at ~200 MB/s; backup cadence
+is 30 min; ~36 experiments over 36 hours → expected collisions ~1-2.
+
+Recommendation:
+Three-line surgical fix in `train_xattn.py:285`:
+
+    sd_path = run_dir / "xattn_state.pt"
+    sd_tmp = sd_path.with_suffix(".pt.tmp")
+    torch.save(sd, sd_tmp)
+    sd_tmp.rename(sd_path)
+
+Optional belt-and-suspenders: in `backup_to_external.sh`, before sync,
+check whether `/workspace/.gpu.lock` is held; if it is, skip backup for
+this tick (or skip the runs/ subtree). The first fix alone (atomic
+rename) is sufficient and lower-risk; the second is hardening.
+
+Verify:
+    python3 -c "import torch, time; sd={'k': torch.zeros(100_000_000)}; \
+                t0=time.time(); torch.save(sd, '/tmp/x.pt.tmp'); \
+                import os; os.rename('/tmp/x.pt.tmp','/tmp/x.pt')"
+    # While the .pt.tmp is being written, no `xattn_state.pt` is observable
+    # at the final path; the rename is instantaneous.
+
+Specialists contributing: state-auditor.
+
+5. High: Convergence halt is silently disabled forever if any HN-FPR value in the window is None.
+
+Status: OPEN, high
+
+Details:
+`run_next_experiment.py:349` reads:
+
+    if all(v is not None for v in worst_values):
+        best = min(worst_values)
+        first = worst_values[0]
+        if (first - best) < thresh:
+            return f"convergence: ..."
+
+If any run in `xattn_valid_all[-window:]` carries
+`hn_fpr_worst_stripped: None`, the halt block is skipped — but the loop
+keeps running. None can appear legitimately:
+  - Pre-review-013 rows (no schema migration; older rows lack the field)
+  - A run where the decision threshold was NaN (degenerate eval, < ~100
+    legit predictions)
+  - A run where `predictions_stripped.jsonl` was missing (the
+    `summary[mode] = {"missing_predictions": True}` branch in
+    `run_post_processing`)
+  - A run whose `hard_negative_fpr_at_decision_threshold_1pct` dict was
+    empty `{}` (chained from any of the above)
+
+A single such row sliding into the window disables convergence halt
+until that row exits — potentially many runs later. Combined with
+finding 1, a crashed-and-mislabeled-ok run with no HN-FPR sliding into
+the window also disables convergence halt.
+
+Recommendation:
+Three-line surgical fix: skip rows with `hn_fpr_worst_stripped is None`
+rather than skipping the whole halt block. Preserves existing semantics
+(halt only when the full window is populated):
+
+    worst_values = [h.get("hn_fpr_worst_stripped") for h in recent]
+    worst_values = [v for v in worst_values if v is not None]
+    if len(worst_values) == window:   # all rows had the field
+        best = min(worst_values)
+        first = worst_values[0]
+        if (first - best) < thresh:
+            return f"convergence: ..."
+
+If the looser behavior is wanted (halt when "enough" of the window has
+HN-FPR), that's a separate calibration decision — not what we recommend.
+
+Verify:
+    Cases [0.10, 0.05, 0.06, 0.07] → CONTINUE,
+    [0.05, 0.05, 0.05, 0.05] → HALT,
+    [0.10, None, 0.05, 0.07] → CONTINUE (waiting for None to exit window).
+
+Specialists contributing: correctness-auditor.
+
+6. High: Trainer subprocess group is not isolated — timeout-kill leaks DDP workers and dataloader children.
+
+Status: OPEN, high
+
+Details:
+`launch_trainer` (run_next_experiment.py:449-452) calls
+`subprocess.Popen(cmd, ...)` without `start_new_session=True` (or
+`preexec_fn=os.setsid`). When `proc.wait(timeout=timeout_sec)` raises
+TimeoutExpired and the code falls through to `proc.send_signal(SIGTERM)`
+and later `proc.kill()`, the signal is delivered ONLY to the immediate
+accelerate-launch parent. DDP rank workers, dataloader workers, and any
+other accelerate-spawned grandchildren do NOT inherit the SIGTERM/SIGKILL.
+
+Empirically on single-H100 single-process trainer this is usually fine
+(one worker), but the accelerate config may spawn at least one worker,
+and dataloader workers (PyTorch default `num_workers > 0`) are separate
+processes. Any of these can keep the GPU busy after the launcher
+believes it killed the trainer.
+
+This compounds with finding 2: a wedged worker continues holding the
+GPU, but the launcher has already released its lockfile in `finally`.
+The next tick acquires the lock, tries to launch a new accelerate, gets
+a CUDA OOM or "device in use" error from the orphan, and burns Claude
+quota proposing fixes.
+
+Recommendation:
+One-line surgical fix at run_next_experiment.py:449 — add
+`start_new_session=True` to Popen. Then on timeout, broadcast to the
+whole process group:
+
+    import os, signal
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        rc = proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        rc = proc.wait()
+
+`start_new_session=True` is critical — without it, `killpg(proc.pid, ...)`
+either no-ops or signals the wrong group (the agent's group, which
+includes the cron shell and possibly claude itself).
+
+Verify (Python, no GPU required — proves the start_new_session + killpg
+pairing actually reaps descendants):
+
+    python3 <<'PY'
+    import subprocess, os, signal, time
+    p = subprocess.Popen(
+        ["bash", "-c", "sleep 30 & sleep 30 & wait"],
+        start_new_session=True,
+    )
+    time.sleep(1)
+    children = subprocess.check_output(["pgrep", "-P", str(p.pid)]).decode().split()
+    print(f"spawned pgid={p.pid}, sleepers={children}")
+    os.killpg(p.pid, signal.SIGTERM)
+    p.wait(timeout=5)
+    leaked = subprocess.run(
+        ["pgrep", "-P", str(p.pid)], capture_output=True
+    ).stdout.decode().strip()
+    assert not leaked, f"FAIL: orphaned descendants {leaked}"
+    print("OK: process group fully reaped")
+    PY
+
+Expected: "OK: process group fully reaped". If "FAIL: orphaned
+descendants ..." appears, the start_new_session/killpg pairing is broken
+and the timeout-kill path will leak DDP workers / dataloader children.
+
+Specialists contributing: security-auditor.
+
+7. Medium: Hung Claude CLI invocation is never reaped (no `timeout` wrapper).
+
+Status: OPEN, medium
+
+Details:
+`scripts/agent_tick.sh:166` runs `printf '%s' "$LOOP_PROMPT" | "$CLI"`
+with no timeout. If `claude` hangs (OAuth stall, network glitch, model
+API outage), the cron tick never completes. The next cron tick fires
+anyway and is benign (launcher's lockfile prevents duplicate trainer
+launch), but hung Claude processes accumulate. Over 3 days with `*/30`
+cron, even a 1% hang rate produces ~4 hung processes.
+
+Adopted by 4/7 reference frameworks (Optuna heartbeat, Ray Tune, W&B
+agent heartbeat, OpenHands sandbox liveness).
+
+Recommendation:
+One-line change:
+
+    printf '%s' "$LOOP_PROMPT" | timeout 25m "$CLI"
+
+25 min is below the 30-min cron cadence, so no two ticks overlap. SIGTERM
+is the default; `claude` should exit cleanly. If not, `timeout` follows
+up with SIGKILL after the default kill-after grace.
+
+Specialists contributing: best-practices-researcher.
+
+8. Medium: Convergence criterion is "best in window" rather than "current trend"; a regression at the END of the window cannot trigger halt.
+
+Status: OPEN, medium
+
+Details:
+For worst-family values `[0.10, 0.05, 0.05, 0.20]`, the launcher
+computes `first=0.10`, `best=min=0.05`, `first - best = 0.05`, well
+above the 0.005 threshold → CONTINUE. But the last run regressed to
+0.20 — a 4x worse worst-family FPR than the best in the window. Current
+criterion answers "did we improve at all over the window?" not "are we
+still improving?" For a saturated leaderboard where HN-FPR is the win
+condition and runs are expensive, "we hit 0.05 two runs ago and have
+been getting worse since" is exactly the moment to halt.
+
+This is a calibration question, not a bug — the docstring at
+run_next_experiment.py:335-358 is honest about what the criterion is.
+But for a 3-day POC where the loop runs unattended for 12-18 hours, the
+current criterion lets a regressing tail consume budget that "best so
+far" should be protecting.
+
+Recommendation:
+Either accept the current criterion and add a one-line comment that
+documents the trade-off ("we tolerate window-internal regressions; halt
+only when the window shows zero net improvement"), or change to a
+current-vs-best criterion:
+
+    last = worst_values[-1]
+    best = min(worst_values)
+    if (last - best) > thresh:
+        return f"convergence: regression — last={last:.4f} vs best={best:.4f}"
+
+Pick one criterion; don't run both. The auditor leans toward keeping the
+current criterion (simpler, harder to mis-tune) but documenting the
+trade-off explicitly. Flagging Medium because it could meaningfully
+extend the run if x-attn proves unstable.
+
+Specialists contributing: correctness-auditor.
+
+9. Medium: Dedup hash differs between `steps: 1500` and `steps: 1500.0` (and similar int/float pairs).
+
+Status: OPEN, medium
+
+Details:
+`canonical_hash` (run_next_experiment.py:208-212) uses
+`json.dumps(canonical, sort_keys=True)`, which emits `1500` for int and
+`1500.0` for float. YAML parses `steps: 1500` to int(1500) and `steps:
+1500.0` to float(1500.0). Two hashes differ:
+
+    canonical_hash({'arm':'x','t':{'steps':1500}})    → 1f70b7c8d9faa3f7
+    canonical_hash({'arm':'x','t':{'steps':1500.0}})  → 32d1f6e0e1d4b3a8
+
+If the agent re-proposes the same logical experiment with a trailing
+`.0` on an int field, dedup misses and the launcher re-runs the same
+experiment. Wasted GPU time; distorted leaderboard if duplicate
+displaces real run from top_3 by bootstrap noise.
+
+Float-equiv (`5e-5` vs `0.00005`) does NOT have this hazard (Python
+parses to same IEEE-754 double; json.dumps emits same string). The
+agent-mistake case is `steps`, `seq_len`, `micro_batch`, `grad_accum`,
+`warmup_steps`, `resampler_slots` — all `int` per schema sanity ranges
+(line 142-150) but the validator only checks ranges, not type — it
+accepts 1500.0 as long as 50 <= 1500.0 <= 10000.
+
+Recommendation:
+Coerce int-shaped floats to int in `canonical_hash`:
+
+    def _normalize(o):
+        if isinstance(o, float) and o.is_integer():
+            return int(o)
+        if isinstance(o, dict):
+            return {k: _normalize(v) for k, v in o.items()}
+        if isinstance(o, list):
+            return [_normalize(v) for v in o]
+        return o
+
+    def canonical_hash(cfg):
+        canonical = {k: v for k, v in cfg.items() if k not in ('exp_id','rationale')}
+        blob = json.dumps(_normalize(canonical), sort_keys=True).encode()
+        return hashlib.sha256(blob).hexdigest()[:16]
+
+Alternative more-correct fix: strict types in `validate_config` for
+integer-shaped fields (more invasive). The surgical option above is
+preferred for the POC.
+
+Verify:
+    python3 -c "from scripts.run_next_experiment import canonical_hash;
+    assert canonical_hash({'arm':'x','t':{'steps':1500}}) ==
+           canonical_hash({'arm':'x','t':{'steps':1500.0}})"
+
+Specialists contributing: state-auditor.
+
+10. Medium: `init_auto_research_state.py` silently resets `sweep_state.yaml` when `experiments.jsonl` has only failed rows; also no GPU-lock pre-check.
+
+Status: OPEN, medium
+
+Details:
+The init script (init_auto_research_state.py:73-101) treats jsonl and
+yaml independently. jsonl: skip if non-empty. yaml: skip ONLY if
+`n_completed > 0`. Otherwise REFRESH to the empty template — stomping
+`n_failed`, `gpu_hours_used`, `last_updated`, `halted`, `halt_reason`.
+
+If a fresh pod boots and runs init after a series of failed experiments
+(jsonl has rows, n_completed=0, n_failed=k), sweep_state.yaml is
+rewritten with n_failed=0. The agent then reads "no failures" and may
+propose configs already known to fail.
+
+Additionally, init does not check `/workspace/.gpu.lock`. A typo'd
+re-run during a live experiment clobbers both state files; the in-flight
+experiment will subsequently fail the dedup check.
+
+Recommendation:
+Two surgical fixes:
+
+(a) When jsonl exists with rows, REGENERATE sweep_state.yaml from jsonl
+    by calling `update_sweep_state()` instead of stomping:
+
+        if jsonl_path.exists() and jsonl_path.stat().st_size > 0 and not args.force:
+            from scripts.run_next_experiment import update_sweep_state
+            update_sweep_state()
+            return 0
+
+(b) At startup, refuse if `/workspace/.gpu.lock` exists unless
+    `--force`:
+
+        lock = Path("/workspace/.gpu.lock") if Path("/workspace").exists() else (root / ".gpu.lock")
+        if lock.exists() and not args.force:
+            print(f"refusing: {lock} held", file=sys.stderr)
+            return 2
+
+Verify:
+    echo '{"exp_id":"e","arm":"xattn","status":"failed"}' > src/auto_research/experiments.jsonl
+    python scripts/init_auto_research_state.py
+    grep n_failed src/auto_research/sweep_state.yaml
+    # Expect: n_failed: 1, not 0.
+
+Specialists contributing: state-auditor.
+
+11. Medium: Mid-experiment preemption leaves no `experiments.jsonl` record; dedup re-proposes the same config (conditional on finding 2 being fixed).
+
+Status: OPEN, medium
+
+Details:
+`_do_run` appends to experiments.jsonl only after the trainer's exit
+code is known, inside the try/finally block (lines 711, 763). If the
+launcher is killed mid-`launch_trainer` (preemption, OOM-kill, pod
+restart), nothing is appended. `already_run(config_hash)` returns None
+for the half-finished config; the agent's dedup-vs-history is empty;
+the agent re-proposes the same config and burns another 90 minutes.
+
+This is conditional on finding 2's stale-lock fix landing — without
+that, the orphaned lockfile blocks the re-launch anyway.
+
+RUNBOOK §10's preemption recovery story claims "worst case ~30 min of
+work lost"; that assumes the loop resumes by *skipping* the lost run,
+not by *repeating* it.
+
+Recommendation:
+Combine with finding 2's reclamation block. When a stale lock is
+reclaimed, scan `src/auto_research/runs/` for the most-recently modified
+`exp_NNN/` directory that has a `config.yaml` but no corresponding row
+in experiments.jsonl; call `python scripts/run_next_experiment.py
+--mark-failed <that_dir>` (path already exists at
+run_next_experiment.py:789). Strictly-additive change. Optionally add
+a `--mark-failed-reason "preempted_during_run"` flag.
+
+Specialists contributing: best-practices-researcher.
+
+12. Medium: No external halt-notification path; operator only learns of halt via SSH-tail.
+
+Status: OPEN, medium
+
+Details:
+When `check_halt_conditions()` first returns non-None (NaN cascade,
+zero-gate cascade, convergence, budget exhausted), sweep_state.yaml
+records `halted: true` and `halt_reason: <string>`. Discovery happens
+whenever the operator next SSHes in. A 02:00 AM halt followed by 8 hours
+of cron firing harmlessly is the real-world failure mode of "I went to
+bed expecting results; nothing has run since 02:00."
+
+Adopted by 4/7 reference frameworks (Optuna Dashboard, Ray Tune, W&B,
+Anthropic via files).
+
+Recommendation:
+At end of `update_sweep_state()` in run_next_experiment.py:622, write a
+one-line marker on first halt:
+
+    if halt_reason is not None:
+        flag = Path("/workspace/halted.flag") if Path("/workspace").exists() else REPO_ROOT / "halted.flag"
+        if not flag.exists():
+            flag.write_text(f"{dt.datetime.utcnow().isoformat()}Z {halt_reason}\n")
+
+Existing `backup_to_external.sh` rsyncs the directory tree, so the flag
+propagates to external storage within 30 min. No new dependencies.
+
+Specialists contributing: best-practices-researcher.
+
+13. Medium: Top-3 run-dir backup syncs train.log; train.log is open-ended trainer stdout/stderr that could include arbitrary string output (credentials, stack traces with env-strings).
+
+Status: OPEN, medium
+
+Details:
+`scripts/backup_to_external.sh:116-123` does `aws s3 sync $run_dir` /
+`rclone sync` / `huggingface-cli upload` per top-3 run directory. The
+run dir includes `train.log` — the raw stdout/stderr stream from
+accelerate launch. The current trainer source does not log credentials
+(verified by grep), but train.log is open-ended; any future trainer-side
+`print(os.environ)` or stack trace that includes an env-string lands in
+the log and rides to S3/R2/HF (where HF datasets default to public).
+
+Coupled with finding 3 (no agent containment), the agent could
+intentionally or accidentally cause trainer code edits that print env
+contents, and that content rides to public-by-default storage if HF is
+the backup target.
+
+Recommendation:
+Convert the top-3 sync to an explicit whitelist matching the small-
+artifact loop's pattern (metrics.json, ci_report.json, gate_trajectory.json,
+leakage_report.json, config.yaml, xattn_state.pt). Skip train.log
+entirely. parse_metrics.py has already extracted the structured signal
+from the log into metrics.json. Alternative: keep train.log but redact:
+
+    if [[ -f "$run_dir/train.log" ]]; then
+        sed -E -i.bak \
+            -e 's/(ANTHROPIC_API_KEY|OPENAI_API_KEY|WANDB_API_KEY|HF_TOKEN)=\S+/\1=REDACTED/g' \
+            "$run_dir/train.log"
+        rm -f "$run_dir/train.log.bak"
+    fi
+
+Whitelist is preferred (simpler).
+
+Specialists contributing: security-auditor.
+
+14. Medium: `experiments.jsonl` rows lack a `schema_version` field.
+
+Status: OPEN, medium
+
+Details:
+sweep_state.yaml carries `schema_version: 1` (line 607). Per-row records
+in experiments.jsonl do not. Row shape has already changed once (review
+013 finding #3 added HN-FPR columns); future changes will silently mix
+old and new rows. Adopted by 3/7 reference frameworks (Optuna Alembic,
+Ray Tune state files, W&B server-side).
+
+Recommendation:
+Add `"schema_version": 2,` as the first key in both `record` literals
+in `scripts/run_next_experiment.py:687` and `:737` (failure and success
+paths). `_load_history` doesn't need to consume it now; future migration
+scripts will.
+
+Specialists contributing: best-practices-researcher.
+
+15. Medium: No per-experiment seed in config schema or experiments.jsonl row.
+
+Status: OPEN, medium
+
+Details:
+TRAINING_ALLOWED does not include `seed`. If a trainer has a hard-coded
+default, every experiment uses the same one; if it derives from
+`time.time()`, the experiment is non-reproducible. Neither case is
+recorded in experiments.jsonl.
+
+AGENT_INSTRUCTIONS line 11 frames "The journey log matters as much as
+the result"; the journey log is consumed by the Day-3 writeup. A reader
+who asks "can I re-run exp_007 to verify the gate-trajectory anomaly?"
+needs the seed. Adopted by 4/7 reference frameworks.
+
+Recommendation:
+Two-line additive change. Add `seed` to TRAINING_ALLOWED with a sanity
+range (positive int, 0 to 2^31-1). Add `"seed": (cfg.get("training") or
+{}).get("seed")` to the experiments.jsonl record. Trainer behavior
+unchanged unless the agent specifies a seed; instruct the agent
+(one-line addition to AGENT_INSTRUCTIONS proposer-heuristic) to fix
+`seed: 1337` for Round 1 and perturb in Round 2.
+
+Specialists contributing: best-practices-researcher.
+
+16. Medium: No project-level audit log binding tick-time → proposal → launcher-result in a single trail.
+
+Status: OPEN, medium
+
+Details:
+Today, `/workspace/agent_tick.log` records when ticks happened and
+whether they were skipped. The Claude CLI's own session log records what
+the agent did within a tick. experiments.jsonl records launcher
+successes and (with finding 1 fixed) failures. There is no single trail
+of "tick at 03:00 launched exp_007, launcher returned 0" — Day-3
+reconstruction requires cross-referencing three logs. Adopted by 6/7
+reference frameworks — the most universally adopted guardrail in the
+table.
+
+Recommendation:
+At end of `agent_tick.sh`, after the CLI returns:
+
+    TICK_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    RECENT="$(ls -t src/auto_research/runs/ 2>/dev/null | head -1 || echo "")"
+    printf '{"timestamp":"%s","cli_exit":%d,"recent_run":"%s"}\n' \
+      "$TICK_TIME" "${PIPESTATUS[0]:-$?}" "$RECENT" \
+      >> src/auto_research/tick_log.jsonl
+
+Informational, not authoritative; experiments.jsonl remains source of
+truth for results.
+
+Specialists contributing: best-practices-researcher.
+
+17. Medium: No regression-test surface for the HN-FPR bootstrap + composite helpers introduced by review 013.
+
+Status: OPEN, medium
+
+Details:
+`bootstrap_hard_negative_fpr`, `_hn_worst`, `_hn_mean`, and `_load_hn_ci`
+are all introduced by review 013. None has a unit or smoke test. The
+only first-party test in the repo is `parse_metrics._self_test()` from
+review 007. For a POC in the building phase, this is fine; for the
+auto-loop pre-launch readiness gate, the math is now the only thing
+protecting Day-3 win-claim validity.
+
+Recommendation:
+Add an inline `_self_test()` to `eval/bootstrap_ci.py` modeled on
+parse_metrics.py. Three assertions:
+  - per-resample threshold differs from point-estimate threshold on a
+    synthetic dataset (proves recomputation)
+  - `worst_family["point"] == max(per_family["point"])` (proves composite math)
+  - per-family CIs bounded `[0, 1]`
+
+Run as `python -m eval.bootstrap_ci --self-test` and wire one line into
+RUNBOOK §10's preflight heredoc. ~30 lines, single file edit.
+
+Specialists contributing: correctness-auditor.
+
+18. Minor: RUNBOOK §1.3 still recommends writing `ANTHROPIC_API_KEY` to `/workspace/.env`.
+
+Status: OPEN, doc wording only
+
+Details:
+RUNBOOK.md:72-75 instructs the operator to put `ANTHROPIC_API_KEY=sk-ant-...`
+in `/workspace/.env` and have agent_tick.sh source it. Per the audit
+brief, the user has switched the running pod to subscription-OAuth
+credentials at `/root/.config/anthropic/` and cleared
+ANTHROPIC_API_KEY. The RUNBOOK still tells the next operator to put a
+metered API key back on disk, re-establishing the previously-closed
+credential-on-disk vector and making a metered key reachable by the
+confused-agent path in finding 3.
+
+Recommendation:
+Swap the §1.3 auth block — make subscription-OAuth (`claude login`) the
+documented default, treat env-var as fallback:
+
+    # Auth: the cron-driven loop expects claude to be already
+    # authenticated. Prefer:
+    #   (a) Subscription OAuth: run `claude login` once over SSH. Tokens
+    #       persist to /root/.config/anthropic/. No env vars needed.
+    #   (b) Metered API: if you must, add
+    #       `export ANTHROPIC_API_KEY=...` to /workspace/.env. Key is
+    #       then on disk and visible to anything claude can read —
+    #       prefer (a) if your account supports it.
+
+Specialists contributing: security-auditor.
+
+19. Minor: `init_auto_research_state.py` writes are non-atomic (direct `write_text`).
+
+Status: OPEN, minor
+
+Details:
+Lines 79, 92, 100 use `path.write_text(...)` directly, no tmp+rename.
+Script is intended for fresh-clone init (no concurrent writers), so
+practical hazard is limited. But finding 10's recommendation to call
+`update_sweep_state()` from init would pick this up for free, since
+update_sweep_state is atomic.
+
+Recommendation:
+Bundle with finding 10's fix.
+
+Specialists contributing: state-auditor.
+
+20. Minor: `train.log` is opened with `mode="w"` and grown directly throughout the run; backup_to_external.sh can ship a torn copy.
+
+Status: OPEN, minor
+
+Details:
+`run_next_experiment.py:448` opens train.log with `mode="w"` for the
+trainer subprocess to stream to. No atomic guard because a live log
+can't be tmp+rename'd while being appended. backup_to_external.sh's
+sync reads whatever's there — a valid prefix of the log. Not corrupt
+(log is line-oriented), but post-run backup of train.log lacks a clear
+"run final" indicator.
+
+Genuinely Minor because canonical artifacts (metrics.json, ci_report.json,
+predictions_*.jsonl) ARE atomic. Partial train.log doesn't break
+recovery; just makes post-hoc log inspection awkward. Note: this is
+distinct from finding 13 (which concerns the train.log content itself
+riding to public storage); finding 20 is about backup integrity.
+
+Recommendation:
+Optional: after trainer subprocess exits in `launch_trainer`, do one
+final atomic snapshot by tmp+rename'ing a copy as `train.log.final`.
+Or document that train.log is a live tail and pre-end backups are
+best-effort.
+
+Specialists contributing: state-auditor.
+
+21. Informational: Bootstrap is unstratified (in contrast to `bootstrap_auc`).
+
+Status: OPEN, informational
+
+Details:
+`bootstrap_hard_negative_fpr` (eval/bootstrap_ci.py:165) uses
+`rng.integers(0, n, size=n)` — uniform resampling. `bootstrap_auc`
+(lines 55-56) stratifies by label. Unstratified is mostly fine because
+the decision threshold is recomputed per resample (class-imbalance
+shifts absorbed by the threshold). For a small family (e.g., hn_travel
+with ~50 examples in a 5000-example eval), an unlucky resample can drop
+the family entirely → `boot_worst` becomes max over remaining families,
+biased low. With 1000 resamples and family sizes >100, the bias is
+small but real — a subtle widening / asymmetry of the CI in the
+direction that favors the model.
+
+Recommendation:
+Document in bootstrap_ci.py docstring. A stratified version would
+resample within each (label, journey_family) cell — feasible but a
+meaningful refactor; not worth doing for the POC. No immediate action.
+
+Specialists contributing: correctness-auditor.
+
+22. Informational: `family_order` is fixed from the point-estimate sample (deliberate and correct).
+
+Status: OPEN, informational
+
+Details:
+eval/bootstrap_ci.py:157 `family_order = sorted(point_per_family.keys())`
+fixes the family set before the bootstrap loop, then line 175 uses
+`hn.get(k, nan)` to fill in missing families per resample. This is the
+correct design: guarantees the same set of families is summarized for
+every resample. Flagging only to document the design choice is
+deliberate and correct.
+
+Recommendation: None.
+
+Specialists contributing: correctness-auditor.
+
+23. Informational: `experiments.jsonl.tmp` is not cleaned up on launcher SIGKILL between write_text and rename.
+
+Status: OPEN, informational
+
+Details:
+If `tmp.write_text(new)` succeeds but `tmp.rename(EXPERIMENTS_JSONL)` is
+interrupted by SIGKILL (vanishingly rare — rename is a single syscall),
+the `.tmp` file is left on disk. Subsequent launch overwrites it before
+the next rename, so no data loss. `aws s3 sync` of the run directory
+does pick up `*.tmp` files (no extension exclusion in the find filter
+at backup_to_external.sh:55-56). Content identical to post-rename, so
+even if uploaded, no correctness loss.
+
+Recommendation: None. Mentioned for awareness.
+
+Specialists contributing: state-auditor.
+
+24. Informational: `append_experiment` does a full read-modify-write of experiments.jsonl on each call.
+
+Status: OPEN, informational
+
+Details:
+`append_experiment` (run_next_experiment.py:540-551) reads the entire
+jsonl into memory, concatenates the new record, writes to .tmp, renames.
+For expected loop scale (<=50 experiments × ~2 KB/row = <100 KB), this
+is fine. O(N²) total over the lifetime but trivial at this scale.
+Worth knowing if the loop is ever scaled to thousands of experiments.
+
+Recommendation: None.
+
+Specialists contributing: state-auditor.
+
+Bottom line:
+
+The auto-loop's deterministic math holds (HN-FPR ranking, per-resample
+threshold recomputation, NaN handling, tie-break ordering), atomic-write
+discipline is good on the load-bearing files (experiments.jsonl,
+sweep_state.yaml, metrics.json, predictions_*.jsonl), and the shell-meta
++ argv-list defenses from prior reviews are intact. The blockers are
+operational: silent-success-on-crash, no lock self-healing, and no
+enforced agent boundary. With those three Blockers and four Highs
+landed, the loop is safe for 12-18 hour unattended cron operation.
+Findings partition explicitly into three buckets below.
+
+MUST land before cron activation (Blockers + Highs):
+  1.  Blocker: Crashed trainer recorded as status="ok" (~3 lines)
+  2.  Blocker: Lockfile cannot self-heal across SIGKILL / preemption
+            (~15 lines bash + ~15 lines Python)
+  3.  Blocker: Agent has no enforced filesystem containment — add
+            `.claude/settings.json` (~30 lines JSON, no source edits)
+  4.  High:   torch.save(xattn_state.pt) non-atomic (~3 lines)
+  5.  High:   Convergence halt disabled by None in window (~3 lines)
+  6.  High:   Trainer subprocess group not isolated — add
+            start_new_session=True + killpg (~10 lines)
+
+Nice-to-have before cron activation (Mediums — upside is real but
+absence won't poison results):
+  7.  Medium: Wrap claude CLI with `timeout 25m` (1 line)
+  8.  Medium: Convergence regression criterion vs no-improvement (~2 lines + doc)
+  9.  Medium: int/float dedup hash collision (~5 lines)
+  10. Medium: init_auto_research_state stomps state; no lock pre-check (~10 lines)
+  11. Medium: Mid-experiment preempt → no record → re-propose
+            (combine with #2 reclamation logic)
+  12. Medium: External halt-notification flag file (~5 lines)
+  13. Medium: top-3 sync ships train.log (replace with whitelist, ~5 lines)
+  14. Medium: experiments.jsonl rows lack schema_version (~2 lines)
+  15. Medium: No per-experiment seed in schema/record (~2 lines)
+  16. Medium: No project-level tick→proposal→result audit log (~5 lines bash)
+  17. Medium: No regression-test surface for HN-FPR bootstrap (~30 lines, single file)
+
+Defer to post-POC review 015+ (Minor + Informational):
+  18. Minor:        RUNBOOK §1.3 still recommends ANTHROPIC_API_KEY on disk
+  19. Minor:        init_auto_research_state non-atomic writes (subsumed by #10)
+  20. Minor:        train.log non-atomic backup (best-effort acceptable)
+  21. Informational: Unstratified HN-FPR bootstrap (docstring note only)
+  22. Informational: family_order fixed from point estimate (correct as-is)
+  23. Informational: experiments.jsonl.tmp not cleaned up on SIGKILL
+  24. Informational: append_experiment is O(N²) over lifetime (trivial at scale)

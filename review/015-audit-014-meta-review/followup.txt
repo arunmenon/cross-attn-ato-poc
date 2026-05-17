@@ -1,0 +1,166 @@
+Review comments 015 -- follow-up
+Date: 2026-05-17
+Subject: Disposition of Codex meta-review in 015-audit-014-meta-review/comments.txt
+Author: scaffold maintainer
+
+Original review file:
+    review/015-audit-014-meta-review/comments.txt
+
+Primary subject of the meta-review:
+    review/014-auto-loop-prelaunch-audit/comments.txt (24 findings)
+
+Repo state at follow-up:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+Baseline commit:
+    2e325e2 (closing commit of review 013) + follow-on 15e3dda
+
+This review is a Codex meta-review: it does not introduce independent
+findings against the codebase, it audits audit-014's findings against
+the actual code on disk. Disposition mirrors audit-014's followup.txt
+(in this same commit) but is recorded separately so the
+meta-review's CONFIRMS / DISPUTES / MISSES verdicts are individually
+closed.
+
+----------------------------------------------------------------------
+Section-by-section disposition
+----------------------------------------------------------------------
+
+1. CONFIRMS audit-014 finding #1 (crashed trainer status="ok").
+
+Status: CLOSED. Codex independently reproduced the bug with a Python
+probe; audit-014 followup F1 lands the fix at
+scripts/run_next_experiment.py:706-718.
+
+2. CONFIRMS audit-014 finding #2 (stale GPU lock wedges loop).
+
+Status: CLOSED. Codex independently reproduced with a fork-exit probe;
+audit-014 followup F2 lands the fix in two places
+(run_next_experiment.py:367-396 acquire_lock, agent_tick.sh:132-148
+pre-check).
+
+3. CONFIRMS audit-014 finding #3 (no enforced filesystem containment).
+
+Status: CLOSED with caveat carried forward. Audit-014 followup F3
+creates .claude/settings.json with the deny list. Codex's caveat ---
+that the pod's CLI version must be verified to honor the settings
+file --- is recorded in F3's "Caveat" paragraph and is the gating
+check before the user flips cron on. A first-tick verification step
+is in the handback summary.
+
+4. CONFIRMS audit-014 findings #5 and #6 (convergence None-skip and
+   subprocess group isolation).
+
+Status: CLOSED. Audit-014 followup F5 + F6 land the fixes. Both
+verify stanzas in F5/F6 are derived from Codex's reasoning here.
+
+5. MISSES: stale AUC objective in AGENT_INSTRUCTIONS.md (NEW HIGH).
+
+Status: CLOSED. This is the most important finding in audit-015 ---
+audit-014's four specialists scoped to launcher / lockfile /
+state / process discipline but did not cross-check the agent-facing
+playbook for the post-Day-1 pivot to HN-FPR. Codex caught the
+inconsistency: lines 85, 102, 118, 153 of AGENT_INSTRUCTIONS.md
+still referenced AUC-stripped while the launcher (per review 013)
+ranks and halts on worst-family HN-FPR. Without this fix, the first
+unattended cron tick would have read the notes template, picked top-2
+by AUC, and produced incoherent proposals -- the playbook would have
+fought the launcher.
+
+Action: audit-014 followup, "NEW HIGH (audit-015 section 5)"
+section. Four-line rewrite of AGENT_INSTRUCTIONS.md covering Round-2
+ranking, convergence halt rule, notes-template worked example, and
+Day-2 table columns. AUC remains as a "sanity" column where it
+appears at all.
+
+6. DISPUTES audit-014 finding #4 (torch.save atomicity over-severed).
+
+Status: ACCEPTED, but the fix was bundled anyway.
+
+Codex's reasoning is correct: backup_to_external.sh's top-3 ordering
+means the in-flight run is never targeted by the backup during the
+torch.save window, so the worst case is a torn LOCAL .pt that the
+launcher and operator can rebuild from base + redo, not a torn
+EXTERNAL sync that ships partial weights off-pod. The High framing
+overstated the externalized risk.
+
+We bundled the 3-line tmp+rename anyway (audit-014 followup F4) for
+two reasons: (a) zero cost, matches the atomic-write pattern already
+in use for metrics.json + sweep_state.yaml + experiments.jsonl; (b)
+the "current run is never in top_3 mid-write" invariant is true today
+but is one backup-script edit away from breaking. Bundling now means
+no one re-debates this in a future review.
+
+7. CONFIRMS audit-014 findings #7-#17 (Mediums) as next-milestone work.
+
+Status: DEFERRED to next-milestone pass.
+
+audit-014 followup spells out per-finding rationale for the deferrals
+(items 8-17 in that file). Codex's framing here -- "valid hardening,
+not blockers for cron activation" -- is the calibration we adopted.
+The one item we promoted out of this bucket was #7 (Claude CLI
+timeout), bundled with the must-land set because the fix is 5 lines
+of shell.
+
+8. CONFIRMS audit-014 findings #18, #19 (Minors).
+
+Status: ACKNOWLEDGED. Disposition per audit-014 followup items 18,
+19. Subscription-OAuth is the default credential path; the API-key
+path remains documented for fallback; the agent surface is denied
+read access to both via .claude/settings.json (F3).
+
+9. DISPUTES audit-014 finding #20 (train.log non-atomic write).
+
+Status: ACCEPTED as duplicate of #13. audit-014 followup item 20
+records the duplicate disposition and points at the streaming-log
+architectural constraint (HF Trainer logs to stdout/stderr; cannot
+easily stream to a tmp path).
+
+10. CONFIRMS audit-014 findings #21-#24 (Informational).
+
+Status: ACKNOWLEDGED. Disposition per audit-014 followup items 21-24.
+None require action for cron readiness.
+
+11. CONFIRMS dedup discipline and plan-vs-output coverage, with one
+    count mismatch caveat.
+
+Status: ACKNOWLEDGED. The count mismatch (the audit-014 introduction
+states "3 Blockers, 4 Highs, 9 Mediums" but the body has 3/3/11/3/4)
+is cosmetic; the finding numbers themselves are stable across both
+the intro tally and the body. The followup.txt is keyed off the body
+numbering. No action needed.
+
+----------------------------------------------------------------------
+What audit-015 changed about audit-014's "must-land" set
+----------------------------------------------------------------------
+
+Before audit-015: audit-014 listed 6 must-land items (3 Blockers + 3
+Highs, including #4 torch.save atomicity as High).
+
+After audit-015: the must-land set is 6 different items: 3 Blockers
+(unchanged), 2 confirmed Highs (#5 None-skip, #6 process group), and
+the NEW HIGH (AGENT_INSTRUCTIONS migration). #4 demoted to Medium
+and bundled cheaply. #7 (CLI timeout) promoted from Medium and
+bundled cheaply.
+
+Net: 6 items in, 6 items out -- but the composition shifted in a way
+that materially changed the playbook (without the AGENT_INSTRUCTIONS
+migration, the cron run would have started incoherent).
+
+----------------------------------------------------------------------
+Commit anchors
+----------------------------------------------------------------------
+
+This followup is in the same commit as the audit-014 followup. The
+INDEX backfill commit adds both rows (014 and 015) with the
+audit-014/follow-up commit hash as the closing-commit -- audit 015
+does not have an independent closing artifact distinct from audit
+014's fixes.
+
+----------------------------------------------------------------------
+Outstanding caveat for the user
+----------------------------------------------------------------------
+
+The one item audit-015 surfaced that cannot be verified locally is
+section 3's caveat about .claude/settings.json being honored by the
+pod's Claude CLI. The handback to the user includes a first-tick
+verification step.

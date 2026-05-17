@@ -131,8 +131,17 @@ source "$VENV/bin/activate"
 # pre-check so we don't bother the CLI when the GPU is busy.
 if [[ -f "$GPU_LOCK_FILE" ]]; then
     LOCK_PID="$(cat "$GPU_LOCK_FILE" 2>/dev/null || echo unknown)"
-    echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) GPU lock held (PID=$LOCK_PID); skipping this tick"
-    exit 0
+    if [[ "$LOCK_PID" =~ ^[0-9]+$ ]] && kill -0 "$LOCK_PID" 2>/dev/null; then
+        echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) GPU lock held by live PID=$LOCK_PID; skipping this tick"
+        exit 0
+    fi
+    # Stale lock (owner dead, or PID unreadable): self-heal so the
+    # auto-loop doesn't wedge until the user notices. The launcher's
+    # acquire_lock() has the same check; this is the polite outer guard
+    # so we don't even invoke the CLI when the lock is already dead.
+    # Audit 014 Blocker 2 / audit 015 confirmed.
+    echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) stale GPU lock (PID=$LOCK_PID); removing and proceeding"
+    rm -f "$GPU_LOCK_FILE"
 fi
 
 # Halt check: if the launcher says the budget is exhausted or
@@ -162,6 +171,18 @@ fi
 
 # Pipe the loop prompt into the selected CLI. The CLI is expected to
 # perform ONE iteration of agent work and exit.
+# Wall-clock cap (audit 014 M7): if the CLI hangs (network stall, MCP
+# server wedge, etc.), kill it before the next 30-min tick fires so we
+# don't pile up overlapping CLIs. 25 min < 30-min tick interval.
 echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) launching $CLI"
-printf '%s' "$LOOP_PROMPT" | "$CLI"
-echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) tick complete"
+# Disable -e for the CLI invocation so we can record the rc without
+# aborting the script (the script's job is to LOG the outcome and exit
+# cleanly so cron sees rc=0 on every tick).
+set +e
+printf '%s' "$LOOP_PROMPT" | timeout 25m "$CLI"
+TICK_RC=$?
+set -e
+if [[ $TICK_RC -eq 124 ]]; then
+    echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) CLI TIMED OUT after 25m (rc=124)"
+fi
+echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) tick complete (rc=$TICK_RC)"

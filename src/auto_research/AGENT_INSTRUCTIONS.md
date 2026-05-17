@@ -82,7 +82,7 @@ If any of 1-2 fail (NaN or zero gate), pause and report — do not blindly conti
 
 ### Round 2 — Perturb top-2 along gate_init (2-4 experiments, Day 3 AM)
 
-After Round 1, identify the top-2 configs by AUC-stripped. For each, propose a perturbation:
+After Round 1, identify the top-2 configs by worst-family hard-negative FPR (`hn_fpr_worst_stripped` in `experiments.jsonl`, lower is better; tiebreak on `hn_fpr_mean_stripped`). AUC-stripped is a sanity gate, not the ranking metric — it saturates at 1.0 on every variant (review 013 finding #1). For each top-2 config, propose a perturbation:
 - Top-1: same config but `gate_init=zero` (probe initialization sensitivity).
 - Top-2: same config but `gate_init=zero`.
 - If either round-2 result beats its round-1 sibling by non-overlapping CI, that becomes a new top-1 candidate.
@@ -99,7 +99,7 @@ Take the top-1. Propose ONE stress run with `stress_run: true` (steps=3000, seq_
 |---|---|---|
 | NaN cascade | 2 consecutive experiments with NaN final loss | Halt new launches. Write Day-2 or Day-3 writeup. |
 | Zero gates | 2 consecutive x-attn runs with max gate magnitude < 0.05 at step 1500 | Halt. Report as a finding: "gates failed to open on configs X, Y". |
-| Convergence | ≥6 valid x-attn runs AND no AUC-stripped lift ≥ 0.005 in last 4 | Halt. Top-1 is the winner; proceed to top-3 medium eval. |
+| Convergence | ≥6 valid x-attn runs AND no worst-family HN-FPR improvement ≥ 0.005 (absolute) over the last 4 valid runs | Halt. Top-1 is the winner; proceed to top-3 medium eval. |
 | Budget exhausted | `max_experiments` or `max_gpu_hours` reached | Halt. |
 
 When halted, **do not propose new experiments**. Write the daily section of the README, then stop.
@@ -115,15 +115,16 @@ After the launcher completes, write a one-paragraph natural-language summary to 
 
 Config: every_4 / slots=64 / gate=zero / small_transformer
 
-Trained cleanly. Gates opened to ~0.21 by step 600 and held. AUC-stripped 0.823
-with CI [0.811, 0.835] beats CPT-light (0.798, CI [0.785, 0.812]) by
-non-overlapping CIs. Beats structured-as-text concat (0.815) within overlapping
-CIs — no decisive lift there yet. Per-journey: strong on sim_swap and
-mule_chain, weaker on phish_takeover. Hard-negative FPR on hn_travel: 0.012
-(acceptable).
+Trained cleanly. Gates opened to ~0.21 by step 600 and held. Worst-family
+HN-FPR-stripped 0.018 with CI [0.012, 0.026] (worst family: hn_travel) beats
+CPT-light (0.041, CI [0.033, 0.050]) by non-overlapping CIs. Ties
+structured-as-text concat (0.021, CI [0.015, 0.029]) within overlapping CIs —
+no decisive lift there yet. Mean HN-FPR-stripped 0.011 (tiebreak metric, same
+ordering). AUC-stripped 1.000 (saturated, sanity-only). Per-journey: strong on
+sim_swap and mule_chain, weaker on phish_takeover.
 
 Next: try every_4/slots=64/gate=zero with longer training to see if SAS gap
-widens.
+widens on worst-family HN-FPR.
 ```
 
 Keep it specific: gates story, baseline deltas (with CI overlap status), per-journey signal, what to try next. The Day-2 and Day-3 README writeups will join your notes with the launcher's structured records.
@@ -142,19 +143,21 @@ Keep it specific: gates story, baseline deltas (with CI overlap status), per-jou
 - <bullet>: <one sentence>
 
 ### Baseline metrics (with 95% CIs on 5k fast eval, stripped mode)
-| Baseline | AUC | R@FPR=1% | Notes |
-|---|---|---|---|
-| CPT-light-merged | X.XXX [a, b] | X.XX | … |
-| LoRA-text-only   | X.XXX [a, b] | X.XX | … |
-| structured-as-text | X.XXX [a, b] | X.XX | … |
-| event-only classifier | X.XXX [a, b] | X.XX | … |
+Primary: worst-family HN-FPR @ 1% (lower is better). AUC is shown as a sanity column only — it saturates at 1.0 on every variant.
+
+| Baseline | HN-FPR-worst [CI] | HN-FPR-mean [CI] | AUC (sanity) | Notes |
+|---|---|---|---|---|
+| CPT-light-merged | X.XXX [a, b] | X.XXX [a, b] | X.XX | … |
+| LoRA-text-only   | X.XXX [a, b] | X.XXX [a, b] | X.XX | … |
+| structured-as-text | X.XXX [a, b] | X.XXX [a, b] | X.XX | … |
+| event-only classifier | X.XXX [a, b] | X.XXX [a, b] | X.XX | … |
 
 ### Sweep round-1 results
-| exp_id | config | AUC-stripped [CI] | gate_max | notes |
-|---|---|---|---|---|
-| …      | …      | …                 | …        | …     |
+| exp_id | config | HN-FPR-worst [CI] | HN-FPR-mean | gate_max | notes |
+|---|---|---|---|---|---|
+| …      | …      | …                 | …           | …        | …     |
 
-### Current leader vs each baseline
+### Current leader vs each baseline (worst-family HN-FPR; tiebreak mean)
 - vs CPT-light: <delta with CI-overlap status>
 - vs LoRA-text: <delta>
 - vs structured-as-text: <delta>  ← the load-bearing one
