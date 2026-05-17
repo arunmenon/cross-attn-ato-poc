@@ -175,9 +175,16 @@ def validate_config(cfg: dict) -> list[str]:
                     f"same starting point."
                 )
 
-    # No shell-meta in any string value (defensive)
+    # No shell-meta in any string value (defensive).
+    # `rationale` is intentionally excluded: it's free-form agent
+    # commentary that never enters shell context, and the auto-loop
+    # agent (Task #38) writes multi-line rationales routinely. Caught
+    # at first launcher invocation for the x-attn smoke (Task #35).
     forbidden = ("`", "$(", ";", "&&", "||", ">", "<", "\n")
-    def _walk(node: Any, where: str) -> None:
+    SHELL_META_SKIP_KEYS = {"rationale"}
+    def _walk(node: Any, where: str, skip: bool = False) -> None:
+        if skip:
+            return
         if isinstance(node, str):
             for ch in forbidden:
                 if ch in node:
@@ -185,7 +192,7 @@ def validate_config(cfg: dict) -> list[str]:
                     return
         elif isinstance(node, dict):
             for k, v in node.items():
-                _walk(v, f"{where}.{k}")
+                _walk(v, f"{where}.{k}", skip=(k in SHELL_META_SKIP_KEYS))
         elif isinstance(node, list):
             for i, v in enumerate(node):
                 _walk(v, f"{where}[{i}]")
