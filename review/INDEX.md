@@ -22,6 +22,7 @@ the corresponding `followup.txt`, not here.
 | 008 | pod-readiness        | 2026-05-16 | 6        | closed         | 8852a59        |
 | 009 | narrator-switch-and-prep | 2026-05-16 | 4    | closed         | 3648259        |
 | 010 | blackwell-compat-patch | 2026-05-16 | 3    | closed         | a95eb79        |
+| 011 | vslice-debug-and-xattn-preflight | 2026-05-17 | 5 | closed     | db723c1        |
 
 ---
 
