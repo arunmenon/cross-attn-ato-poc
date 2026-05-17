@@ -24,6 +24,7 @@ the corresponding `followup.txt`, not here.
 | 010 | blackwell-compat-patch | 2026-05-16 | 3    | closed         | a95eb79        |
 | 011 | vslice-debug-and-xattn-preflight | 2026-05-17 | 5 | closed     | db723c1        |
 | 012 | day-1-writeup        | 2026-05-17 | 5        | closed         | d6aa58f        |
+| 013 | auto-loop-readiness  | 2026-05-17 | 7        | closed         | 2e325e2        |
 
 ---
 
