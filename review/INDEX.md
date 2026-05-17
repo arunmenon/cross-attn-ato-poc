@@ -28,6 +28,7 @@ the corresponding `followup.txt`, not here.
 | 014 | auto-loop-prelaunch-audit | 2026-05-17 | 24   | partial-closed | 7d04064        |
 | 015 | audit-014-meta-review | 2026-05-17 | 11      | closed         | 7d04064        |
 | 016 | fix-pass-014-015     | 2026-05-17 | 2        | closed         | 16549b0        |
+| 017 | review-016-response  | 2026-05-17 | 1        | closed         | 7e7201d        |
 
 ---
 
