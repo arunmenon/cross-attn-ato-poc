@@ -474,6 +474,16 @@ def launch_trainer(arm: str, config_path: Path, run_dir: Path,
     timeout_sec = timeout_min * 60 if timeout_min > 0 else None
     print(f"launching: {' '.join(cmd)} (timeout={timeout_min}min)")
 
+    # Ensure PYTHONPATH includes the repo root so the trainer's
+    # `from src.X import Y` resolves regardless of how the launcher
+    # itself was invoked. `accelerate launch <script.py>` executes the
+    # script directly, so its sys.path starts from the script's parent
+    # dir, not cwd. Without this, every trainer ModuleNotFoundError's
+    # on `src.train.common` etc. — discovered in Task #36 baselines.
+    env = os.environ.copy()
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{REPO_ROOT}:{existing_pp}" if existing_pp else str(REPO_ROOT)
+
     timed_out = False
     with log_path.open("w") as logf:
         # start_new_session=True puts the trainer in its own process group
@@ -483,6 +493,7 @@ def launch_trainer(arm: str, config_path: Path, run_dir: Path,
         proc = subprocess.Popen(
             cmd, stdout=logf, stderr=subprocess.STDOUT,
             cwd=str(REPO_ROOT),
+            env=env,
             start_new_session=True,
         )
         try:
