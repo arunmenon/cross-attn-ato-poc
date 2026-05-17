@@ -19,7 +19,14 @@ halt:
   zero_gate_activation:
     enabled: true
     consecutive_threshold: 2
-    magnitude_threshold: 0.05      # gate magnitude considered "open" at >= 0.05
+    # Lowered from 0.05 → 0.005 on 2026-05-18 after exp_xa_round1_001
+    # produced max_gate_magnitude=0.0106 (and the smoke exp_xa_smoke_001_v2
+    # was 0.0104). Gates are clearly not dead — they're learning to use
+    # cross-attn sparsely (max-per-token climbs while mean-per-token
+    # stays flat) — but the old 0.05 bar was too aggressive for this
+    # gate-init regime. 0.005 still catches a true collapse to zero
+    # while letting the auto-loop proceed.
+    magnitude_threshold: 0.005     # gate magnitude considered "open" at >= 0.005
     eval_step: 1500                # measured at this step
 
   convergence:
