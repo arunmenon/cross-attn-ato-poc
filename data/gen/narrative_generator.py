@@ -246,9 +246,22 @@ class CostTracker:
 # Caching
 # ---------------------------------------------------------------------------
 
-def _journey_cache_key(journey: Journey, model: str) -> str:
-    """SHA-256 over the structured stream + model name. Stable across
-    runs; cache is safe to share between regenerations of the same data.
+_DEFAULT_NARRATOR_TEMP_FOR_CACHE = 0.3
+
+
+def _journey_cache_key(journey: Journey, model: str,
+                       narrator_temp: float = _DEFAULT_NARRATOR_TEMP_FOR_CACHE) -> str:
+    """SHA-256 over the structured stream + model name (+ narrator_temp if
+    non-default). Stable across runs; cache is safe to share between
+    regenerations of the same data.
+
+    Review 011 finding #3: the cache key now namespaces by
+    `narrator_temp` so eval-time `--narrator-temp 0.5` actually
+    generates fresh narratives instead of returning the cached
+    train-time (temp 0.3) text. Backward-compatible: when temp equals
+    the default 0.3, the key uses the OLD format (no temp field) so
+    existing 30k+ cache entries from the 25k train run still hit
+    without regeneration.
     """
     canonical = {
         "model": model,
@@ -256,6 +269,8 @@ def _journey_cache_key(journey: Journey, model: str) -> str:
         "actor_family": journey.actor_family,
         "events": journey.events,
     }
+    if narrator_temp != _DEFAULT_NARRATOR_TEMP_FOR_CACHE:
+        canonical["narrator_temp"] = round(narrator_temp, 4)
     blob = json.dumps(canonical, sort_keys=True, default=str).encode()
     return hashlib.sha256(blob).hexdigest()[:24]
 
@@ -559,7 +574,7 @@ def generate_narratives_concurrent(
     results: list[str | None] = [None] * n_total
 
     def _one(idx: int, journey: Journey) -> tuple[int, str]:
-        key = _journey_cache_key(journey, resolved_model)
+        key = _journey_cache_key(journey, resolved_model, narrator_temp=narrator_temp)
         cached = _cache_get(cache_dir, key)
         if cached is not None:
             with tracker_lock:
@@ -666,7 +681,7 @@ def generate_narrative(
         model, os.environ.get("LLM_PROVIDER"),
     )
 
-    key = _journey_cache_key(journey, model)
+    key = _journey_cache_key(journey, model, narrator_temp=narrator_temp)
     cached = _cache_get(cache_dir, key)
     if cached is not None:
         tracker.cache_hit()

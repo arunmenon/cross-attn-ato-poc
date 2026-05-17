@@ -1,0 +1,249 @@
+Review comments 011 -- follow-up
+Date: 2026-05-17
+Subject: Disposition of findings in 011-vslice-debug-and-xattn-preflight/comments.txt
+Author: scaffold maintainer
+
+Original review file:
+    review/011-vslice-debug-and-xattn-preflight/comments.txt
+
+Repo state at follow-up:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+Baseline commit:
+    110f0d1 (scripts/preflight_xattn.py; last commit before review 011)
+
+Summary:
+All five findings FIXED in this pass. The Blocker (event-side trainer
+arms calling tokenize_events on a JSON string instead of a parsed list)
+is closed by wiring parse_structured_events() into all four event
+consumers, and verified by a no-torch composition probe. The High
+RUNBOOK/requirements drift on bnb pin is aligned. The Medium cache-key
+collision on narrator_temp is namespaced (backward-compatible: default
+0.3 preserves the existing 30k+ cache). The Medium preflight_xattn CPU
+fallback now fails closed with exit code 4 and prints the CUDA
+substrate context. The Minor doc gap is closed by adding the explicit
+preflight_xattn command to RUNBOOK Day 2 step 0.
+
+Disposition per finding:
+
+1. Blocker: Event-consuming trainers never parse structured_events
+   after load_paired_dataset turns it into JSON text.
+
+Status: FIXED.
+
+Action: wired parse_structured_events() into all four event-consuming
+call sites identified by Codex's `rg` probe:
+
+  - src/train/train_xattn.py:_build_structured_collate._collate
+    (the per-row event extraction inside the training-batch collator).
+    Changed `events = ex.get("structured_events", [])` to
+    `events = parse_structured_events(ex)`.
+
+  - src/train/train_event_only_classifier.py:collate_classifier_batch
+    Changed
+    `toks = tokenize_events(ex["structured_events"], vocab, ...)`
+    to
+    `toks = tokenize_events(parse_structured_events(ex), vocab, ...)`.
+
+  - src/train/train_structured_as_text.py:_structured_as_text_collator_factory._collator
+    (the training-batch text-prepend collator). Changed
+    `events = ex.get("structured_events", [])[:max_events]` to
+    `events = parse_structured_events(ex)[:max_events]`.
+
+  - src/train/train_structured_as_text.py:main (the eval-pre-transform
+    loop that wraps events into <events>...</events> for eval_runner).
+    Changed `events = ex.get("structured_events", [])` to
+    `events = parse_structured_events(ex)`.
+
+All four imports are inline so the file stays import-safe on torch-less
+laptops (matches the existing pattern of lazy torch / transformers
+imports).
+
+Verification (no-torch local probe):
+
+    python3 -c "
+    import json, sys; sys.path.insert(0, '.')
+    from src.train.common import parse_structured_events
+    from src.model.encoders.small_transformer import EventVocab, tokenize_events
+    row = {'structured_events': json.dumps([
+        {'event': 'login',  't': 0, 'geo_distance': '<geo_distance=local>'},
+        {'event': 'txn',    't': 30, 'amount_bucket': '<amount_bucket=high>',
+         'recipient_age': '<recipient_age=newly_added>'}])}
+    events = parse_structured_events(row)
+    toks = tokenize_events(events, EventVocab(), max_events=8)
+    assert toks['event_type_ids'][0] != 0
+    print('parse_structured_events -> tokenize_events composition OK')
+    "
+
+Result: composition OK. Both the post-load JSON-string shape and the
+raw list-of-dict shape pass through cleanly because
+parse_structured_events() is idempotent (review 010 followup detail).
+
+Pod-side smoke (training-loop integration) is DEFERRED to the actual
+Task #36 (baselines) and Task #37 (first x-attn smoke) launches. The
+no-torch composition probe is the local gate; the pod-side gate is the
+first event-side trainer launch. If the wiring is wrong, the trainer
+will fail at the first batch with a clearly traceable error rather than
+silent NaN. Acceptable for a 3-day POC.
+
+2. High: RUNBOOK still tells CUDA-13 Blackwell users to reinstall the
+   old bitsandbytes <0.46 range.
+
+Status: FIXED.
+
+Action: two RUNBOOK §10 edits to align text with the actual pin:
+
+  - Replaced "`requirements.txt` pins `>=0.45.0,<0.46`" with
+    "`requirements.txt` pins `>=0.45.0,<0.50` (review 011 finding #2
+    raised the upper bound)". Added an explanatory clause about why
+    the ceiling moved (CUDA 13 runtime needs `libbitsandbytes_cuda130.so`
+    which only 0.49.x ships).
+
+  - Replaced the recovery command
+    `pip install --upgrade "bitsandbytes>=0.45.0,<0.46"`
+    with
+    `pip install --upgrade "bitsandbytes>=0.45.0,<0.50"`
+    and updated the explanation from "may have selected a wheel without
+    SM_120 kernels" to the actual current diagnosis ("install a build
+    that includes libbitsandbytes_cuda130.so").
+
+The three contracts now agree: requirements.txt, RUNBOOK §10 gotcha,
+RUNBOOK §10 recovery command.
+
+Verification (no-torch local probe):
+
+    python3 -c "
+    from pathlib import Path; import re
+    runbook = Path('RUNBOOK.md').read_text()
+    req = Path('requirements.txt').read_text()
+    print('requirements:', re.search(r'^bitsandbytes.*$', req, re.M).group(0))
+    print('runbook mentions <0.46:', '<0.46' in runbook)
+    print('runbook mentions <0.50:', '<0.50' in runbook)
+    "
+Expected:
+    requirements: bitsandbytes>=0.45.0,<0.50
+    runbook mentions <0.46: False
+    runbook mentions <0.50: True
+
+3. Medium: narrator_temp does not participate in the cache key.
+
+Status: FIXED (namespaced).
+
+Action: extended _journey_cache_key() in data/gen/narrative_generator.py
+to optionally include `narrator_temp` in the canonical dict.
+
+Design choice: backward-compatible namespacing. When the caller's
+narrator_temp equals the default 0.3, the cache key uses the OLD
+format (no temp field) so existing ~30k cache entries from the 25k
+train run still hit without regeneration. When narrator_temp != 0.3,
+the temp value is added to the canonical dict, producing a fresh key
+that won't collide with the default-temp cache. This is the
+"namespace by temperature" option the reviewer called out, with the
+constant DEFAULT_NARRATOR_TEMP_FOR_CACHE = 0.3 documenting the
+backward-compat boundary.
+
+Both call sites updated:
+  - generate_narratives_concurrent._one (concurrent batch path,
+    data/gen/narrative_generator.py:577)
+  - generate_narrative (single-record path,
+    data/gen/narrative_generator.py:684)
+
+Verification (no-torch local probe):
+
+    python3 -c "
+    import sys; sys.path.insert(0, '.')
+    from data.gen.narrative_generator import _journey_cache_key
+    from data.gen.journey_templates import generate as gen_journey
+    j = gen_journey('clean', seed=1, actor='human')
+    k_default = _journey_cache_key(j, 'gpt-5.4-nano')
+    k_03 = _journey_cache_key(j, 'gpt-5.4-nano', narrator_temp=0.3)
+    k_05 = _journey_cache_key(j, 'gpt-5.4-nano', narrator_temp=0.5)
+    assert k_default == k_03, 'default must equal temp=0.3 for back-compat'
+    assert k_03 != k_05, 'different temps must produce different keys'
+    print(f'default==temp_0.3=={k_03[:12]}..., temp_0.5={k_05[:12]}...')
+    "
+
+Operational note about the salvaged 15k eval (eval_medium_15k_llm):
+The pre-fix gen run was launched with `--narrator-temp 0.5` but
+served 100% cache hits from the previous train-time temp-0.3 cache.
+So the salvaged 15k contains TEMP=0.3 narratives, not temp=0.5. The
+diagnostic in flight against this eval will tell us what saturation
+looks like on a seed-different but narrator-style-identical eval set.
+Documented in experiments.jsonl entry for exp_stage0_001 in the next
+review followup.
+
+If a future eval gen wants ACTUAL temperature-0.5 narratives, the
+fix landed here makes it work (key namespacing forces fresh API
+calls, and the rate-limit-friendly concurrency=4 + lower n is the
+recipe).
+
+4. Medium: preflight_xattn proceeds on CPU instead of failing closed
+   when CUDA is unavailable.
+
+Status: FIXED.
+
+Action: added an explicit CUDA gate at the top of
+scripts/preflight_xattn.py:main() right after the torch import, before
+loading the merged checkpoint:
+
+    if not torch.cuda.is_available():
+        print("FAIL: CUDA not available — preflight_xattn requires "
+              "a GPU. Re-run scripts/preflight_check.py first to "
+              "diagnose.", file=sys.stderr)
+        return 4
+
+Exit code 4 is reserved for "CUDA-substrate missing" so a caller can
+distinguish it from forward failure (exit 2) and NaN loss (exit 3).
+
+Also added substrate logging immediately after the gate:
+
+    print(f"[xa-pre] torch.version.cuda={torch.version.cuda}, "
+          f"device={torch.cuda.get_device_name(0)}, "
+          f"compute_capability={torch.cuda.get_device_capability(0)}")
+
+That captures the same context the bnb sanity heredoc in RUNBOOK §10
+emits, so a future failure log diff between the two reveals substrate
+mismatches at a glance.
+
+The device assignment line later in the script is now a hardcoded
+`device = "cuda"` with an explanatory comment pointing back to the
+gate. No silent CPU fallback remains.
+
+5. Minor: preflight_xattn exists but the runbook never tells the
+   operator to run it.
+
+Status: FIXED.
+
+Action: added a new "Day 2 Step 0" in RUNBOOK.md §3 immediately before
+Task #35, with the exact command, expected success line, exit-code
+behavior, and the "do NOT proceed if it fails" guidance:
+
+    0. **Stage-1 architecture pre-flight (before Task #35).** Run
+       after the Stage-0 merge produces qwen3-8b-cpt-light-merged,
+       BEFORE any Stage-1 trainer launches. Catches dtype / vocab-row
+       / wrapper-construction / LoRA-on-Q / event-tensor integration
+       bugs in ~2 min instead of at hour 4 of a real training run
+       (review 011 finding #5).
+       ```bash
+       python3 scripts/preflight_xattn.py \
+         --merged-checkpoint /workspace/checkpoints/qwen3-8b-cpt-light-merged
+       # Expected last line: "[xa-pre] DONE — Stage-1 architecture is ready for trainer launch"
+       # Exit code 4 if CUDA missing; 2 if forward raised; 3 if loss NaN.
+       ```
+       If it fails: do NOT proceed to Task #35. Loop on the wrapper
+       / checkpoint until green.
+
+This places the gate exactly where it's needed: after merge, before
+any Stage-1 GPU spend. Numbered as step 0 specifically so it precedes
+Task #35 in the operator's reading order.
+
+Bottom line:
+The Blocker is closed by wiring parse_structured_events at all four
+event-side call sites; Task #36/#37 are unblocked. The RUNBOOK/bnb
+drift is reconciled. The narrator_temp cache key is namespaced
+backward-compatibly. The x-attn preflight fails closed and is wired
+into the runbook Day 2 sequence. Safe to proceed to Day 2.
+
+Notes on the INDEX backfill:
+This followup is committed alongside the code/doc fixes (commit A).
+Then INDEX.md's 011 row is added with commit A's hash in a small
+follow-up (commit B). Same two-commit pattern.

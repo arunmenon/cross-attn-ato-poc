@@ -41,6 +41,9 @@ def collate_classifier_batch(examples, vocab, max_events=200):
     """
     import torch
     from src.model.encoders.small_transformer import tokenize_events
+    # Review 011 finding #1: load_paired_dataset now serializes
+    # structured_events as a JSON string. Parse it back per-row.
+    from src.train.common import parse_structured_events
 
     type_ids_batch = []
     bucket_ids_batch = []
@@ -48,7 +51,7 @@ def collate_classifier_batch(examples, vocab, max_events=200):
     mask_batch = []
     labels = []
     for ex in examples:
-        toks = tokenize_events(ex["structured_events"], vocab, max_events=max_events)
+        toks = tokenize_events(parse_structured_events(ex), vocab, max_events=max_events)
         type_ids_batch.append(toks["event_type_ids"])
         bucket_ids_batch.append(toks["bucket_ids"])
         delta_t_batch.append(toks["delta_t"])

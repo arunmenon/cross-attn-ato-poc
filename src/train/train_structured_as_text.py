@@ -76,9 +76,12 @@ def _structured_as_text_collator_factory(eval_mode_collator, max_events: int = 2
     """
     def _collator(batch):
         # Mutate the text field in-place per example.
+        # Review 011 finding #1: structured_events is a JSON string
+        # after load_paired_dataset; parse before slicing.
+        from src.train.common import parse_structured_events
         new_batch = []
         for ex in batch:
-            events = ex.get("structured_events", [])[:max_events]
+            events = parse_structured_events(ex)[:max_events]
             preamble = _serialize_events_compact(events) + "\n"
             new_ex = dict(ex)
             new_ex["text"] = preamble + ex["text"]
@@ -226,10 +229,13 @@ def main():
     # For the eval pass we need text with structured events prepended.
     # The eval_runner expects dataset[i]["text"] to be the full prefix
     # ending at "<risk_verdict>\nlabel:". We pre-transform eval_ds.
+    # Review 011 finding #1: structured_events is a JSON string after
+    # load_paired_dataset; parse before serialization.
+    from src.train.common import parse_structured_events
     eval_records = []
     for i in range(len(eval_ds)):
         ex = eval_ds[i]
-        events = ex.get("structured_events", [])
+        events = parse_structured_events(ex)
         preamble = _serialize_events_compact(events) + "\n"
         new_ex = dict(ex)
         new_ex["text"] = preamble + ex["text"]

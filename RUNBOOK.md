@@ -191,6 +191,15 @@ Alternative upload paths (S3, R2, HF private dataset) require extra client tooli
 
 ### Day 2
 
+0. **Stage-1 architecture pre-flight (before Task #35).** Run after the Stage-0 merge produces `qwen3-8b-cpt-light-merged`, BEFORE any Stage-1 trainer launches. Catches dtype / vocab-row / wrapper-construction / LoRA-on-Q / event-tensor integration bugs in ~2 min instead of at hour 4 of a real training run (review 011 finding #5).
+   ```bash
+   python3 scripts/preflight_xattn.py \
+     --merged-checkpoint /workspace/checkpoints/qwen3-8b-cpt-light-merged
+   # Expected last line: "[xa-pre] DONE — Stage-1 architecture is ready for trainer launch"
+   # Exit code 4 if CUDA missing; 2 if forward raised; 3 if loss NaN.
+   ```
+   If it fails: do NOT proceed to Task #35. Loop on the wrapper / checkpoint until green.
+
 1. X-attn architecture surgery (Task #35).
 2. Three more baselines: LoRA-text, structured-as-text, event-only classifier (Task #36).
 3. First x-attn smoke run (Task #37).
@@ -333,7 +342,7 @@ If RunPod billing is approaching $300 with the POC incomplete, pause and escalat
 
 - **`HF_HOME=/workspace/.hf`** must be set *before* importing `transformers` or it caches to container disk and loses on restart.
 - **`TOKENIZERS_PARALLELISM=false`** — without it, Accelerate prints warnings on every batch.
-- **`paged_adamw_8bit`** requires `bitsandbytes>=0.45.0` (Blackwell paged-kernel floor — review 010). `preflight_check.py:check_bitsandbytes` validates this, and `requirements.txt` pins `>=0.45.0,<0.46` so the three contracts agree. Below 0.45 on Blackwell GPUs the paged path silently falls back to non-paged, ~2x'ing optimizer memory.
+- **`paged_adamw_8bit`** requires `bitsandbytes>=0.45.0` (Blackwell paged-kernel floor — review 010). `preflight_check.py:check_bitsandbytes` validates this, and `requirements.txt` pins `>=0.45.0,<0.50` so the three contracts agree (review 011 finding #2 raised the upper bound). Below 0.45 on Blackwell GPUs the paged path silently falls back to non-paged, ~2x'ing optimizer memory. The `<0.50` ceiling exists because the RunPod Pytorch 2.8.0 image pulls torch 2.12's CUDA 13 runtime; bnb 0.45.x ships no `libbitsandbytes_cuda130.so`, but 0.49.x does.
 - **Adding new tokens to Qwen3-8B** requires `model.resize_token_embeddings(len(tokenizer))` *after* tokenizer.add_special_tokens. Forgetting this produces silent NaN.
 - **Cross-attention KV cache** is not natively supported by the base Qwen3 `forward()`; our `qwen_xattn_wrapper.py` patches it. If you see `KeyError: 'cross_kv'` during generation, the wrapper isn't being used.
 - **W&B offline mode**: set `WANDB_MODE=offline` before training. Sync later with `wandb sync /workspace/.wandb/offline-run-*`.
@@ -362,7 +371,7 @@ If RunPod billing is approaching $300 with the POC incomplete, pause and escalat
   PY
   ```
   If bnb fails to import or PagedAdamW8bit's `.step()` raises `RuntimeError: CUDA error` / "no kernel image is available" on Blackwell:
-  1. `pip install --upgrade "bitsandbytes>=0.45.0,<0.46"` — pip may have selected a pre-built wheel without SM_120 kernels.
+  1. `pip install --upgrade "bitsandbytes>=0.45.0,<0.50"` — install a build that includes `libbitsandbytes_cuda130.so` (0.49.x ships it; 0.45.x doesn't). Mirrors the `requirements.txt` pin updated in review 011.
   2. If that still fails: `pip install bitsandbytes --upgrade --pre` to get nightly wheels with broader Blackwell coverage.
   3. Last resort: set `optimizer: adamw_8bit` in the trainer config (instead of the default `paged_adamw_8bit`). `build_optimizer()` in `src/train/common.py` accepts that value and routes to `bnb.optim.AdamW8bit` — non-paged but still 8-bit, so memory stays close to the paged path. Avoid `optimizer: adamw` unless 8-bit kernels are also broken — that path uses full-fp32 optimizer state (~4x memory).
 - **Community Cloud preemption**: Community hosts can reclaim the GPU. We treat this as expected, not exceptional: `backup_to_external.sh` rsyncs the top-3 + jsonl + summaries every 30 min, atomic checkpoint writes mean partial files are never visible, and `experiments.jsonl` lets the auto-research loop resume from wherever it stopped. Worst case is ~30 min of work lost. If you're preempted, just re-rent any GPU in the same region, run §1.3 bootstrap, and the loop picks back up.

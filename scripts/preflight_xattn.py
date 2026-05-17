@@ -41,6 +41,20 @@ def main() -> int:
     import torch
     from transformers import AutoModelForCausalLM
 
+    # Review 011 finding #4: fail closed (no silent CPU fallback) so an
+    # operator never wastes an hour discovering the smoke "passed" on
+    # CPU. The general scripts/preflight_check.py is the primary CUDA
+    # gate, but this Stage-1 architecture smoke must be independently
+    # self-protecting.
+    if not torch.cuda.is_available():
+        print("FAIL: CUDA not available — preflight_xattn requires a GPU. "
+              "Re-run scripts/preflight_check.py first to diagnose.",
+              file=sys.stderr)
+        return 4
+    print(f"[xa-pre] torch.version.cuda={torch.version.cuda}, "
+          f"device={torch.cuda.get_device_name(0)}, "
+          f"compute_capability={torch.cuda.get_device_capability(0)}")
+
     from src.model.qwen_xattn_wrapper import QwenXAttnWrapper
     from src.train.common import prepare_tokenizer
 
@@ -80,7 +94,7 @@ def main() -> int:
     print(f"[xa-pre] attaching Stage-1 LoRA-on-Q (r=16)")
     wrapper.attach_lora_on_q(r=16, alpha=16, dropout=0.0)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda"  # CUDA-availability already asserted at start
     # train_xattn.py:125 does the same chain — base loads as bf16 but
     # the freshly-constructed encoder + resampler + cross-attn blocks
     # default to fp32; the .to(bf16) call unifies the dtype so the

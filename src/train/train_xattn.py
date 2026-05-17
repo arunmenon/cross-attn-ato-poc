@@ -35,13 +35,16 @@ def _build_structured_collate(vocab, max_events: int = 200):
     def _collate(ex_list):
         import torch
         from src.model.encoders.small_transformer import tokenize_events
+        # Review 011 finding #1: load_paired_dataset now serializes
+        # structured_events as a JSON string. Parse it back per-row.
+        from src.train.common import parse_structured_events
 
         type_ids = []
         bucket_ids = []
         delta_t = []
         mask = []
         for ex in ex_list:
-            events = ex.get("structured_events", [])
+            events = parse_structured_events(ex)
             toks = tokenize_events(events, vocab, max_events=max_events)
             type_ids.append(toks["event_type_ids"])
             bucket_ids.append(toks["bucket_ids"])
