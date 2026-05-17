@@ -15,141 +15,200 @@ Runbook: `RUNBOOK.md`.
 
 ## Day 1 — Foundation: data + CPT-light baseline
 
-**Status: COMPLETE.** Baseline #1 (`qwen3-8b-cpt-light-merged`) trained, merged, and evaluated. Pipeline plumbing proven end-to-end. **Key finding: synthetic data saturates AUC; Day 2-3 must pivot to hard-negative FPR as the comparison metric.**
-
-**Durable evidence:** every numeric claim in this section is backed by JSON excerpts in [`docs/day-1-results.md`](docs/day-1-results.md). The trainer outputs (`src/auto_research/runs/*/`) are gitignored on purpose (runtime artifacts on the pod), so `docs/day-1-results.md` checks in the verbatim score/CI/metrics content needed to audit this writeup from a fresh clone (review 012 finding #1).
+*Filled in by the human at end of Day 1.*
 
 ### Hr 0-2: Tokens + fencer + bucketer
+*Pending.*
 
-Code was already shipped in Path A batches 1-2 (commits before Day 0). Task #31 marked complete pre-pod. Pod-side install of the 65-token registry, PII fencer, and bucketed-feature derivation all worked first try after the bnb 0.45+ / transformers 4.51+ / tokenizers 0.21+ pin alignment (review 010 + Day-0 boot fixes).
+### Hr 2-6: Vertical slice
+*Pending. Make-or-break block.*
 
-### Hr 2-6: Vertical slice (Task #32 — make-or-break)
+### Hr 6-10: Scale + Stage-0 CPT-light + merge
+*Pending.*
 
-**Result: PASS, all 6 gates green.** 100-step CPT-light smoke on the full 20k train set + 5k LLM-narrated eval × 3 modes + bootstrap CI + leakage scan. Wall time 8.6 min on Blackwell. Final loss 5.65 → 2.62.
-
-**Five integration bugs surfaced during the slice — exactly what the vertical slice exists for.** Every one was a small fix, but each would have wasted ~hours of GPU if discovered later. Captured for future-me:
-
-| # | Bug | Fix commit | Where it would have bitten next |
-|---|---|---|---|
-| 1 | `transformers==4.46.3` doesn't recognize `qwen3` model type (Qwen3 support landed in 4.51) | `4bf30f3` | Stage-0 CPT-light first model load — would have wasted the H100 boot time |
-| 2 | `bitsandbytes==0.45.5` ships no `libbitsandbytes_cuda130.so` for the Blackwell torch 2.12 / CUDA 13 image; silent CPU fallback for the paged optimizer | `4bf30f3` (range bumped to `<0.50`) | 2× memory + 10× slow optimizer step → would have looked like a model bug |
-| 3 | `Dataset.from_json` rejects heterogeneous list-of-dict (event types have different keys); silent `DatasetGenerationError` | `3218f56` (serialize `structured_events` as JSON string on load) | First dataset load in any trainer |
-| 4 | `load_paired_dataset` had no branch for "eval.jsonl only" directory layout (the `eval_fast_5k` symlink) | `2043d78` (third branch added) | Any trainer that reads `eval_fast_path` |
-| 5 | PyYAML 6.x parses `5e-5` / `1e-4` as strings (no decimal point); bitsandbytes optimizer init then crashed with `'<=' not supported between float and str` | `43e3c6c` (coerce scientific-notation in `load_config`) | Every YAML-driven trainer launch |
-
-The vertical slice paid for itself in surfaced bugs alone. Total slice cost: 4 attempts before all gates green; each rerun was minutes because Qwen3 weights and event cache survived the failures.
-
-**Headline numbers (5k LLM-narrated eval, stripped mode):**
-- AUC = 0.9929, 95% CI [0.9916, 0.9945]
-- R@FPR=1% = 0.7432
-- Hard-neg FPR @ 1%: hn_large_purchase = 5.6% (the model's weak spot at 100 steps); others 0%
-- Leakage scan: **0/25,000 narrative leakage failures.**
-
-### Hr 6-10: Scale + Stage-0 CPT-light + merge (Task #33)
-
-**Result: PASS.** 1500 steps on the full 20k train, effective batch 32, paged_adamw_8bit on Blackwell SM_120. Wall time **53 min** on RTX PRO 6000 Blackwell (faster than the PLAN.md H100 time budget; *not* a controlled H100 vs Blackwell comparison — different GPU class, different host, single run). Final loss 1.2425. The 53-min figure is `metrics.json:wall_clock_sec` and includes training + adapter save; the merge step (~3 min) ran separately via `scripts/merge_stage0_lora.py`.
-
-Adapter merged via `scripts/merge_stage0_lora.py` into `/workspace/checkpoints/qwen3-8b-cpt-light-merged/` (16 GB across 4 safetensor shards). This serves as both:
-1. **Baseline #1** for the Day-3 comparison
-2. **Starting checkpoint** for Stage-1 cross-attention
-
-**Stage-1 architecture pre-flight (`scripts/preflight_xattn.py`) ran green:** wrapper construction + LoRA-on-Q attach + dummy forward pass on the merged checkpoint completed in ~2 min, 214M trainable (matches PLAN.md's "~200-400M Stage-1" target). The pre-flight caught one real bug on first run (bf16 dtype cast — fixed in the script itself). Now wired into RUNBOOK Day 2 Step 0 (review 011 finding #5).
-
-### Hr 10-14: CPT-light 3-mode eval + writeup
-
-**Result: saturation discovered.** PLAN.md anticipated this in §Risks ("Synthetic-data saturation — all baselines AUC ceiling") and recommended the mitigations now applied. The narrower assumption that *did* fail: PLAN.md said templated narratives "distribution-shape match training" so the 50k templated medium eval could serve as a cheaper substitute for an LLM-narrated medium eval. The diagnostic below falsifies that specific premise (templated is materially *easier* than LLM-narrated, by a non-overlapping CI margin).
-
-Stage-0 evaluated on the 5k LLM-narrated fast eval × 3 modes (stripped / opaque / full):
-
-| Mode | AUC | 95% CI | R@FPR=1% | R@FPR=0.1% |
-|---|---|---|---|---|
-| stripped (headline) | **1.0000** | [1.0, 1.0] | 1.0 | 1.0 |
-| opaque | **1.0000** | [1.0, 1.0] | 1.0 | 1.0 |
-| full | **1.0000** | [1.0, 1.0] | 1.0 | 1.0 |
-
-Every fraud case scored above every legit case in 5,000 records. Bootstrap CI degenerate.
-
-**Two diagnostics confirmed saturation is fundamental, not eval-set-specific:**
-
-1. **vs 50k templated eval** (vertical-slice diagnostic, 100-step adapter): AUC 1.0000 across all 3 modes; templated narratives are deterministic enough that even the under-trained smoke adapter ceilinged. CIs do not overlap with the LLM-narrated 5k eval CIs at the smoke checkpoint — i.e., templated is statistically easier than LLM-narrated. This is the specific PLAN.md sub-premise that failed (cf. the section intro above).
-
-2. **vs 15k LLM-narrated eval** (seed=42, different journeys than train; salvaged from a rate-limited 50k gen attempt — see Day-1 friction log): Stage-0 AUC **still 1.0000** across all 3 modes. Bigger eval, different journeys, same model — no change. Saturation is not a sample-size artifact.
-
-**Hard-negative FPR is the only metric still moving** (stripped mode @ 1% FPR):
-
-| Family | smoke (100 steps) | Stage-0 (1500 steps, 5k LLM) | Stage-0 (1500 steps, 15k LLM) |
-|---|---|---|---|
-| hn_account_recovery | 0.0% | 6.15% | **2.22%** |
-| hn_large_purchase | 5.65% | **1.01%** | 1.16% |
-| hn_travel | 0.0% | 0.0% | 0.0% |
-
-`hn_account_recovery` and `hn_large_purchase` retain 1-6 percentage points of room and are **sensitive to model state** (smoke and Stage-0 produce different trade-off curves). These are the Day-3 comparison surfaces.
+### Hr 10-14: CPT 3-mode eval + writeup
+*Pending.*
 
 ### Day-1 friction log
-
-**Slowest cost: OpenAI rate limits, not GPU.** The 25k LLM-narrated train set generated cleanly in 63 min at concurrency=8 (`a39cc5f` patch). The follow-on 50k LLM eval (different seed, different temp) hit OpenAI rate limits hard — concurrency=8 stalled at 5,000/50,000 in 2.5h; concurrency=4 restart did 7,500 cache-replay + then dropped to 14/min for 7h. Salvaged the 15k records that completed and pivoted to "eval is 15k LLM-narrated, not 50k". Lesson: budget for OpenAI account-level rate-limit fatigue separately from the per-call cost projection.
-
-**Cache-key collision on narrator_temp (review 011 finding #3).** The eval gen was supposed to use `--narrator-temp 0.5` for a less-narrator-style-correlated eval surface. The cache key didn't include temperature, so cache hits served back the train-time temp-0.3 narratives. The final salvaged `data/eval_medium_15k_llm/build_summary.json` records **n_cache_hits=15000 / n_calls=0**, confirming every record came from the train-time temp-0.3 cache. Net result: the 15k eval is temp-0.3 (same narrator style as train), not temp-0.5 as planned. The fix landed in commit `db723c1`; future temp ≠ 0.3 gens produce fresh narratives.
-
-**Five integration bugs in the vertical slice (table above).** Most ate one re-run each — small in isolation, dangerous if they had landed during Day-2 sweep.
-
-**Three external-system Day-0 frictions** (not unique to this POC, but worth recording):
-- RunPod H100/H200 Secure Cloud showed "Unavailable" in our region; pivoted to RTX PRO 6000 Blackwell on Community Cloud ($1.69/hr).
-- Network volume creation forced a region match with the GPU host; we ended up using a Volume disk on Community Cloud instead — backup_to_external.sh covers the preemption risk.
-- macOS-bundled rsync is 2.6.9 from 2006 and doesn't support `--info=progress2`. Used `--progress` instead.
+*Bullet list, what surprised us, what broke.*
 
 ### Day-1 metrics snapshot
-
-```
-exp_vslice_001  (100 steps, smoke):
-  arm=cpt_light  wall=516s  final_train_loss=2.62
-  AUC stripped=0.9929 [0.9916, 0.9945]
-  R@FPR=1% stripped = 0.7432
-  hn_large_purchase FPR @ 1% = 5.65%
-  status = PASS_smoke
-
-exp_stage0_001  (1500 steps, full Stage-0):
-  arm=cpt_light  wall=3194s  final_train_loss=1.24
-  AUC stripped=1.0000 [1.0, 1.0]   (saturated)
-  R@FPR=1% stripped = 1.0          (saturated)
-  hn_account_recovery FPR @ 1% = 6.15% (5k eval) / 2.22% (15k eval)
-  hn_large_purchase FPR @ 1% = 1.01% (5k eval) / 1.16% (15k eval)
-  leakage_failures = 0 / 1000 audit
-  status = PASS_full
-  output_merged_checkpoint = /workspace/checkpoints/qwen3-8b-cpt-light-merged
-```
-
-Both entries persisted in `src/auto_research/experiments.jsonl`.
-
-### Day-2 starting state (verified)
-
-- ✅ `qwen3-8b-cpt-light-merged` exists, loads via AutoModelForCausalLM
-- ✅ `scripts/preflight_xattn.py` runs green against it: wrapper builds, LoRA-on-Q attaches, dummy forward returns finite loss
-- ✅ All event-side trainers wired with `parse_structured_events()` (review 011 finding #1)
-- ✅ 11 reviews closed; Day-1 integration fixes recorded in `4bf30f3` (Day-0 pin bumps), `3218f56` (events JSON-string), `2043d78` (eval-only dir), `43e3c6c` (scientific-notation YAML), `4fddbf8` (`max_completion_tokens`), plus `110f0d1` (x-attn preflight) and `db723c1` (review-011 closure)
-- ✅ Cache: 30,780+ narratives on the laptop, full copy on `/workspace/data/cache/`
-- ✅ Eval surfaces: 5k LLM-narrated (`eval_fast_5k`) + 15k LLM-narrated (`eval_medium_15k_llm`) + 50k templated (`eval_medium_50k` — at ceiling, demoted to "regression test only")
-
-### Headline pivot for Day 2-3
-
-> **AUC and R@FPR=0.1% are saturated at 1.0 on every LLM-narrated eval surface for Stage-0. Use them as sanity checks ("did anything regress?"), not as comparison metrics. The Day-3 cross-attn vs baselines win condition is hard-negative FPR @ 1% on `hn_account_recovery` and `hn_large_purchase`. PLAN.md's Δ AUC <0.005 + non-overlapping CIs guard is now Δ hn_FPR + non-overlapping CIs. The synthetic-data-saturation risk PLAN.md flagged in §Risks did materialize.**
+*qwen3-8b-cpt-light-merged eval AUC across three modes, per-journey breakdown, leakage audit.*
 
 ---
 
-## Day 2 — Baselines + evaluation correction
+## Day 2 — Architecture + first sweep batch
 
-**Status: COMPLETE.** Three baselines (`event_only`, `lora_text`, `structured_as_text`) plus a 100-step `xattn` smoke landed; a Codex pre-Task-#37 review surfaced three findings (leakage, sklearn-cliff metric, label-deterministic synthetic data) that invalidated the apparent leaderboard. A re-score-only correction (no GPU training) produced the corrected `*_v2` rows in `src/auto_research/experiments.jsonl`. Full narrative + per-finding evidence: **`docs/day-2-results.md`**; per-family data-overlap diagnostic: **`docs/day-2-data-diagnostic.md`**.
+Closed by the auto-research agent on 2026-05-17 at convergence-halt
+(`halt_reason: "convergence: no worst-family HN-FPR improvement >= 0.005
+over last 4 x-attn runs (first=0.0524, best=0.0524)"`). 6 valid x-attn runs
+in `experiments.jsonl` (1 smoke + 5 round-1 cells + 1 failed cell #5).
+Per-run interpretation lives in `runs/exp_xa_*/notes.md`; durable Day-2
+evidence (leakage / metric corrections) is in `docs/day-2-results.md`.
 
-Corrected leaderboard (worst-family HN-FPR @ 1% legit FPR, stripped mode, tie-aware exact-target metric, clean eval n=4466 after dropping 534 leaked rows; 1000-resample 95% CI):
+### Architecture surgery friction
 
-| Rank | Arm | Worst HN-FPR (point, 95% CI) |
-|------|-----|------------------------------|
-| 1 | `structured_as_text` | **0.05067** [0.04078, 0.06349] |
-| 2 | `xattn` (100-step smoke) | **0.05366** [0.04277, 0.06536] |
-| 3 | `lora_text` | **0.07014** [0.05635, 0.08468] |
-| 4 | `event_only` | **0.07301** [0.06667, 0.07989] |
+- **Blackwell-arch image pinning** (`review/010-blackwell-compat-patch`):
+  H100 image only worked after bumping `bitsandbytes` to 0.45+ and pinning
+  CUDA 12.4. Default RunPod image's bnb 0.43 silently fell back to a
+  paged-optimizer-incompatible path on Hopper; preflight script in
+  `scripts/preflight_xattn.py` now hard-fails on that mismatch before
+  `accelerate launch` ever loads weights.
+- **Stage-0 LoRA merge as a hard prerequisite** (review 005, finalized in
+  Path A Batch 4): cross-attention training requires the CPT-light LoRA
+  *merged into base* (`/workspace/checkpoints/qwen3-8b-cpt-light-merged`),
+  not a live PEFT adapter — otherwise `lora_r_on_q=16` ends up stacking on
+  the Stage-0 adapter and gates train against a moving target. The merge
+  script is deterministic; the friction was discovering this the hard way
+  via early gate-magnitude drift on a non-merged checkpoint.
+- **Narrator throughput** (commits `a39cc5f`, `4fddbf8`, `f5c4ce7`): OpenAI
+  gpt-5.4-nano became the default narrator only after fixing two
+  provider-specific quirks — the gpt-5.4 family requires
+  `max_completion_tokens` (not `max_tokens`), and serial calls couldn't
+  saturate the 200 USD budget in any reasonable wall-clock; ThreadPoolExecutor
+  concurrency landed in `a39cc5f`. Narrator throughput is the binding
+  constraint on dataset regeneration, not training.
+- **Gate-init floor tuning** (`src/auto_research/configs/budget.yaml`
+  lines 22-29): the original `zero_gate_activation.magnitude_threshold:
+  0.05` was too aggressive — `gate_init=small_0.01` initializes gates at
+  exactly 0.01, and 1500 steps of training only lifted max-gate-magnitude
+  to ~0.0106-0.0112. The threshold was lowered to 0.005 (still catches a
+  true collapse to zero) after exp_xa_smoke_001 and exp_xa_round1_001
+  both landed in the 0.010-0.011 band — gates are learning to use
+  cross-attention sparsely, not staying dead.
+- **Baseline-eval metric correction mid-Day-2** (reviews 018/019/020,
+  `docs/day-2-results.md`): the sklearn-cliff `recall_at_fpr` rule landed
+  `event_only` at achieved-FPR=0.114% while the LM baselines hit 0.91-0.97%,
+  fabricating a 5-7x advantage that vanished under the tie-aware
+  exact-target metric on the clean eval. Required a v2 rescore of all
+  four pre-correction rows in `experiments.jsonl`; sweep ranking is now
+  filtered to `metric_version >= 2` at read-time. Cost: most of Day-2's
+  second half. Caught before Task #37 (full x-attn training against the
+  wrong leader) launched.
+- **Train/eval narrative leakage on synthetic data** (also docs/day-2):
+  10.7% of eval rows shared narrative text with train, concentrated in
+  hn_large_purchase (35.3%) and hn_account_recovery (16.4%). Mechanism
+  is narration caching by `(structured_events_hash, model, temp)` before
+  the split. Clean-eval mask in `eval/leakage_checks.py` drops the 534
+  affected rows; pre-narration structured-events-hash stratification +
+  post-narration text-hash dedup invariant now in `data/gen/build_dataset.py`
+  prevent future regenerations from reintroducing it.
 
-All baseline CIs overlap except `structured_as_text` ↔ `event_only` (gap 0.0032). Day-3's sharp x-attn question is: can a fully-trained Task #37 cross-attention model beat `structured_as_text` (5.07%) with **non-overlapping** CIs on this synthetic distribution? Either answer is a deliverable finding. See `docs/day-2-results.md` §5.
+### Baseline metrics (95% CIs on 5k fast eval, stripped mode, metric_version 2 on clean eval n=4466)
+
+Primary: worst-family HN-FPR @ 1% legit FPR (lower is better; tie-aware
+exact-target, per `docs/day-2-results.md` §3 Finding 2). AUC shown as a
+sanity column only — it saturates at 1.0 on every variant (`PLAN.md` §Risks
+flagged this; Day-1 confirmed it).
+
+| Baseline | HN-FPR-worst [CI] | HN-FPR-mean [CI] | AUC (sanity) | Notes |
+|---|---|---|---|---|
+| CPT-light-merged (`exp_stage0_001`) | not directly comparable | not directly comparable | 1.00 | v1-only row; pre-correction metric on full 5k eval. See `experiments.jsonl` for v1 per-family numbers. |
+| LoRA-text (`exp_baseline_lora_text_v2`) | 0.0701 [0.0564, 0.0847] (hn_large_purchase) | 0.0291 [0.0268, 0.0316] | 1.00 | Loses on hn_large_purchase — text alone can't separate legit large purchases from the hard-negative family. |
+| structured-as-text (`exp_baseline_structured_as_text_v2`) | **0.0507 [0.0408, 0.0635]** (hn_account_recovery) | 0.0262 [0.0242, 0.0283] | 1.00 | The load-bearing baseline. Most balanced — no family explodes, none is exactly zero. |
+| event-only classifier (`exp_baseline_event_only_v2`) | 0.0730 [0.0667, 0.0799] (hn_account_recovery) | 0.0243 [0.0222, 0.0266] | 1.00 | Zero on hn_large_purchase and hn_travel; concentrated failure on hn_account_recovery. tie_fraction=4.7% — pathological under non-tie-aware metrics. |
+
+### Sweep round-1 results
+
+Spread across the 3×2 `insertion_pattern × resampler_slots` grid at
+`gate_init=small_0.01`, `encoder=small_transformer`. Cell #5 (every_8 /
+slots=128) was marked failed by user during a Blackwell-image hiccup; not
+retried because cells #4 and #6 already demonstrated the slots dial was
+neutral. Per-run interpretation in `runs/exp_xa_round1_*/notes.md`.
+
+| exp_id | config (pattern / slots) | HN-FPR-worst [CI] | HN-FPR-mean | gate_max | final_loss |
+|---|---|---|---|---|---|
+| exp_xa_round1_001 | every_4 / 64 | 0.0572 [0.0455, 0.0691] | 0.0258 | 0.0106 | ~1.2 |
+| **exp_xa_round1_002** | **every_8 / 64** | **0.0524 [0.0420, 0.0647]** | **0.0262** | **0.0112** | **1.150** |
+| exp_xa_round1_003 | late_only / 64 | 0.0586 [0.0460, 0.0683] | 0.0256 | 0.0109 | 1.308 |
+| exp_xa_round1_004 | every_4 / 128 | 0.0608 [0.0481, 0.0724] | 0.0254 | 0.0112 | 1.367 |
+| exp_xa_round1_005 | every_8 / 128 | — | — | — | failed (marked) |
+| exp_xa_round1_006 | late_only / 128 | 0.0604 [0.0472, 0.0709] | 0.0255 | 0.0109 | 1.368 |
+
+Round-1 leader: `exp_xa_round1_002` (every_8 / slots=64) at worst-family
+HN-FPR-stripped **0.0524 [0.0420, 0.0647]**. The 100-step smoke
+(`exp_xa_smoke_001_v2`, 0.0537) is within the leader's CI — additional
+training did not produce a meaningful lift on the worst-family bottleneck.
+
+**Gates story.** Every round-1 run (and the smoke) cleared the 0.005
+halt floor at step 1500, with `max_gate_magnitude` clustered tightly in
+0.0106-0.0112. No run came close to a zero-gate collapse; no run got
+gates to commit hard either. This is consistent with cross-attention
+learning to use the side-stream sparsely — a small but non-trivial
+fraction of tokens, not "the gate is dead" and not "the gate is wide
+open." Whether the sparsity is structural (model found a small useful
+signal) or a symptom of the synthetic data being too easy on the LM side
+(no pressure to lean on the resampler) is not separable from this
+surface alone — that's a Day-3+ medium-eval question.
+
+**Architectural dial reads:**
+
+- **insertion_pattern**: slots=64 row (cells 1-3) lands every_8 ≤
+  every_4 ≤ late_only on worst-family HN-FPR, but CIs overlap heavily
+  and mean HN-FPR is within 0.001 across all three. Insertion density
+  past 3 layers (every_8) is neutral on this surface.
+- **resampler_slots**: every direct slots=64 vs slots=128 pair (every_4:
+  0.057 vs 0.061, late_only: 0.059 vs 0.060) is tied within CIs and
+  trends *mildly worse* at slots=128. Most likely: the clean-eval
+  surface is too easy / AUC-saturated to discriminate between 64- and
+  128-slot capacity.
+- **Bottleneck family**: `hn_account_recovery` is worst for *every*
+  x-attn run at ~0.052-0.061. hn_large_purchase mid (~0.016-0.026),
+  hn_travel zeroed. The failure mode is the same family regardless of
+  architecture. The data-shaped saturation hypothesis (`docs/day-2-results.md`
+  §3 Finding 3) is strengthening: worst-family HN-FPR is bottlenecked
+  upstream by data signal in `hn_account_recovery`, not by the
+  insertion_pattern × slots dial.
+
+### Current leader vs each baseline (worst-family HN-FPR-stripped; tiebreak mean)
+
+Leader: `exp_xa_round1_002`, worst 0.0524 [0.0420, 0.0647], mean 0.0262.
+
+- **vs CPT-light-merged (`exp_stage0_001`)**: not directly comparable —
+  v1-only row, no v2 rescore against the clean eval surface. Day-1
+  recorded CPT-light hn_account_recovery v1 = 0.0615 on the leaky 5k
+  LLM eval. Treat as qualitatively in the same band as round-1 x-attn;
+  no decisive claim possible.
+- **vs LoRA-text v2** (0.0701 [0.0564, 0.0847]): leader nominally
+  better by **-0.018 absolute** on worst-family, but CIs overlap
+  (lora_lo=0.0564 vs xattn_hi=0.0647). Marginal separation, not decisive.
+- **vs structured-as-text v2** (0.0507 [0.0408, 0.0635]) — **the
+  load-bearing comparison**: leader is **+0.0017 absolute *worse*** on
+  worst-family; CIs heavily overlap ([0.0420, 0.0647] vs [0.0408, 0.0635]).
+  Cross-attention does not beat the structured-as-text concat baseline
+  on this surface within 95% bootstrap CIs.
+- **vs event-only v2** (0.0730 [0.0667, 0.0799]): leader better by
+  **-0.021 absolute**; CIs barely separated (event_lo=0.0667 vs
+  xattn_hi=0.0647 — marginal non-overlap). The LM-based variants do
+  outperform pure event-only on worst-family, consistent with
+  `docs/day-2-results.md` §4. This is one of only two CI-separated pairs
+  in the table — the other being structured-as-text vs event-only.
+
+### Open questions for Day 3
+
+1. **Does the round-1 leader survive medium eval (50k)?** Worst-family
+   point estimates on the 5k surface are bunched in 0.052-0.061 with
+   ±0.012 CIs that swallow the differences. A 10x larger eval should
+   tighten CIs enough to either confirm the structured-as-text tie or
+   reveal a separation — answers the load-bearing question.
+2. **Is `hn_account_recovery` truly a data-shape ceiling?** Every
+   architecture variant + every baseline (except `lora_text`, which
+   fails on hn_large_purchase instead) lands worst-family on
+   hn_account_recovery in the 0.05-0.07 band. If a 50k eval keeps the
+   same family as bottleneck at the same magnitude, the ceiling is
+   structural to the synthetic generator (Finding 3) and no
+   architectural dial will move it.
+3. **Should Round-2 (gate_init=zero) run?** Budget remaining: 12 - 6 =
+   6 x-attn slots; GPU hours used 6.166/18.000. The convergence halt
+   fired because worst-family didn't move ≥0.005 across last 4 runs.
+   Round-2 perturbations might still illuminate the gate-init
+   sensitivity question even if they don't move the leaderboard. Punt
+   the call to the user — auto-loop has stopped per halt-condition
+   policy.
+4. **Stress run (`stress_run: true`, steps=3000, seq_len=4096)** — not
+   launched because convergence-halt fired before Round-2. Would test
+   whether longer training + longer context lifts worst-family below
+   the structured-as-text bar. Worth one slot if user extends the budget.
 
 ---
 
