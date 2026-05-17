@@ -4,15 +4,21 @@ The POC's "win" claims must be CI-defended: no Δ<0.005 AUC delta drives a
 Day-4 decision without non-overlapping CIs. This module is called by
 `run_next_experiment.py` after metric computation.
 
+Review 018/019: HN-FPR bootstrap is tie-aware. Per resample we recompute
+`(threshold, alpha)` via the tie-aware `recall_at_fpr`, then weight tied-at-
+threshold rows by alpha in `hard_negative_fpr`.
+
 CLI:
     python eval/bootstrap_ci.py --predictions PRED.jsonl --metrics METRICS.json \\
         --out CI_REPORT.json --resamples 1000 --confidence 0.95
+    python -m eval.bootstrap_ci --selftest
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Sequence
@@ -80,7 +86,12 @@ def bootstrap_recall_at_fpr(
     confidence: float = 0.95,
     seed: int = 0,
 ) -> dict:
-    """Bootstrap CI for Recall@FPR."""
+    """Bootstrap CI for tie-aware Recall@FPR.
+
+    Per resample we recompute (threshold, alpha, recall) via the new
+    `recall_at_fpr`. Returned recall is the tie-aware one
+    ((fraud_above + alpha * fraud_tied) / n_fraud).
+    """
     rng = np.random.default_rng(seed)
     n = len(predictions)
     point = recall_at_fpr(predictions, target_fpr)["recall"]
@@ -112,20 +123,19 @@ def bootstrap_hard_negative_fpr(
     confidence: float = 0.95,
     seed: int = 0,
 ) -> dict:
-    """Bootstrap CI for hard-negative FPR per family at decision threshold
-    corresponding to target_fpr.
+    """Tie-aware bootstrap CI for hard-negative FPR per family.
 
     For each resample:
       1. Resample predictions with replacement.
-      2. Compute the score threshold that achieves target_fpr on the
-         resample (i.e., the threshold consistent with this sample's
-         distribution).
-      3. Per hard-negative family, compute fraction wrongly above that
-         threshold.
+      2. Compute (threshold, alpha) on the resample via tie-aware
+         `recall_at_fpr` (review 018/019 — alpha-weighted ties at T).
+      3. Per hard-negative family, compute
+         (sum(score > T) + alpha * sum(score == T)) / n_in_family.
 
     Returns:
       {
         "target_fpr": 0.01,
+        "metric_version": 2,
         "per_family": {
           "hn_account_recovery": {"point", "ci_lo", "ci_hi", ...},
           "hn_large_purchase":   {...},
@@ -133,62 +143,74 @@ def bootstrap_hard_negative_fpr(
         },
         "worst_family": {"point", "ci_lo", "ci_hi", ...},  # max across families per resample
         "mean":         {"point", "ci_lo", "ci_hi", ...},  # mean across families per resample
+        "tie_fraction_mean":   float,   # average tied-at-T fraction across resamples
+        "achieved_fpr_mean":   float,   # average achieved_fpr across resamples (≈ target_fpr)
+        "threshold_mean":      float,
+        "alpha_mean":          float,
         "resamples": 1000,
         "confidence": 0.95,
       }
-
-    Review 013 finding #2: HN-FPR is the Day-3 win condition; AUC and
-    R@FPR are saturated, so the launcher's leader/halt logic now ranks
-    on worst-family HN-FPR (primary) and mean HN-FPR (tiebreaker). Both
-    composites get a CI here so Day-3 "non-overlapping CIs" claims are
-    supportable.
     """
-    from eval.score_risk import hard_negative_fpr, recall_at_fpr
+    from eval.score_risk import hard_negative_fpr
 
     rng = np.random.default_rng(seed)
     n = len(predictions)
 
     # Point estimates from the full sample
-    point_threshold = recall_at_fpr(predictions, target_fpr)["threshold"]
-    point_per_family = (
-        hard_negative_fpr(predictions, point_threshold)
-        if not np.isnan(point_threshold) else {}
-    )
+    point_rec = recall_at_fpr(predictions, target_fpr)
+    point_threshold = point_rec["threshold"]
+    point_alpha = point_rec.get("alpha", 0.0)
+    if isinstance(point_threshold, float) and math.isnan(point_threshold):
+        point_per_family: dict[str, float] = {}
+    else:
+        hn_raw = hard_negative_fpr(predictions, point_threshold, alpha=point_alpha)
+        point_per_family = {k: v for k, v in hn_raw.items() if k != "_threshold_alpha"}
     family_order = sorted(point_per_family.keys())
 
-    # Bootstrap: per-family FPRs + worst/mean composites
+    # Bootstrap: per-family FPRs + worst/mean composites + tie-aware diagnostics
     boot_per_family: dict[str, list[float]] = {k: [] for k in family_order}
     boot_worst: list[float] = []
     boot_mean: list[float] = []
+    boot_tie_fraction: list[float] = []
+    boot_achieved_fpr: list[float] = []
+    boot_threshold: list[float] = []
+    boot_alpha: list[float] = []
 
     for _ in range(resamples):
         idx = rng.integers(0, n, size=n)
         sub = [predictions[j] for j in idx]
-        th = recall_at_fpr(sub, target_fpr)["threshold"]
-        if np.isnan(th):
+        rec = recall_at_fpr(sub, target_fpr)
+        th = rec["threshold"]
+        al = rec.get("alpha", 0.0)
+        tf = rec.get("tie_fraction", float("nan"))
+        af = rec.get("achieved_fpr", float("nan"))
+        boot_tie_fraction.append(float(tf))
+        boot_achieved_fpr.append(float(af))
+        boot_threshold.append(float(th))
+        boot_alpha.append(float(al))
+        if isinstance(th, float) and math.isnan(th):
             for k in family_order:
                 boot_per_family[k].append(float("nan"))
             boot_worst.append(float("nan"))
             boot_mean.append(float("nan"))
             continue
-        hn = hard_negative_fpr(sub, th)
+        hn_raw = hard_negative_fpr(sub, th, alpha=al)
+        hn = {k: v for k, v in hn_raw.items() if k != "_threshold_alpha"}
         per = [float(hn.get(k, float("nan"))) for k in family_order]
         for k, v in zip(family_order, per):
             boot_per_family[k].append(v)
-        # Composites — ignore NaN entries (resample may not contain a
-        # given family); if all NaN, composite is NaN.
         per_clean = [v for v in per if not np.isnan(v)]
         boot_worst.append(max(per_clean) if per_clean else float("nan"))
         boot_mean.append(sum(per_clean) / len(per_clean) if per_clean else float("nan"))
 
-    alpha = (1.0 - confidence) / 2.0
+    pct_lo = (1.0 - confidence) / 2.0
 
     def _ci(samples: list[float], point: float) -> dict:
         arr = np.asarray(samples, dtype=np.float64)
         return {
             "point": float(point) if not np.isnan(point) else float("nan"),
-            "ci_lo": float(np.nanpercentile(arr, 100 * alpha)),
-            "ci_hi": float(np.nanpercentile(arr, 100 * (1.0 - alpha))),
+            "ci_lo": float(np.nanpercentile(arr, 100 * pct_lo)),
+            "ci_hi": float(np.nanpercentile(arr, 100 * (1.0 - pct_lo))),
             "resamples": resamples,
             "confidence": confidence,
         }
@@ -203,9 +225,19 @@ def bootstrap_hard_negative_fpr(
 
     return {
         "target_fpr": target_fpr,
+        "metric_version": 2,
         "per_family": per_family,
         "worst_family": _ci(boot_worst, point_worst),
         "mean": _ci(boot_mean, point_mean),
+        "tie_fraction_mean": float(np.nanmean(boot_tie_fraction)),
+        "achieved_fpr_mean": float(np.nanmean(boot_achieved_fpr)),
+        "threshold_mean": float(np.nanmean(boot_threshold)),
+        "alpha_mean": float(np.nanmean(boot_alpha)),
+        # Point-estimate tie-aware diagnostics from the full sample:
+        "threshold_point": float(point_threshold) if not (isinstance(point_threshold, float) and math.isnan(point_threshold)) else float("nan"),
+        "alpha_point": float(point_alpha),
+        "tie_fraction_point": float(point_rec.get("tie_fraction", float("nan"))),
+        "achieved_fpr_point": float(point_rec.get("achieved_fpr", float("nan"))),
         "resamples": resamples,
         "confidence": confidence,
     }
@@ -216,15 +248,77 @@ def ci_overlap(a: dict, b: dict) -> bool:
     return not (a["ci_hi"] < b["ci_lo"] or b["ci_hi"] < a["ci_lo"])
 
 
+# ---------------------------------------------------------------------------
+# Selftest
+# ---------------------------------------------------------------------------
+
+def _selftest() -> int:
+    """Quick CI shape + sanity test on a synthetic fixture."""
+    rng = np.random.default_rng(0)
+    preds: list[dict] = []
+    # Legit
+    for s in rng.normal(-1.0, 1.5, size=400):
+        preds.append({"score": float(s), "label": "legit", "journey_family": "p2p", "actor_family": "human", "is_hard_negative": False})
+    # Fraud
+    for s in rng.normal(1.5, 1.5, size=100):
+        preds.append({"score": float(s), "label": "fraud", "journey_family": "p2p", "actor_family": "human", "is_hard_negative": False})
+    # Hard negatives (two families)
+    for s in rng.normal(0.5, 1.5, size=120):
+        preds.append({"score": float(s), "label": "legit", "journey_family": "hn_a", "actor_family": "human", "is_hard_negative": True})
+    for s in rng.normal(-0.2, 1.5, size=80):
+        preds.append({"score": float(s), "label": "legit", "journey_family": "hn_b", "actor_family": "human", "is_hard_negative": True})
+
+    rep = bootstrap_hard_negative_fpr(preds, target_fpr=0.01, resamples=200, seed=0)
+
+    # Shape checks
+    for k in ("target_fpr", "metric_version", "per_family", "worst_family", "mean",
+              "tie_fraction_mean", "achieved_fpr_mean", "threshold_mean", "alpha_mean",
+              "threshold_point", "alpha_point", "tie_fraction_point", "achieved_fpr_point",
+              "resamples", "confidence"):
+        assert k in rep, f"missing key: {k}"
+    assert rep["metric_version"] == 2
+    assert set(rep["per_family"].keys()) == {"hn_a", "hn_b"}
+    for fam, ci in rep["per_family"].items():
+        assert ci["ci_lo"] <= ci["point"] <= ci["ci_hi"], f"{fam} CI inverted: {ci}"
+    wf = rep["worst_family"]
+    assert wf["ci_lo"] <= wf["point"] <= wf["ci_hi"], f"worst CI inverted: {wf}"
+    mn = rep["mean"]
+    assert mn["ci_lo"] <= mn["point"] <= mn["ci_hi"], f"mean CI inverted: {mn}"
+
+    # achieved_fpr_mean should be very close to target (resamples can wiggle a bit)
+    assert abs(rep["achieved_fpr_mean"] - 0.01) < 5e-3, f"achieved_fpr_mean={rep['achieved_fpr_mean']}"
+
+    # Also check bootstrap_recall_at_fpr still returns recall + threshold-like shape
+    rec_ci = bootstrap_recall_at_fpr(preds, target_fpr=0.01, resamples=200, seed=0)
+    assert "point" in rec_ci and "ci_lo" in rec_ci and "ci_hi" in rec_ci
+
+    print(
+        f"selftest pass: worst_point={wf['point']:.4f} "
+        f"[{wf['ci_lo']:.4f}, {wf['ci_hi']:.4f}] "
+        f"alpha_mean={rep['alpha_mean']:.4f} "
+        f"tie_fraction_mean={rep['tie_fraction_mean']:.6f} "
+        f"achieved_fpr_mean={rep['achieved_fpr_mean']:.6f}"
+    )
+    print("selftest OK")
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--predictions", required=True, type=Path)
-    p.add_argument("--out", required=True, type=Path)
+    p.add_argument("--predictions", type=Path)
+    p.add_argument("--out", type=Path)
     p.add_argument("--resamples", type=int, default=1000)
     p.add_argument("--confidence", type=float, default=0.95)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--fpr-targets", default="0.001,0.01,0.05")
+    p.add_argument("--selftest", action="store_true", help="run inline selftest and exit")
     args = p.parse_args()
+
+    if args.selftest:
+        return _selftest()
+
+    if args.predictions is None or args.out is None:
+        p.error("--predictions and --out are required (or pass --selftest)")
 
     preds = _load_predictions(args.predictions)
     target_fprs = [float(x) for x in args.fpr_targets.split(",")]
@@ -237,8 +331,7 @@ def main() -> int:
             preds, target_fpr=f, resamples=args.resamples,
             confidence=args.confidence, seed=args.seed,
         )
-    # Review 013 finding #2: HN-FPR is now the Day-3 win condition.
-    # Always bootstrap at the 1% FPR threshold (Day-1 pivot consensus).
+    # HN-FPR is the Day-3 win condition; always bootstrap at 1% FPR.
     report["hard_negative_fpr_at_1pct"] = bootstrap_hard_negative_fpr(
         preds, target_fpr=0.01, resamples=args.resamples,
         confidence=args.confidence, seed=args.seed,

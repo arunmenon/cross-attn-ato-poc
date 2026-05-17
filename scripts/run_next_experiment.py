@@ -52,6 +52,12 @@ from typing import Any
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# Ensure `from eval.leakage_checks import ...` resolves regardless of cwd.
+# The trainer subprocess gets PYTHONPATH explicitly (see launch_trainer);
+# this launcher itself is invoked directly so we patch sys.path here too.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 RUNS_DIR = REPO_ROOT / "src" / "auto_research" / "runs"
 EXPERIMENTS_JSONL = REPO_ROOT / "src" / "auto_research" / "experiments.jsonl"
 SWEEP_STATE = REPO_ROOT / "src" / "auto_research" / "sweep_state.yaml"
@@ -280,6 +286,44 @@ def _load_hn_ci(run_dir: Path, mode: str = "stripped") -> dict | None:
     return data.get("hard_negative_fpr_at_1pct")
 
 
+def _read_clean_eval_record_fields(run_dir: Path) -> dict:
+    """Read the cached clean-eval mask stats and shape into record fields.
+
+    Review 019 Blocker 2: every new-run row records the clean-eval surface
+    size so downstream audit (AC1b) can verify the launcher actually
+    filtered. When the cache is absent (config didn't expose paths, or
+    paths didn't resolve), all four fields are None — visible in
+    experiments.jsonl as an honest "didn't run on clean eval".
+    """
+    cache_path = run_dir / "clean_eval_mask.json"
+    if not cache_path.exists():
+        return {
+            "clean_eval_n": None,
+            "clean_eval_dropped": None,
+            "clean_eval_mask_text_overlap": None,
+            "clean_eval_mask_events_overlap": None,
+        }
+    try:
+        data = json.loads(cache_path.read_text())
+    except json.JSONDecodeError:
+        return {
+            "clean_eval_n": None,
+            "clean_eval_dropped": None,
+            "clean_eval_mask_text_overlap": None,
+            "clean_eval_mask_events_overlap": None,
+        }
+    stats = data.get("stats", {})
+    return {
+        "clean_eval_n": stats.get("n_kept"),
+        "clean_eval_dropped": stats.get("n_dropped"),
+        # n_text_overlap and n_events_overlap from compute_clean_eval_mask
+        # both INCLUDE the `n_both` rows that hit both surfaces; this matches
+        # the per-source diagnostic shape the spec asked for.
+        "clean_eval_mask_text_overlap": stats.get("n_text_overlap"),
+        "clean_eval_mask_events_overlap": stats.get("n_events_overlap"),
+    }
+
+
 def check_halt_conditions() -> str | None:
     """Returns reason string if halted, None if clear to launch.
 
@@ -297,11 +341,23 @@ def check_halt_conditions() -> str | None:
     budget = yaml.safe_load(BUDGET_YAML.read_text())
     history = _load_history()
 
-    # Filter to x-attn arm for budget + halt counts (review 013 finding #4)
+    # Filter to x-attn arm for budget + halt counts (review 013 finding #4).
+    # Review 019 Blocker 2 extension (team-build T5 follow-on): apply the
+    # metric_version >= 2 filter symmetrically across ALL halt conditions,
+    # not just convergence. Otherwise v1 rows (with stale metric semantics
+    # or rescore-companion v2 rows from the same underlying experiment) can
+    # spuriously trigger nan_cascade or zero_gate_activation halts even
+    # when only the v2 row should count. Pipeline-eng's T5 applied the
+    # filter only to convergence; this expands it to nan_cascade and
+    # zero_gate_activation so the launcher's halt logic is internally
+    # consistent for metric_version 2 rows going forward.
     xattn_history = [h for h in history if h.get("arm") == "xattn"]
     xattn_valid_all = [h for h in xattn_history if h.get("status") == "ok"]
+    xattn_history_v2 = [h for h in xattn_history if h.get("metric_version", 1) >= 2]
+    xattn_valid_v2 = [h for h in xattn_valid_all if h.get("metric_version", 1) >= 2]
 
-    # Budget caps -- x-attn only
+    # Budget caps -- x-attn only (counts v1 + v2 for sweep-budget purposes;
+    # baselines are the only exclusion review 013 finding #4 addresses).
     if len(xattn_valid_all) >= budget.get("max_experiments", 999):
         return (
             f"max_experiments ({budget['max_experiments']}) reached "
@@ -315,18 +371,18 @@ def check_halt_conditions() -> str | None:
 
     halt = budget.get("halt", {})
 
-    # NaN cascade -- x-attn only (review 013 finding #4)
+    # NaN cascade -- x-attn v2 only (review 013 finding #4 + review 019 B2 extension)
     if halt.get("nan_cascade", {}).get("enabled"):
         n = halt["nan_cascade"]["consecutive_threshold"]
-        recent = xattn_history[-n:]
+        recent = xattn_history_v2[-n:]
         if len(recent) == n and all(h.get("status") == "nan" for h in recent):
             return f"nan_cascade: last {n} x-attn runs were NaN"
 
-    # Zero gates -- x-attn only (always was, kept)
+    # Zero gates -- x-attn v2 only (review 019 B2 extension)
     if halt.get("zero_gate_activation", {}).get("enabled"):
         n = halt["zero_gate_activation"]["consecutive_threshold"]
         mag_thresh = halt["zero_gate_activation"]["magnitude_threshold"]
-        recent = xattn_valid_all[-n:]
+        recent = xattn_valid_v2[-n:]
         if len(recent) == n and all(
             (h.get("max_gate_magnitude") or 0) < mag_thresh for h in recent
         ):
@@ -336,19 +392,26 @@ def check_halt_conditions() -> str | None:
     # finding #1). Compares the WORST (max) recent worst-family value
     # against the FIRST in the window. If best is not at least `thresh`
     # better than first, we have not improved.
+    #
+    # Review 019 Blocker 2: only metric_version >= 2 rows participate in
+    # the convergence window. v1 rows used the sklearn-cliff metric on a
+    # leaky eval; mixing them with v2 (tie-aware, clean-eval) reads as
+    # spurious improvement/regression and could halt or unhalt
+    # incorrectly.
     conv = halt.get("convergence", {})
     if conv.get("enabled"):
         min_runs = conv.get("min_valid_runs_before_halt", 6)
         window = conv.get("window", 4)
         thresh = conv.get("hn_fpr_improvement_threshold",
                           conv.get("auc_lift_threshold", 0.005))
-        if len(xattn_valid_all) >= min_runs:
+        xattn_v2 = [h for h in xattn_valid_all if h.get("metric_version", 1) >= 2]
+        if len(xattn_v2) >= min_runs:
             # Audit 014 H5 / audit 015 confirmed: filter Nones first, then
             # rank against the last `window` VALID HN-FPR records.
             # `all(v is not None ...)` silently bypassed convergence whenever
             # a legacy (pre-review-013) row sat in the window.
             worst_series = [
-                h.get("hn_fpr_worst_stripped") for h in xattn_valid_all
+                h.get("hn_fpr_worst_stripped") for h in xattn_v2
             ]
             worst_series = [v for v in worst_series if v is not None]
             if len(worst_series) >= window:
@@ -531,16 +594,114 @@ def launch_trainer(arm: str, config_path: Path, run_dir: Path,
 # Post-run: parse + score + CI
 # ---------------------------------------------------------------------------
 
-def run_post_processing(run_dir: Path, eval_modes: list[str]) -> dict:
+def _resolve_clean_eval_paths(cfg: dict) -> tuple[Path, Path] | None:
+    """Resolve train.jsonl and eval.jsonl from a config's data section.
+
+    Returns (train_jsonl, eval_jsonl) or None if either is missing. Both
+    paths are honored as-is (no /workspace ↔ repo-root rewriting): the
+    launcher runs on the pod where `/workspace/data/...` resolves;
+    --dry-run-validate-clean-eval works the same way.
+    """
+    data = cfg.get("data") or {}
+    train_dir = data.get("train_path")
+    eval_dir = data.get("eval_fast_path") or data.get("eval_path")
+    if train_dir is None or eval_dir is None:
+        return None
+    train_jsonl = Path(train_dir) / "train.jsonl"
+    eval_jsonl = Path(eval_dir) / "eval.jsonl"
+    if not train_jsonl.exists() or not eval_jsonl.exists():
+        return None
+    return train_jsonl, eval_jsonl
+
+
+def _apply_clean_eval_mask_to_predictions(
+    preds_path: Path,
+    clean_path: Path,
+    mask: list[bool],
+) -> None:
+    """Filter a predictions JSONL by a boolean mask and write the result.
+
+    Predictions are emitted in eval-row order by the trainer; the mask
+    indexes the underlying eval.jsonl 1-to-1. Length mismatch indicates
+    a contract drift between trainer and the clean-eval-mask source and
+    must abort rather than silently truncate.
+    """
+    with preds_path.open() as f:
+        lines = [ln for ln in f if ln.strip()]
+    if len(lines) != len(mask):
+        raise RuntimeError(
+            f"clean-eval mask length mismatch: predictions {preds_path} has "
+            f"{len(lines)} rows, mask has {len(mask)}. Trainer/eval contract "
+            f"may have drifted (review 019 Blocker 2)."
+        )
+    tmp = clean_path.with_suffix(clean_path.suffix + ".tmp")
+    with tmp.open("w") as out:
+        for keep, line in zip(mask, lines):
+            if keep:
+                out.write(line if line.endswith("\n") else line + "\n")
+    tmp.rename(clean_path)
+
+
+def compute_and_cache_clean_eval_mask(
+    cfg: dict, run_dir: Path,
+) -> tuple[list[bool], dict] | None:
+    """Compute the clean-eval mask once and cache it in the run dir.
+
+    Returns (mask, stats) or None if the config doesn't expose
+    resolvable train_path + eval_path. The cache lives at
+    `<run_dir>/clean_eval_mask.json` so the launcher only pays the
+    hashing cost once per run even if multiple eval modes are processed.
+
+    Reviews 018/019 Blocker 2: every NEW run scores against a leakage-
+    filtered eval surface so `metric_version: 2` rows have an honest
+    HN-FPR.
+    """
+    from eval.leakage_checks import compute_clean_eval_mask
+
+    paths = _resolve_clean_eval_paths(cfg)
+    if paths is None:
+        return None
+    train_jsonl, eval_jsonl = paths
+
+    cache_path = run_dir / "clean_eval_mask.json"
+    if cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text())
+            return cached["mask"], cached["stats"]
+        except (json.JSONDecodeError, KeyError):
+            pass  # corrupt cache; recompute
+
+    mask, stats = compute_clean_eval_mask(train_jsonl, eval_jsonl)
+    # Cache as JSON (list[bool] + dict). The mask is small (~5k bools).
+    tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    tmp.write_text(json.dumps({"mask": mask, "stats": stats}))
+    tmp.rename(cache_path)
+    return mask, stats
+
+
+def run_post_processing(
+    run_dir: Path,
+    eval_modes: list[str],
+    cfg: dict | None = None,
+) -> dict:
     """Invoke parse_metrics.py, score_risk.py (per mode), bootstrap_ci.py.
 
     The trainer is expected to have written `predictions_<mode>.jsonl` per
     eval mode into the run dir. score_risk and bootstrap_ci read those.
 
+    When `cfg` exposes resolvable `data.train_path` + `data.eval_fast_path`,
+    the launcher applies the clean-eval mask BEFORE scoring (review 019
+    Blocker 2): predictions_<mode>.jsonl is filtered to
+    predictions_<mode>_clean.jsonl, and score_risk + bootstrap_ci read the
+    clean file. If `cfg` is None or paths don't resolve, falls back to the
+    raw-predictions pre-mask path (legacy behavior).
+
     Side effects (post-review fix #4):
       - Writes per-mode files: metrics_{mode}.json, ci_report_{mode}.json
       - Writes aggregate ci_report.json with sections per mode (canonical file
         referenced by PLAN.md and AGENT_INSTRUCTIONS.md).
+      - Writes predictions_{mode}_clean.jsonl + clean_eval_mask.json when
+        the clean-eval surface is in effect.
     """
     # 1. Parse training log → metrics.json + gate_trajectory.json
     subprocess.run(
@@ -549,7 +710,11 @@ def run_post_processing(run_dir: Path, eval_modes: list[str]) -> dict:
         check=True,
     )
 
-    # 2. Score risk for each eval mode that produced predictions
+    # 2. Pre-compute clean-eval mask (once per run, cached on disk).
+    mask_bundle = compute_and_cache_clean_eval_mask(cfg or {}, run_dir)
+    clean_active = mask_bundle is not None
+
+    # 3. Score risk for each eval mode that produced predictions
     summary: dict[str, dict] = {}
     per_mode_ci: dict[str, dict] = {}
     for mode in eval_modes:
@@ -557,16 +722,28 @@ def run_post_processing(run_dir: Path, eval_modes: list[str]) -> dict:
         if not preds.exists():
             summary[mode] = {"missing_predictions": True}
             continue
+
+        # Apply clean-eval mask if available; score against the filtered
+        # surface. Missing trainer/eval rows are a contract failure
+        # (RuntimeError), not a silent drop.
+        if clean_active:
+            mask, _stats = mask_bundle
+            clean_preds = run_dir / f"predictions_{mode}_clean.jsonl"
+            _apply_clean_eval_mask_to_predictions(preds, clean_preds, mask)
+            scoring_input = clean_preds
+        else:
+            scoring_input = preds
+
         metrics_out = run_dir / f"metrics_{mode}.json"
         ci_out = run_dir / f"ci_report_{mode}.json"
         subprocess.run(
             [sys.executable, "-m", "eval.score_risk",
-             "--predictions", str(preds), "--out", str(metrics_out)],
+             "--predictions", str(scoring_input), "--out", str(metrics_out)],
             check=True, cwd=str(REPO_ROOT),
         )
         subprocess.run(
             [sys.executable, "-m", "eval.bootstrap_ci",
-             "--predictions", str(preds), "--out", str(ci_out)],
+             "--predictions", str(scoring_input), "--out", str(ci_out)],
             check=True, cwd=str(REPO_ROOT),
         )
         with metrics_out.open() as f:
@@ -574,7 +751,7 @@ def run_post_processing(run_dir: Path, eval_modes: list[str]) -> dict:
         with ci_out.open() as f:
             per_mode_ci[mode] = json.load(f)
 
-    # 3. Aggregate per-mode CI files into a single canonical ci_report.json
+    # 4. Aggregate per-mode CI files into a single canonical ci_report.json
     if per_mode_ci:
         agg_path = run_dir / "ci_report.json"
         tmp = agg_path.with_suffix(agg_path.suffix + ".tmp")
@@ -619,9 +796,18 @@ def update_sweep_state() -> None:
     # segment still matters in fraud/risk).
     # Tiebreaker: mean HN-FPR (minimize).
     # AUC is now a sanity gate (must not regress badly), not the objective.
+    #
+    # Review 019 Blocker 2: only metric_version >= 2 rows are eligible
+    # for current_best/top_3. v1 rows (pre-this-commit) used the
+    # sklearn-cliff HN-FPR on a leaky eval; their numbers are not
+    # directly comparable with v2's tie-aware HN-FPR on a clean eval.
+    # Historical v1 rows remain in experiments.jsonl for audit but are
+    # filtered out of the ranking surface.
     xattn_completed = [
         h for h in completed
-        if h.get("arm") == "xattn" and h.get("hn_fpr_worst_stripped") is not None
+        if h.get("arm") == "xattn"
+        and h.get("hn_fpr_worst_stripped") is not None
+        and h.get("metric_version", 1) >= 2
     ]
     # sort ascending on (worst, mean) — both lower-is-better
     ranked = sorted(
@@ -655,8 +841,30 @@ def update_sweep_state() -> None:
 
     halt_reason = check_halt_conditions()
 
+    # Review 019 Blocker 2 / Medium 5: schema_version=2 documents that
+    # ranking now happens on tie-aware exact-target HN-FPR computed
+    # against a leakage-filtered eval surface. The metric_definition
+    # block describes the contract so an agent reading sweep_state.yaml
+    # cold can verify what number it's optimizing.
+    metric_definition = {
+        "name": "hn_fpr_worst_stripped",
+        "lower_is_better": True,
+        "metric_version": 2,
+        "description": (
+            "Tie-aware exact-target legit-FPR worst-family hard-negative FPR "
+            "at decision threshold 1% (review 018/019). Per-resample "
+            "(threshold, alpha) interpolation hits target_fpr = 0.01 exactly; "
+            "tied-at-threshold legit/hn rows are weighted by alpha. Evaluated "
+            "against the clean-eval surface (predictions_<mode>_clean.jsonl), "
+            "which removes train/eval text-hash and structured_events-hash "
+            "overlap before scoring. Tiebreaker: hn_fpr_mean_stripped. AUC is "
+            "a sanity gate, not the objective."
+        ),
+    }
+
     state = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "metric_definition": metric_definition,
         "n_completed": len(completed),
         "n_failed": len(failed),
         "n_xattn_runs": len(xattn_completed),
@@ -773,7 +981,7 @@ def _do_run(config_path: Path) -> int:
         # 6. Post-process (parse log, score predictions, bootstrap CI)
         eval_modes = (cfg.get("eval") or {}).get("modes", ["stripped", "opaque", "full"])
         try:
-            per_mode_metrics = run_post_processing(run_dir, eval_modes)
+            per_mode_metrics = run_post_processing(run_dir, eval_modes, cfg=cfg)
         except subprocess.CalledProcessError as e:
             print(f"POST-RUN PARSING FAILED: {e}", file=sys.stderr)
             return 6
@@ -790,15 +998,23 @@ def _do_run(config_path: Path) -> int:
         # HN-FPR fields the auto-loop ranks/halts on, plus per-family
         # detail + CI bounds for Day-3 audit. AUC stays in the row as a
         # sanity field; it's no longer the comparison metric.
+        # Review 019 Blocker 2: rows from this commit forward carry
+        # metric_version: 2 (tie-aware HN-FPR, computed against a
+        # leakage-filtered eval surface). Clean-eval mask diagnostics
+        # are recorded so downstream audit can verify AC1b.
         hn_point = (stripped.get("hard_negative_fpr_at_decision_threshold_1pct") or {})
         hn_ci = _load_hn_ci(run_dir, mode="stripped")  # may be None pre-bootstrap
+        clean_eval_fields = _read_clean_eval_record_fields(run_dir)
         record = {
             "exp_id": cfg["exp_id"],
             "arm": cfg["arm"],
             "config_hash": config_hash,
             "config_summary": _summarize_config(cfg),
             "status": train_metrics.get("status", "ok"),
-            # Primary comparison metric (review 013 finding #1)
+            # Review 019 Blocker 2: rows from this commit forward are
+            # ranked under the tie-aware exact-target HN-FPR metric.
+            "metric_version": 2,
+            # Primary comparison metric (review 013 finding #1, now tie-aware).
             "hn_fpr_worst_stripped": _hn_worst(hn_point),
             "hn_fpr_mean_stripped":  _hn_mean(hn_point),
             "hn_fpr_per_family_stripped": hn_point,  # full dict for Day-3
@@ -817,6 +1033,7 @@ def _do_run(config_path: Path) -> int:
             "wall_clock_min": wall_clock_min,
             "timestamp": dt.datetime.utcnow().isoformat() + "Z",
             "leakage_clean": _check_leakage_clean(run_dir),
+            **clean_eval_fields,
         }
         append_experiment(record)
         update_sweep_state()
@@ -864,12 +1081,64 @@ def _do_mark_failed(run_dir: Path) -> int:
     return 0
 
 
+def _do_dry_run_validate_clean_eval(config_path: Path) -> int:
+    """AC1b validation harness (review 019 Blocker 2).
+
+    Load a config, resolve its data.train_path + data.eval_fast_path,
+    run compute_clean_eval_mask, and print the would-be clean_eval_n /
+    clean_eval_dropped values. Does NOT launch the trainer, does NOT
+    write to experiments.jsonl, does NOT touch sweep_state.yaml. Lets
+    the validator confirm a new x-attn config would record the right
+    clean-eval surface size before any GPU time is spent.
+    """
+    from eval.leakage_checks import compute_clean_eval_mask
+
+    if not config_path.exists():
+        print(f"config not found: {config_path}", file=sys.stderr)
+        return 1
+    cfg = yaml.safe_load(config_path.read_text())
+    if not isinstance(cfg, dict):
+        print("config must be a YAML mapping", file=sys.stderr)
+        return 1
+
+    paths = _resolve_clean_eval_paths(cfg)
+    if paths is None:
+        print(
+            "config does not expose resolvable data.train_path + "
+            "data.eval_fast_path (each must contain train.jsonl / eval.jsonl). "
+            "No clean-eval mask can be applied.",
+            file=sys.stderr,
+        )
+        return 1
+    train_jsonl, eval_jsonl = paths
+
+    mask, stats = compute_clean_eval_mask(train_jsonl, eval_jsonl)
+    print(f"train: {train_jsonl}")
+    print(f"eval:  {eval_jsonl}")
+    print(f"clean_eval_n={stats['n_kept']}")
+    print(f"clean_eval_dropped={stats['n_dropped']}")
+    print(f"clean_eval_mask_text_overlap={stats['n_text_overlap']}")
+    print(f"clean_eval_mask_events_overlap={stats['n_events_overlap']}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("config", nargs="?", type=Path, help="path to config.yaml")
     parser.add_argument("--mark-failed", type=Path, help="mark a run directory as failed")
     parser.add_argument("--halt-check", action="store_true", help="check halt conditions, exit 0 if clear")
+    parser.add_argument(
+        "--dry-run-validate-clean-eval",
+        type=Path,
+        metavar="CONFIG",
+        help="resolve the config's train/eval paths, compute the clean-eval "
+             "mask, and print clean_eval_n / clean_eval_dropped without "
+             "launching the trainer (review 019 Blocker 2 / AC1b)",
+    )
     args = parser.parse_args()
+
+    if args.dry_run_validate_clean_eval is not None:
+        return _do_dry_run_validate_clean_eval(args.dry_run_validate_clean_eval)
 
     if args.mark_failed is not None:
         return _do_mark_failed(args.mark_failed)
@@ -883,7 +1152,7 @@ def main() -> int:
         return 3
 
     if args.config is None:
-        parser.error("config path is required (or use --mark-failed / --halt-check)")
+        parser.error("config path is required (or use --mark-failed / --halt-check / --dry-run-validate-clean-eval)")
     return _do_run(args.config)
 
 

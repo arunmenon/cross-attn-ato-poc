@@ -1,0 +1,108 @@
+Review comments 018 -- follow-up
+Date: 2026-05-17
+Subject: Disposition of findings in 018-day-2-baseline-findings/comments.txt
+Author: scaffold maintainer
+
+Original review file:
+    review/018-day-2-baseline-findings/comments.txt
+
+Response trail:
+    review/019-plan-review-baseline-correction/comments.txt (Codex plan-level review)
+    review/019-plan-review-baseline-correction/followup.txt (plan revision)
+    .claude/tasks/baseline-evaluation-correction.md (the plan executed)
+    review/020-baseline-correction-implementation/comments.txt (Codex implementation review)
+    review/020-baseline-correction-implementation/followup.txt (fix pass)
+
+Review 018's three findings could not be addressed by a single commit
+because they required a coordinated cross-file change (metric +
+data-cleanness + launcher + writeup). The response was a /team-plan +
+/team-build execution that closed all three. Per-finding disposition:
+
+----------------------------------------------------------------------
+1. Blocker: 10.7% train/eval text-hash leakage, 533/5000 rows.
+
+Status: FIXED.
+
+Action: Two-prong:
+  - eval/leakage_checks.py: NEW `compute_clean_eval_mask(train_path,
+    eval_path)` returns boolean mask filtering eval rows whose
+    text-hash OR structured_events_hash collides with any train row.
+    Verified: drops exactly 534 (533 text + 1 events-only) on the
+    current dataset.
+  - scripts/run_next_experiment.py: post-processing applies the mask
+    BEFORE scoring (review 019 Blocker 2 + review 020 Blocker
+    extended to fail-closed). Every metric_version=2 row scores
+    against the leakage-filtered eval.
+  - scripts/rescore_baselines.py: NEW script that re-scores existing
+    baseline + smoke predictions through the mask, appending
+    *_v2 rows to experiments.jsonl.
+  - data/gen/build_dataset.py: NEW class-balanced disjoint
+    stratification + post-narration cross-split dedup gates for
+    FUTURE regenerations (Gate A + Gate B). No regeneration triggered.
+
+Verify:
+    python3 -m eval.leakage_checks --train-eval-overlap data/train_llm_narrated
+    # n_kept=4466 n_dropped=534 n_text_overlap=533 n_events_overlap=534
+
+----------------------------------------------------------------------
+2. Blocker: sklearn threshold-cliff makes HN-FPR unfair across models.
+
+Status: FIXED.
+
+Action:
+  - eval/score_risk.py: NEW tie-aware exact-target legit-FPR formula
+    with FRACTIONAL `need = target_fpr * n_legit` (review 019
+    Blocker 1; rounding fails the 1e-4 acceptance on small clean-eval
+    n_legit). hard_negative_fpr accepts (threshold, alpha) and weights
+    tied-at-threshold rows by alpha so achieved_fpr == target exactly.
+  - eval/bootstrap_ci.py: bootstrap_hard_negative_fpr per-resample
+    recomputes (threshold, alpha). CI bundle gains tie_fraction,
+    achieved_fpr, threshold, alpha (point + mean across resamples).
+  - The corrected leaderboard (clean eval, tie-aware):
+    structured_as_text 0.0507 > xattn_smoke 0.0537 > lora_text 0.0701
+    > event_only 0.0730. Reverses the apparent ranking from sklearn's
+    cliff.
+
+Verify:
+    python3 -m eval.score_risk --selftest
+    python3 -m eval.bootstrap_ci --selftest
+
+----------------------------------------------------------------------
+3. High: synthetic data label-deterministic in observed support.
+
+Status: ACKNOWLEDGED + DOCUMENTED (not "fixed" — synthetic-distribution
+property, by design per PLAN.md "Synthetic data design" §).
+
+Action:
+  - scripts/diagnose_data_overlap.py: NEW read-only diagnostic
+    reproducing 4661/5000 skeleton overlap, H(label | skeleton) = 0
+    across 2,454 unique skeletons. Bucket-combination space saturation
+    per family (e.g., hn_large_purchase: 12 unique skeletons / 1.7M
+    theoretical space = 0.0007%) explains why the narrator cache
+    produces near-100% text-level overlap once warm.
+  - docs/day-2-data-diagnostic.md: written up as a finding, not a bug.
+  - docs/day-2-results.md: Day-3 framing reset — "POC deliverable is
+    methodology + findings, not 'x-attn wins'." The decisive question
+    for Task #37 onward: "Can full x-attn beat structured_as_text
+    (5.07%) with non-overlapping CIs?"
+
+Pipeline guardrail for future regenerations:
+  - data/gen/build_dataset.py Gate A (class-balanced disjoint
+    stratification by structured_events_hash) prevents the same
+    skeleton from landing in both splits going forward. Cross-split
+    leakage cannot reappear; intra-split duplication remains (an
+    unavoidable consequence of finite bucket-space saturation,
+    surfaced as a diagnostic in build_summary.json).
+
+----------------------------------------------------------------------
+Commit anchors
+
+This review's findings landed across the /team-build implementation
+(closing-commit candidate: the "baseline correction" commit on main
+after this followup is committed). The matching implementation
+artifacts are described in detail in:
+    review/020-baseline-correction-implementation/comments.txt
+    review/020-baseline-correction-implementation/followup.txt
+    .claude/tasks/baseline-evaluation-correction.md
+
+Status: all three findings closed.

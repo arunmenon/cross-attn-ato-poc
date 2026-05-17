@@ -27,6 +27,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 import sys
@@ -229,6 +230,175 @@ def journey_to_record(journey: Journey, narrative: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Disjoint stratification (review 018/019 — Task #6)
+# ---------------------------------------------------------------------------
+#
+# Naive random stratified split on text-leveled records re-introduces the
+# train/eval leakage Codex flagged in review 018: the narrator caches by
+# structured_events_hash, so two rows sharing a structured-events skeleton
+# can end up in opposite splits and the LLM emits identical text for both.
+# Worse, even unique narratives can't fix the underlying structural leakage:
+# H(label | skeleton) = 0 across 2,454 skeletons in the current dataset, so
+# sharing a skeleton across splits is in itself a leak.
+#
+# Gate A (this section): assign rows to splits by (journey_family,
+# structured_events_hash) GROUPS. Whole groups are atomic. Within each
+# family, walk groups in deterministic hash-sort order and fill the eval
+# bucket until the family's eval fraction meets the requested target.
+# Class balance is best-effort: families with very few unique skeletons
+# (e.g., hn_large_purchase had ~12 groups for ~2,481 rows in the current
+# dataset) WILL drift from eval_frac. That drift is the cost of
+# disjointness and is reported in build_summary.json.
+#
+# Gate B (post-narration): hash row text; assert no duplicate text within
+# or across splits. If Gate A worked, Gate B never fires.
+
+
+def _events_hash(structured_events) -> str:
+    """SHA-256 of canonical JSON of the structured events list.
+
+    Matches eval/leakage_checks.py._events_hash exactly so the
+    pre-narration grouping and the post-hoc clean-eval mask agree on what
+    "same skeleton" means.
+    """
+    return hashlib.sha256(
+        json.dumps(structured_events, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def assign_disjoint_splits(
+    journeys: list[Journey],
+    eval_frac: float,
+) -> tuple[list[int], list[int], dict]:
+    """Class-balanced disjoint split by (journey_family, events_hash).
+
+    Returns:
+      train_idx, eval_idx: lists of indices into `journeys`.
+      stats: dict with per-family and overall split diagnostics, including
+        n_overlap_structured_events (MUST be 0 — asserted by caller).
+    """
+    # Group rows by (family, events_hash). Each group's id is the events
+    # hash; family is carried alongside so we walk groups per-family.
+    groups_by_family: dict[str, dict[str, list[int]]] = {}
+    for i, j in enumerate(journeys):
+        fam = j.journey_family
+        eh = _events_hash(j.events)
+        groups_by_family.setdefault(fam, {}).setdefault(eh, []).append(i)
+
+    train_idx: list[int] = []
+    eval_idx: list[int] = []
+    train_events_by_fam: dict[str, set[str]] = {}
+    eval_events_by_fam: dict[str, set[str]] = {}
+    per_family: dict[str, dict] = {}
+
+    for fam, fam_groups in groups_by_family.items():
+        fam_total = sum(len(rows) for rows in fam_groups.values())
+        # Deterministic walk order: sort by group hash hex.
+        ordered_hashes = sorted(fam_groups.keys())
+        fam_eval = 0
+        fam_train = 0
+        train_events_by_fam[fam] = set()
+        eval_events_by_fam[fam] = set()
+        for eh in ordered_hashes:
+            rows = fam_groups[eh]
+            # Whole-group assignment: send to eval until family's eval
+            # fraction meets the requested target, then everything else
+            # goes to train.
+            current_frac = (fam_eval / fam_total) if fam_total > 0 else 0.0
+            if current_frac < eval_frac:
+                eval_idx.extend(rows)
+                fam_eval += len(rows)
+                eval_events_by_fam[fam].add(eh)
+            else:
+                train_idx.extend(rows)
+                fam_train += len(rows)
+                train_events_by_fam[fam].add(eh)
+        per_family[fam] = {
+            "n_total": fam_total,
+            "n_train": fam_train,
+            "n_eval": fam_eval,
+            "actual_eval_frac": (fam_eval / fam_total) if fam_total > 0 else 0.0,
+            "n_unique_structured_events_train": len(train_events_by_fam[fam]),
+            "n_unique_structured_events_eval": len(eval_events_by_fam[fam]),
+        }
+
+    train_events_all: set[str] = set()
+    for s in train_events_by_fam.values():
+        train_events_all |= s
+    eval_events_all: set[str] = set()
+    for s in eval_events_by_fam.values():
+        eval_events_all |= s
+    overlap = train_events_all & eval_events_all
+
+    n_total = len(journeys)
+    stats = {
+        "requested_eval_frac": eval_frac,
+        "actual_eval_frac_overall": (len(eval_idx) / n_total) if n_total > 0 else 0.0,
+        "n_train": len(train_idx),
+        "n_eval": len(eval_idx),
+        "per_family": per_family,
+        "n_unique_structured_events_train": len(train_events_all),
+        "n_unique_structured_events_eval": len(eval_events_all),
+        "n_overlap_structured_events": len(overlap),
+    }
+    return train_idx, eval_idx, stats
+
+
+def assert_no_text_overlap(train_records: list[dict], eval_records: list[dict]) -> dict:
+    """Gate B: post-narration text-hash CROSS-SPLIT dedup invariant.
+
+    Hashes each row's text; raises AssertionError if any text appears in
+    BOTH splits (the leak Gate A is designed to prevent). Intra-split
+    duplicate text is NOT an error — it is the natural consequence of
+    finite skeleton spaces (e.g., `hn_large_purchase` has only ~12
+    unique skeletons for 2,481 rows in the 25k dataset; diagnostic T3)
+    combined with the narrator caching by `(events_hash, model, temp)`.
+    Intra-split dup counts are reported in the returned stats so callers
+    can sanity-check them, but they are not a failure.
+
+    If Gate A (pre-narration grouping) is correct, cross-split duplicates
+    cannot exist — same-skeleton rows are confined to one split by
+    construction. The assertion exists as a defense-in-depth check, not
+    as a fix path.
+    """
+    train_hashes: dict[str, int] = {}
+    for r in train_records:
+        h = _text_hash(r["text"])
+        train_hashes[h] = train_hashes.get(h, 0) + 1
+    eval_hashes: dict[str, int] = {}
+    for r in eval_records:
+        h = _text_hash(r["text"])
+        eval_hashes[h] = eval_hashes.get(h, 0) + 1
+
+    cross = set(train_hashes.keys()) & set(eval_hashes.keys())
+    assert not cross, (
+        f"Gate B failed: {len(cross)} text hash(es) appear in both train and eval. "
+        f"Example: {next(iter(cross))[:16]}..."
+    )
+
+    n_intra_dup_train = sum(c for c in train_hashes.values() if c > 1) - sum(
+        1 for c in train_hashes.values() if c > 1
+    )
+    n_intra_dup_eval = sum(c for c in eval_hashes.values() if c > 1) - sum(
+        1 for c in eval_hashes.values() if c > 1
+    )
+    return {
+        "n_unique_text_train": len(train_hashes),
+        "n_unique_text_eval": len(eval_hashes),
+        "n_overlap_text": 0,
+        # Diagnostic only: rows beyond the first whose text matches an
+        # earlier row in the same split. Expected to be > 0 when the
+        # skeleton space is saturated (review 018/019, diagnostic T3).
+        "n_intra_split_text_duplicates_train": n_intra_dup_train,
+        "n_intra_split_text_duplicates_eval": n_intra_dup_eval,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main build loop
 # ---------------------------------------------------------------------------
 
@@ -244,6 +414,7 @@ def build(
     llm_model: str | None = None,
     concurrency: int = 8,
     narrator_temp: float = 0.3,
+    enforce_disjointness: bool = True,
 ) -> dict:
     """Build a dataset of `n` journeys into `out_dir`. Returns a summary dict.
 
@@ -311,19 +482,48 @@ def build(
     else:
         raise ValueError(f"unknown mode: {mode!r}")
 
+    # Pre-narration disjoint stratification (Gate A). The split decision
+    # is made on the journeys BEFORE narration so identical structured
+    # skeletons can never end up in opposite splits (the narrator caches
+    # by events_hash and would emit identical text — review 018).
+    # Whole (journey_family, events_hash) groups are atomic.
+    split_stats: dict | None = None
+    train_idx: list[int] = []
+    eval_idx: list[int] = []
+    if eval_frac > 0 and enforce_disjointness:
+        train_idx, eval_idx, split_stats = assign_disjoint_splits(journeys, eval_frac)
+        assert split_stats["n_overlap_structured_events"] == 0, (
+            "Gate A failed: structured_events_hash overlap between train and "
+            f"eval = {split_stats['n_overlap_structured_events']}"
+        )
+
     # Phase 3: assemble records.
     for j, narrative in zip(journeys, narratives):
         j.narrative = narrative
         records.append(journey_to_record(j, narrative))
 
     # ----- write JSONL (atomic) -----
-    if eval_frac > 0:
-        # Stratify by journey_family
+    if eval_frac > 0 and enforce_disjointness:
+        # Gate A already decided the split; materialize records into
+        # train/eval by the precomputed index lists.
+        train: list[dict] = [records[i] for i in train_idx]
+        eval_split: list[dict] = [records[i] for i in eval_idx]
+        # Gate B: post-narration text-hash dedup invariant. Fires only if
+        # Gate A's pre-narration grouping was inconsistent with the
+        # narrator's cache keying — should never happen on healthy code.
+        text_stats = assert_no_text_overlap(train, eval_split)
+        split_stats.update(text_stats)
+        _write_jsonl(out_dir / "train.jsonl", train)
+        _write_jsonl(out_dir / "eval.jsonl", eval_split)
+    elif eval_frac > 0:
+        # Legacy random stratified split (--enforce-disjointness=False).
+        # Available for ablation only; reintroduces the leakage Codex
+        # documented in review 018.
         by_family: dict[str, list[dict]] = {}
         for r in records:
             by_family.setdefault(r["journey_family"], []).append(r)
-        train: list[dict] = []
-        eval_split: list[dict] = []
+        train = []
+        eval_split = []
         for fam, rows in by_family.items():
             rng.shuffle(rows)
             k = max(1, int(round(len(rows) * eval_frac)))
@@ -357,7 +557,11 @@ def build(
         "leakage_audit_n": len(audit_sample),
         "leakage_audit_failures": 0,
         "duration_seconds": round(time.time() - t_start, 2),
+        "enforce_disjointness": enforce_disjointness,
     }
+    if split_stats is not None:
+        # Gate A/B diagnostics (review 019 Medium 4 invariants).
+        summary["disjoint_split"] = split_stats
     if tracker is not None:
         summary["llm_cost"] = tracker.summary()
 
@@ -412,6 +616,25 @@ def main() -> int:
                              "formatting). Bump to ~0.5 when generating EVAL data "
                              "to reduce narrator-style correlation with train. "
                              "Retries always escalate to max(0.7, base+0.4).")
+    parser.add_argument(
+        "--enforce-disjointness",
+        dest="enforce_disjointness",
+        action="store_true",
+        default=True,
+        help="Gate A (pre-narration class-balanced disjoint stratification by "
+             "(journey_family, structured_events_hash)) + Gate B (post-narration "
+             "text-hash dedup assertion). Default ON. Required for "
+             "leakage-free splits — review 018/019. Only takes effect when "
+             "--eval-frac > 0.",
+    )
+    parser.add_argument(
+        "--no-enforce-disjointness",
+        dest="enforce_disjointness",
+        action="store_false",
+        help="Disable Gate A/B and fall back to the legacy random stratified "
+             "split. Ablation use only — reintroduces the leakage Codex "
+             "documented in review 018.",
+    )
     args = parser.parse_args()
 
     if args.llm_provider is not None:
@@ -428,6 +651,7 @@ def main() -> int:
         llm_model=args.llm_model,
         concurrency=args.concurrency,
         narrator_temp=args.narrator_temp,
+        enforce_disjointness=args.enforce_disjointness,
     )
     print(json.dumps(summary, indent=2))
     return 0

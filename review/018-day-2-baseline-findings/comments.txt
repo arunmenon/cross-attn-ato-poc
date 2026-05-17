@@ -1,0 +1,365 @@
+Review: 018-day-2-baseline-findings
+Date: 2026-05-17
+Repo root: /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+Code diff base: HEAD b078dd0
+Scope: Runtime-artifact review of Day-2 baseline findings. No code diff reviewed.
+Primary brief: review/_pending-codex-baselines-findings.md
+
+Reviewed files and artifacts
+============================
+
+Local source files:
+- review/CODEX_PROMPT.md
+- review/README.md
+- review/_pending-codex-baselines-findings.md
+- PLAN.md
+- data/gen/build_dataset.py
+- data/gen/narrative_generator.py
+- eval/score_risk.py
+- eval/bootstrap_ci.py
+- src/model/encoders/small_transformer.py
+- src/train/train_event_only_classifier.py
+
+Local runtime artifacts:
+- data/train_llm_narrated/train.jsonl
+- data/train_llm_narrated/eval.jsonl
+- data/train_llm_narrated/build_summary.json
+
+Pod runtime artifacts:
+- /workspace/cross_attn_ato_poc/src/auto_research/experiments.jsonl
+- /workspace/cross_attn_ato_poc/src/auto_research/runs/exp_baseline_event_only/predictions_stripped.jsonl
+- /workspace/cross_attn_ato_poc/src/auto_research/runs/exp_baseline_lora_text/predictions_stripped.jsonl
+- /workspace/cross_attn_ato_poc/src/auto_research/runs/exp_baseline_structured_as_text/predictions_stripped.jsonl
+- /workspace/cross_attn_ato_poc/data/train_llm_narrated/train.jsonl
+- /workspace/cross_attn_ato_poc/data/train_llm_narrated/eval.jsonl
+
+Summary
+=======
+
+The three Day-2 findings are real. The current baseline leaderboard should not be used to decide Task #37 or to seed the auto-loop as-is.
+
+Finding 1 is confirmed exactly: 533 of 5000 eval rows, 10.7%, have identical narrative text in train. The duplicates are concentrated in clean and hard-negative families, including 35.3% of hn_large_purchase and 16.4% of hn_account_recovery.
+
+Finding 2 is confirmed, with one important correction. The current "largest achievable FPR <= 1%" rule measures event_only at 0.114% legit FPR while measuring the LM baselines near 1%. That is not a fair operating-point comparison. However, a naive percentile-threshold replacement using score >= threshold is also wrong when there are many tied scores; it moves event_only to 4.14% legit FPR and overstates the reversal. A tie-aware exact-1%-FPR metric still reverses the leaderboard, but less dramatically.
+
+Finding 3 is confirmed. The current synthetic structured-event distribution is label-deterministic in the observed split. That is not a code bug, but it limits the claim the experiment can support unless documented and evaluated carefully.
+
+Bottom line: fix this holistically before Task #37. Do not patch only leakage, and do not patch only the metric. The next valid step is: clean the eval view, replace the headline metric with a tie-aware low-FPR hard-negative metric, re-score existing baseline predictions, update sweep-state ranking to the corrected metric, and document the synthetic-data limitation.
+
+Verification run
+================
+
+1. Runtime artifact presence on pod
+
+Command:
+
+ssh -p 13284 -i ~/.ssh/id_ed25519 -o BatchMode=yes -o ConnectTimeout=10 root@107.150.186.62 'cd /workspace/cross_attn_ato_poc && pwd && find src/auto_research/runs -name "predictions_*.jsonl" | sort && wc -l src/auto_research/experiments.jsonl data/train_llm_narrated/train.jsonl data/train_llm_narrated/eval.jsonl'
+
+Output:
+
+/workspace/cross_attn_ato_poc
+src/auto_research/runs/exp_baseline_event_only/predictions_full.jsonl
+src/auto_research/runs/exp_baseline_event_only/predictions_opaque.jsonl
+src/auto_research/runs/exp_baseline_event_only/predictions_stripped.jsonl
+src/auto_research/runs/exp_baseline_lora_text/predictions_full.jsonl
+src/auto_research/runs/exp_baseline_lora_text/predictions_opaque.jsonl
+src/auto_research/runs/exp_baseline_lora_text/predictions_stripped.jsonl
+src/auto_research/runs/exp_baseline_structured_as_text/predictions_full.jsonl
+src/auto_research/runs/exp_baseline_structured_as_text/predictions_opaque.jsonl
+src/auto_research/runs/exp_baseline_structured_as_text/predictions_stripped.jsonl
+src/auto_research/runs/exp_xa_smoke_001/predictions_full.jsonl
+src/auto_research/runs/exp_xa_smoke_001/predictions_opaque.jsonl
+src/auto_research/runs/exp_xa_smoke_001/predictions_stripped.jsonl
+       6 src/auto_research/experiments.jsonl
+   20000 data/train_llm_narrated/train.jsonl
+    5000 data/train_llm_narrated/eval.jsonl
+   25006 total
+
+2. Train/eval text-hash leakage and synthetic-structure diagnostics
+
+Command:
+
+python3 - <<'PY'
+import collections, hashlib, json, math
+from pathlib import Path
+
+root = Path("data/train_llm_narrated")
+train = [json.loads(line) for line in (root / "train.jsonl").open()]
+eval_rows = [json.loads(line) for line in (root / "eval.jsonl").open()]
+
+def text_hash(row):
+    return hashlib.sha256(row["narrative"].encode()).hexdigest()
+
+def events_hash(row):
+    return hashlib.sha256(json.dumps(row["structured_events"], sort_keys=True).encode()).hexdigest()
+
+def skeleton(row):
+    parts = []
+    for event in row["structured_events"]:
+        parts.append((event.get("event_type"), tuple(sorted(event.get("features", {}).items()))))
+    return tuple(parts)
+
+train_text = {text_hash(row) for row in train}
+train_events = {events_hash(row) for row in train}
+train_skeleton = {skeleton(row) for row in train}
+
+leaked = [row for row in eval_rows if text_hash(row) in train_text]
+print(f"text_leak={len(leaked)}/{len(eval_rows)} ({len(leaked)/len(eval_rows):.1%})")
+for family, rows in sorted(collections.defaultdict(list, ((row["journey_family"], []) for row in eval_rows)).items()):
+    pass
+by_family = collections.defaultdict(lambda: [0, 0])
+for row in eval_rows:
+    fam = row["journey_family"]
+    by_family[fam][1] += 1
+    if text_hash(row) in train_text:
+        by_family[fam][0] += 1
+for fam, (n, d) in sorted(by_family.items()):
+    print(f"{fam:22s} {n:3d}/{d:<4d} {n/d:5.1%}")
+
+print(f"leaked rows with same structured_events: {sum(events_hash(row) in train_events for row in leaked)} / {len(leaked)}")
+print(f"all eval same structured_events: {sum(events_hash(row) in train_events for row in eval_rows)} / {len(eval_rows)}")
+print(f"all eval same bucket sequence: {sum(skeleton(row) in train_skeleton for row in eval_rows)} / {len(eval_rows)}")
+
+label_by_family = collections.defaultdict(collections.Counter)
+label_by_skeleton = collections.defaultdict(collections.Counter)
+for row in train + eval_rows:
+    label_by_family[row["journey_family"]][row["label"]] += 1
+    label_by_skeleton[skeleton(row)][row["label"]] += 1
+
+print("label by journey_family entropy:")
+for fam, counter in sorted(label_by_family.items()):
+    total = sum(counter.values())
+    entropy = -sum((count / total) * math.log2(count / total) for count in counter.values())
+    print(f"{fam:22s} n={total:5d} labels={dict(counter)} H={entropy:.3f}")
+
+total = sum(sum(counter.values()) for counter in label_by_skeleton.values())
+conditional_entropy = 0.0
+ambiguous = 0
+for counter in label_by_skeleton.values():
+    subtotal = sum(counter.values())
+    entropy = -sum((count / subtotal) * math.log2(count / subtotal) for count in counter.values())
+    conditional_entropy += (subtotal / total) * entropy
+    if len(counter) > 1:
+        ambiguous += 1
+print(f"H(label | bucket/event skeleton)={conditional_entropy:.4f} bits over {len(label_by_skeleton)} skeletons")
+print(f"ambiguous skeletons with both labels: {ambiguous}")
+PY
+
+Output:
+
+text_leak=533/5000 (10.7%)
+clean                   267/2019  13.2%
+cred_stuff                0/296    0.0%
+hn_account_recovery      80/488   16.4%
+hn_large_purchase       175/496   35.3%
+hn_travel                 0/498    0.0%
+malware_rat              11/296    3.7%
+mule_chain                0/307    0.0%
+phish_takeover            0/308    0.0%
+sim_swap                  0/292    0.0%
+leaked rows with same structured_events: 533 / 533
+all eval same structured_events: 534 / 5000
+all eval same bucket sequence: 4661 / 5000
+label by journey_family entropy:
+clean                  n=10093 labels={'legit': 10093} H=0.000
+cred_stuff             n= 1480 labels={'fraud': 1480} H=0.000
+hn_account_recovery    n= 2442 labels={'legit': 2442} H=0.000
+hn_large_purchase      n= 2481 labels={'legit': 2481} H=0.000
+hn_travel              n= 2489 labels={'legit': 2489} H=0.000
+malware_rat            n= 1480 labels={'fraud': 1480} H=0.000
+mule_chain             n= 1535 labels={'fraud': 1535} H=0.000
+phish_takeover         n= 1541 labels={'fraud': 1541} H=0.000
+sim_swap               n= 1459 labels={'fraud': 1459} H=0.000
+H(label | bucket/event skeleton)=0.0000 bits over 2454 skeletons
+ambiguous skeletons with both labels: 0
+
+3. Reproduced launcher metric and operating-point cliffs
+
+Command:
+
+ssh -p 13284 -i ~/.ssh/id_ed25519 -o BatchMode=yes -o ConnectTimeout=10 root@107.150.186.62 'cd /workspace/cross_attn_ato_poc && /workspace/.venv/bin/python <metric-reproduction-script>'
+
+Output:
+
+## event_only
+n=5000 auc=1.000000
+sklearn threshold=-8.484375 achieved_fpr=0.001143 hn={'hn_account_recovery': 0.00819672131147541, 'hn_large_purchase': 0.0, 'hn_travel': 0.0} worst=0.008197 mean=0.002732
+roc around idx:
+  i=67 fpr=0.000000 tpr=1.000000 thr=8.750000
+  i=68 fpr=0.000286 tpr=1.000000 thr=-7.062500
+  i=69 fpr=0.001143 tpr=1.000000 thr=-8.484375
+  i=70 fpr=0.041417 tpr=1.000000 thr=-9.937500
+  i=71 fpr=0.081120 tpr=1.000000 thr=-10.656250
+  i=72 fpr=0.081691 tpr=1.000000 thr=-10.781250
+  i=73 fpr=0.082262 tpr=1.000000 thr=-11.031250
+percentile threshold=-9.937500 achieved_fpr=0.041417 k=36/3501 hn={'hn_account_recovery': 0.29713114754098363, 'hn_large_purchase': 0.0, 'hn_travel': 0.0} worst=0.297131 mean=0.099044
+
+## lora_text
+n=5000 auc=1.000000
+sklearn threshold=-3.625000 achieved_fpr=0.009712 hn={'hn_account_recovery': 0.012295081967213115, 'hn_large_purchase': 0.05443548387096774, 'hn_travel': 0.002008032128514056} worst=0.054435 mean=0.022913
+roc around idx:
+  i=116 fpr=0.008569 tpr=1.000000 thr=-3.250000
+  i=117 fpr=0.009140 tpr=1.000000 thr=-3.375000
+  i=118 fpr=0.009712 tpr=1.000000 thr=-3.625000
+  i=119 fpr=0.011711 tpr=1.000000 thr=-3.750000
+  i=120 fpr=0.012853 tpr=1.000000 thr=-3.875000
+  i=121 fpr=0.013425 tpr=1.000000 thr=-4.000000
+  i=122 fpr=0.016281 tpr=1.000000 thr=-4.125000
+percentile threshold=-3.750000 achieved_fpr=0.011711 k=36/3501 hn={'hn_account_recovery': 0.01639344262295082, 'hn_large_purchase': 0.0625, 'hn_travel': 0.004016064257028112} worst=0.062500 mean=0.027637
+
+## structured_as_text
+n=5000 auc=1.000000
+sklearn threshold=-9.625000 achieved_fpr=0.009140 hn={'hn_account_recovery': 0.045081967213114756, 'hn_large_purchase': 0.018145161290322582, 'hn_travel': 0.002008032128514056} worst=0.045082 mean=0.021745
+roc around idx:
+  i=107 fpr=0.005998 tpr=1.000000 thr=-9.250000
+  i=108 fpr=0.007712 tpr=1.000000 thr=-9.500000
+  i=109 fpr=0.009140 tpr=1.000000 thr=-9.625000
+  i=110 fpr=0.011425 tpr=1.000000 thr=-9.750000
+  i=111 fpr=0.013139 tpr=1.000000 thr=-10.000000
+  i=112 fpr=0.014567 tpr=1.000000 thr=-10.125000
+  i=113 fpr=0.016852 tpr=1.000000 thr=-10.250000
+percentile threshold=-9.750000 achieved_fpr=0.011425 k=36/3501 hn={'hn_account_recovery': 0.05737704918032787, 'hn_large_purchase': 0.02217741935483871, 'hn_travel': 0.002008032128514056} worst=0.057377 mean=0.027188
+
+4. Tie-adjusted exact 1% legit-FPR comparison
+
+Command:
+
+ssh -p 13284 -i ~/.ssh/id_ed25519 -o BatchMode=yes -o ConnectTimeout=10 root@107.150.186.62 'cd /workspace/cross_attn_ato_poc && /workspace/.venv/bin/python <tie-adjusted-script>'
+
+Output:
+
+event_only: t=-9.937500 legit_above=4 legit_equal=141 alpha=0.2199 hn={'hn_account_recovery': 0.07174180327868852, 'hn_large_purchase': 0.0, 'hn_travel': 0.0} worst=0.071742
+lora_text: t=-3.750000 legit_above=34 legit_equal=7 alpha=0.1443 hn={'hn_account_recovery': 0.012886416861826698, 'hn_large_purchase': 0.055599078341013825, 'hn_travel': 0.0022977624784853695} worst=0.055599
+structured_as_text: t=-9.750000 legit_above=32 legit_equal=8 alpha=0.3762 hn={'hn_account_recovery': 0.04970799180327869, 'hn_large_purchase': 0.019662298387096773, 'hn_travel': 0.002008032128514056} worst=0.049708
+
+5. Clean-eval re-score after dropping train/eval text leaks
+
+Command:
+
+ssh -p 13284 -i ~/.ssh/id_ed25519 -o BatchMode=yes -o ConnectTimeout=10 root@107.150.186.62 'cd /workspace/cross_attn_ato_poc && /workspace/.venv/bin/python <clean-eval-rescore-script>'
+
+Output:
+
+clean_eval=4467/5000 removed=533
+event_only: sklearn ach=0.0013 worst=0.0098 hn={'hn_account_recovery': 0.00980392156862745, 'hn_large_purchase': 0.0, 'hn_travel': 0.0}; tie_adj worst=0.0730 hn={'hn_account_recovery': 0.07301470588235294, 'hn_large_purchase': 0.0, 'hn_travel': 0.0}
+lora_text: sklearn ach=0.0087 worst=0.0654 hn={'hn_account_recovery': 0.00980392156862745, 'hn_large_purchase': 0.06542056074766354, 'hn_travel': 0.002008032128514056}; tie_adj worst=0.0701 hn={'hn_account_recovery': 0.013519607843137256, 'hn_large_purchase': 0.07014330218068535, 'hn_travel': 0.0035301204819277103}
+structured_as_text: sklearn ach=0.0091 worst=0.0466 hn={'hn_account_recovery': 0.04656862745098039, 'hn_large_purchase': 0.024922118380062305, 'hn_travel': 0.0}; tie_adj worst=0.0507 hn={'hn_account_recovery': 0.05067156862745098, 'hn_large_purchase': 0.026660436137071652, 'hn_travel': 0.001120481927710843}
+
+Findings
+========
+
+1. CONFIRMS Day-2 finding: train/eval leakage invalidates the current eval rows
+
+Severity: Blocker
+
+The reported 10.7% text-hash leakage is correct. I reproduced 533 leaked eval rows out of 5000. The concentration by family is also correct: hn_large_purchase has 175 leaked rows out of 496, and hn_account_recovery has 80 out of 488.
+
+This is a data-pipeline design issue, not a trainer bug. data/gen/build_dataset.py narrates the full generated set before the train/eval split, and data/gen/narrative_generator.py caches narratives by structured-event hash plus narrator settings. When the generator emits the same structured event sequence more than once, the cached narrative can be reused, and then the later stratified split can place identical narrative text on both sides.
+
+The evidence is stronger than exact text duplication: every leaked row also has the same structured_events hash as a train row, and 4661 of 5000 eval rows share a bucket/event skeleton with a train row. The exact-text leak is the immediate Blocker. The skeleton overlap is a broader synthetic-distribution limitation to document and optionally diagnose later.
+
+Recommendation: do not proceed with the current eval leaderboard. Build a clean eval view now by dropping rows whose narrative text hash or structured_events hash exists in train, then re-score existing predictions with the same row mask. For future generated datasets, fix this before narration by assigning disjoint structured examples to train/eval before LLM calls, or by enforcing structured-event disjointness before the cache can be reused across splits. A split-aware cache key alone would remove exact duplicated text but would not remove duplicated structured examples.
+
+2. CONFIRMS Day-2 finding: current HN-FPR@1% implementation compares models at different operating points
+
+Severity: Blocker
+
+eval/score_risk.py currently uses sklearn's roc_curve and chooses the largest achievable FPR <= target. That is a faithful implementation of the old spec, but the old spec is incomplete for cliffed score distributions.
+
+The current launcher-reported comparison is not apples-to-apples:
+
+- event_only is measured at achieved legit FPR 0.001143, not 0.01.
+- lora_text is measured at achieved legit FPR 0.009712.
+- structured_as_text is measured at achieved legit FPR 0.009140.
+
+That means event_only receives a much stricter legit threshold than the LM baselines. Its headline HN-FPR looks better partly because the operating point is different.
+
+However, the proposed "top 1% of legit percentile threshold" needs a tighter definition before implementation. If implemented naively as score >= threshold, tied scores make event_only jump to achieved FPR 0.041417 and hn_account_recovery 0.2971. That is not an exact 1% operating point either; it is the same discretization problem in a different form.
+
+The tie-adjusted exact-1% calculation gives a more defensible picture:
+
+- event_only worst HN-FPR: 0.0717
+- lora_text worst HN-FPR: 0.0556
+- structured_as_text worst HN-FPR: 0.0497
+
+After removing exact text leaks, the tie-adjusted comparison remains materially changed:
+
+- event_only worst HN-FPR: 0.0730
+- lora_text worst HN-FPR: 0.0701
+- structured_as_text worst HN-FPR: 0.0507
+
+Recommendation: replace the headline metric before any x-attn ranking. Use a tie-aware exact-target legit-FPR HN metric, or a deterministic fixed-rank metric with explicit tie handling. Record target FPR, effective FPR, threshold, number above threshold, number tied at threshold, and tie fraction. Also add a secondary low-FPR hard-negative curve or fixed-quantile table at 0.1%, 0.5%, and 1.0% legit FPR. Do not use plain fraud-vs-legit partial AUC as the only replacement; ordinary AUC is already saturated and does not directly answer the hard-negative false-positive question.
+
+3. CONFIRMS Day-2 finding: synthetic structured data is label-deterministic in the observed split
+
+Severity: High
+
+This is not a code bug. It is a property of the synthetic distribution and feature design.
+
+PLAN.md deliberately puts fraud signal into bucketed derived-feature tokens. That design is reasonable for a privacy-safe POC, and PLAN.md explicitly treats "event-only classifier wins" as a valid possible finding. But the observed dataset is stronger than merely "event-only friendly": in the generated train+eval data, journey_family alone has zero label entropy, and the bucket/event skeleton has zero conditional label entropy across 2454 observed skeletons.
+
+That means the event-only classifier is not discovering a subtle behavioral signal. It is learning a compact categorical mapping over a structured stream where the label is deterministic in the observed support. The LM baselines read the same distribution through a harder interface, so direct event-only performance is not a clean proxy for "the LM is unnecessary in the real domain."
+
+Recommendation: do not try to "fix" this during Day 2 by regenerating everything. Document it as a POC finding and constrain the Day-3 claim: results answer the question for this synthetic structured-feature distribution, not for real PayPal ATO data in general. If the project extends past this POC, add adversarial hard negatives with overlapping bucket patterns, mixed-label journey families, and a held-out skeleton split so event-only must generalize rather than memorize deterministic feature templates.
+
+4. MISSES issue: the proposed percentile-threshold fix can introduce a second metric artifact unless ties are first-class
+
+Severity: High
+
+The pending brief correctly says the current sklearn threshold rule is unfair. It then proposes percentile-of-legit threshold as the cheap fix. That is directionally right, but incomplete.
+
+The baseline artifacts show event_only has large tied score masses. At the percentile boundary, using score >= threshold includes all tied rows and overshoots 1% legit FPR by more than 4x. Using score > threshold undershoots. Either choice is arbitrary unless the metric defines how to allocate tied scores.
+
+This must be fixed in the same pass as the headline metric. Otherwise the code may stop using sklearn's cliff and replace it with a different threshold cliff.
+
+Recommendation: implement tie-aware expected counts, deterministic ranking with stable tie breaks, or report both lower and upper bounds for tied thresholds. My preferred path is tie-aware expected counts because it preserves the exact target FPR and can be bootstrapped.
+
+5. MISSES issue: exact text dedup is necessary but not sufficient for future validity
+
+Severity: Medium
+
+Filtering the 533 exact narrative leaks is necessary for the current Day-2 leaderboard. It is not enough to claim robust generalization because 4661 of 5000 eval rows share the same bucket/event skeleton with a train row.
+
+This does not need to block Task #37 if it is documented. The immediate comparison can proceed after exact text and structured-event duplicates are filtered. But the final writeup should clearly separate:
+
+- clean-eval corrected leaderboard, which removes exact duplicate train/eval examples;
+- synthetic-support limitation, where train and eval still share many feature templates;
+- future extension work, where a harder split holds out skeletons or introduces mixed-label templates.
+
+Recommendation: add a diagnostic count for text hash, structured_events hash, and bucket/event skeleton overlap. Fail on text/structured hash overlap for primary eval. Warn on skeleton overlap unless a future "held-out skeleton" eval set is explicitly created.
+
+Holistic fix path
+=================
+
+Recommended order before Task #37:
+
+1. Freeze the current leaderboard as stale.
+
+Do not use the existing event_only, lora_text, and structured_as_text rows in src/auto_research/experiments.jsonl for ranking or auto-loop comparison without correction.
+
+2. Create a clean eval mask/view.
+
+Drop eval rows whose narrative text hash or structured_events hash exists in train. Apply the same row mask to existing baseline predictions and re-score. This is cheap because no retraining is required. The exact text leak removes 533 rows; structured-event hash removes 534 rows in this dataset.
+
+3. Replace the primary metric.
+
+Use tie-aware exact-target legit-FPR hard-negative FPR as the headline metric. The existing "largest achievable FPR <= target" rule is not fair across score distributions. A naive inclusive percentile threshold is also not fair with ties.
+
+4. Update bootstrap and launcher state together.
+
+The metric change has to land in eval/score_risk.py, eval/bootstrap_ci.py, scripts/run_next_experiment.py, and the sweep-state ranking fields. The auto-loop should optimize the corrected worst-family hard-negative FPR, not saturated AUC and not the old sklearn-threshold HN-FPR.
+
+5. Re-score existing baselines before training x-attn.
+
+Once the corrected metric and clean eval mask exist, re-score the existing predictions. Then decide Task #37 from the corrected table. The model weights do not need to change for this correction.
+
+6. Document the synthetic-data property as an experimental result.
+
+Do not hide the fact that the current structured distribution is label-deterministic. It is a real POC finding. The final claim should be about whether cross-attention beats simpler interfaces on this synthetic benchmark after leakage and metric artifacts are removed.
+
+Bottom line
+===========
+
+The Day-2 findings are valid and material. The right fix is not an isolated data patch or an isolated metric patch. It is a coordinated correction: clean eval view, tie-aware low-FPR hard-negative metric, bootstrap/launcher/schema update, baseline re-score, and explicit documentation of the synthetic-data limitation.
+
+Until that lands, Task #37 and the auto-loop would be optimizing against an invalid comparison surface.

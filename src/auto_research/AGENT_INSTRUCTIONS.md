@@ -82,7 +82,7 @@ If any of 1-2 fail (NaN or zero gate), pause and report — do not blindly conti
 
 ### Round 2 — Perturb top-2 along gate_init (2-4 experiments, Day 3 AM)
 
-After Round 1, identify the top-2 configs by worst-family hard-negative FPR (`hn_fpr_worst_stripped` in `experiments.jsonl`, lower is better; tiebreak on `hn_fpr_mean_stripped`). AUC-stripped is a sanity gate, not the ranking metric — it saturates at 1.0 on every variant (review 013 finding #1). For each top-2 config, propose a perturbation:
+After Round 1, identify the top-2 configs by worst-family hard-negative FPR (`hn_fpr_worst_stripped` in `experiments.jsonl`, lower is better; tiebreak on `hn_fpr_mean_stripped`). AUC-stripped is a sanity gate, not the ranking metric — it saturates at 1.0 on every variant (review 013 finding #1). All rows from this commit forward carry `metric_version: 2` with tie-aware exact-target HN-FPR computed against a leakage-filtered eval (text-hash + structured_events-hash overlap removed). Older rows are visible in history but excluded from `current_best`. The launcher applies the clean-eval mask automatically; agent configs do not need to set anything special. For each top-2 config, propose a perturbation:
 - Top-1: same config but `gate_init=zero` (probe initialization sensitivity).
 - Top-2: same config but `gate_init=zero`.
 - If either round-2 result beats its round-1 sibling by non-overlapping CI, that becomes a new top-1 candidate.

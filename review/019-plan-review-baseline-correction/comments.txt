@@ -1,0 +1,213 @@
+Review comments 019
+Date: 2026-05-17
+Subject: Plan review for baseline evaluation correction before build dispatch
+
+Reviewed file(s):
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/_pending-codex-plan-review.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/.claude/tasks/baseline-evaluation-correction.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/018-day-2-baseline-findings/comments.txt
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/eval/score_risk.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/eval/bootstrap_ci.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/eval/leakage_checks.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/run_next_experiment.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/gen/build_dataset.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/gen/narrative_generator.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/common.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/eval_runner.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/train_xattn.py
+
+Repo root used for comparison:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+Summary:
+The plan is not ready for /build as written. It correctly identifies the three review 018 findings and the right broad fix surfaces, but two load-bearing details are wrong.
+
+First, the tie-aware formula uses round(target_fpr * n_legit); that does not reproduce the exact-target reference numbers and is not actually exact-target when the target count is fractional. Second, the plan re-scores existing baseline predictions with a clean mask, but it does not put that clean mask into the normal launcher post-processing path for future x-attn runs. Task #37 would still get metric_version: 2 while being scored on the leaked eval unless this is fixed before dispatch.
+
+Fix those two Blockers, correct the clean_eval_n inconsistency, and the plan becomes structurally sound.
+
+Verification run:
+
+1. File:line citation audit
+
+Command:
+    python3 - <<'PY'
+    import ast
+    from pathlib import Path
+    checks = [
+        ('eval/score_risk.py', ['recall_at_fpr', 'hard_negative_fpr', 'compute_all']),
+        ('eval/bootstrap_ci.py', ['bootstrap_recall_at_fpr', 'bootstrap_hard_negative_fpr']),
+        ('eval/leakage_checks.py', ['narrative_leakage_scan', 'audit_dataset']),
+        ('scripts/run_next_experiment.py', ['append_experiment', 'update_sweep_state']),
+        ('data/gen/build_dataset.py', ['main']),
+        ('data/gen/narrative_generator.py', ['_journey_cache_key', 'generate_narratives_concurrent', 'generate_narrative']),
+    ]
+    for path, names in checks:
+        tree = ast.parse(Path(path).read_text())
+        found = {node.name: node.lineno for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+        for name in names:
+            print(f'{path}:{found[name]} {name}')
+    PY
+
+Actual output:
+    eval/score_risk.py:47 recall_at_fpr
+    eval/score_risk.py:126 hard_negative_fpr
+    eval/score_risk.py:147 compute_all
+    eval/bootstrap_ci.py:76 bootstrap_recall_at_fpr
+    eval/bootstrap_ci.py:108 bootstrap_hard_negative_fpr
+    eval/leakage_checks.py:102 narrative_leakage_scan
+    eval/leakage_checks.py:137 audit_dataset
+    scripts/run_next_experiment.py:592 append_experiment
+    scripts/run_next_experiment.py:606 update_sweep_state
+    data/gen/build_dataset.py:381 main
+    data/gen/narrative_generator.py:252 _journey_cache_key
+    data/gen/narrative_generator.py:506 generate_narratives_concurrent
+    data/gen/narrative_generator.py:638 generate_narrative
+
+Disposition:
+    PASS. The function anchors in the plan are accurate.
+
+2. Launcher citation and clean-mask path audit
+
+Command:
+    python3 - <<'PY'
+    from pathlib import Path
+    checks = [
+        ('scripts/run_next_experiment.py', 'h.get("hn_fpr_worst_stripped")'),
+        ('scripts/run_next_experiment.py', 'h.get("arm") == "xattn"'),
+        ('scripts/run_next_experiment.py', '"schema_version": 1'),
+        ('scripts/run_next_experiment.py', 'eval.score_risk'),
+    ]
+    for path, needle in checks:
+        for i,line in enumerate(Path(path).read_text().splitlines(), 1):
+            if needle in line:
+                print(f'{path}:{i}: {line.strip()}')
+    PY
+
+Actual output:
+    scripts/run_next_experiment.py:351: h.get("hn_fpr_worst_stripped") for h in xattn_valid_all
+    scripts/run_next_experiment.py:624: if h.get("arm") == "xattn" and h.get("hn_fpr_worst_stripped") is not None
+    scripts/run_next_experiment.py:301: xattn_history = [h for h in history if h.get("arm") == "xattn"]
+    scripts/run_next_experiment.py:624: if h.get("arm") == "xattn" and h.get("hn_fpr_worst_stripped") is not None
+    scripts/run_next_experiment.py:659: "schema_version": 1,
+    scripts/run_next_experiment.py:563: [sys.executable, "-m", "eval.score_risk",
+
+Disposition:
+    PARTIAL. The cited launcher lines are accurate, but run_post_processing still scores raw predictions directly. The plan does not add clean-eval filtering to this normal post-run path.
+
+3. Tie-aware formula check against runtime predictions
+
+Command:
+    ssh -p 13284 -i ~/.ssh/id_ed25519 -o BatchMode=yes -o ConnectTimeout=10 root@107.150.186.62 'cd /workspace/cross_attn_ato_poc && /workspace/.venv/bin/python <tie-check-script>'
+
+Actual output:
+    mask_text_keep 4467 drop 533
+    mask_union_keep 4466 drop 534
+    events_only_drop_indices [3026]
+    event_only full n 5000 legit 3501 need 35 T -9.937500 above 4 equal 141 alpha 0.219858 worst 0.071721 hn {'hn_account_recovery': 0.071721, 'hn_large_purchase': 0.0, 'hn_travel': 0.0}
+    event_only text n 4467 legit 2979 need 30 T -9.937500 above 4 equal 141 alpha 0.184397 worst 0.073529 hn {'hn_account_recovery': 0.073529, 'hn_large_purchase': 0.0, 'hn_travel': 0.0}
+    event_only union n 4466 legit 2979 need 30 T -9.937500 above 4 equal 141 alpha 0.184397 worst 0.073529 hn {'hn_account_recovery': 0.073529, 'hn_large_purchase': 0.0, 'hn_travel': 0.0}
+    lora_text full n 5000 legit 3501 need 35 T -3.750000 above 34 equal 7 alpha 0.142857 worst 0.055588 hn {'hn_account_recovery': 0.012881, 'hn_large_purchase': 0.055588, 'hn_travel': 0.002295}
+    lora_text union n 4466 legit 2979 need 30 T -3.750000 above 26 equal 5 alpha 0.800000 worst 0.070405 hn {'hn_account_recovery': 0.013725, 'hn_large_purchase': 0.070405, 'hn_travel': 0.003614}
+    structured_as_text full n 5000 legit 3501 need 35 T -9.750000 above 32 equal 8 alpha 0.375000 worst 0.049693 hn {'hn_account_recovery': 0.049693, 'hn_large_purchase': 0.019657, 'hn_travel': 0.002008}
+    structured_as_text union n 4466 legit 2979 need 30 T -9.625000 above 27 equal 5 alpha 0.600000 worst 0.050980 hn {'hn_account_recovery': 0.05098, 'hn_large_purchase': 0.026791, 'hn_travel': 0.001205}
+
+Disposition:
+    FAIL. This output uses the plan's round(target_fpr * n_legit) formula. It misses the clean-eval reference targets within the plan's 1e-4 tolerance. Using fractional need = target_fpr * n_legit is what reproduces review 018's exact-target numbers.
+
+Review findings:
+
+1. Blocker: The tie-aware metric formula rounds away the exact target.
+
+Status: OPEN, blocker
+
+Details:
+The plan defines the core metric at .claude/tasks/baseline-evaluation-correction.md:144 as need = round(target_fpr * n_legit). That is not the exact-target metric review 018 recommended. Exact-target legit-FPR needs the fractional expected count, need = target_fpr * n_legit, then alpha = (need - n_above) / n_tied.
+
+The difference is not cosmetic. On the current clean eval, n_legit is 2979, so target_fpr * n_legit is 29.79. The plan rounds that to 30. With the plan formula, event_only clean worst HN-FPR becomes 0.073529, lora_text becomes 0.070405, and structured_as_text becomes 0.050980. The plan's own acceptance criterion at lines 273-276 expects 0.0730, 0.0701, and 0.0507 within 1e-4, so the plan would fail its own validation.
+
+The full-eval numbers mostly hide this because 3501 * 0.01 = 35.01 and rounding to 35 changes little. The clean-eval numbers expose the bug.
+
+Recommendation:
+Change the plan formula everywhere from round(target_fpr * n_legit) to fractional need = target_fpr * n_legit. Define threshold T as a score value where n_above <= need <= n_above + n_tied, then alpha = (need - n_above) / n_tied. Keep n_above and n_tied as integers, but keep need and alpha as floats. Update the self-test requirement to assert the clean reference values with fractional need.
+
+2. Blocker: The plan does not apply the clean-eval mask to new launcher runs.
+
+Status: OPEN, blocker
+
+Details:
+The plan fixes historical rows through scripts/rescore_baselines.py, but Task #37 is a new run. New runs go through scripts/run_next_experiment.py::run_post_processing, which currently invokes eval.score_risk directly on run_dir/predictions_<mode>.jsonl at lines 555-565. The trainers produce those predictions from eval_fast_path, loaded through src/train/common.py and each trainer's eval_ds_path branch. Nothing in Task 5 or Task 7 makes the normal post-run scoring path apply compute_clean_eval_mask.
+
+That contradicts the plan objective at line 17: "update_sweep_state ranks experiments on ... computed against a leakage-filtered eval." It also confirms the maintainer's flagged worry in review/_pending-codex-plan-review.md: Task #37 would receive metric_version: 2 from the launcher while still being scored on the leaked eval.
+
+This is exactly the kind of silent state split review 018 was trying to prevent. Re-scoring baselines is not enough; the corrected surface must be the default surface for every future x-attn row that the auto-loop ranks.
+
+Recommendation:
+Extend the plan so the primary post-processing path applies the clean eval mask for all future runs before score_risk.py and bootstrap_ci.py are called. Two acceptable designs:
+
+1. Make run_post_processing aware of train_path/eval_fast_path, materialize filtered predictions to predictions_<mode>_clean.jsonl, and score/bootstrap those for metric_version 2.
+2. Materialize a clean eval dataset directory once, update Task #37 and launcher config validation so future runs use that eval_fast_path, and record clean_eval_n/clean_eval_dropped on every new row.
+
+Whichever route the maintainer chooses, make it explicit in Task 5 or add a new task before rescore-baselines. Add an acceptance criterion that a newly launched x-attn row is scored against 4466 clean eval rows, not just that historical baselines were re-scored.
+
+3. High: The planned v2 row schema has an impossible clean_eval_n value.
+
+Status: OPEN, blocker-adjacent
+
+Details:
+Task 7 says the new row schema includes clean_eval_n: 4467 and clean_eval_dropped: 534 at .claude/tasks/baseline-evaluation-correction.md:225. Those cannot both be true for a 5000-row eval set. If the clean mask drops the union of text-hash and structured-events-hash overlaps, then keep count is 4466 and dropped count is 534. The verification confirms:
+
+mask_text_keep 4467 drop 533
+mask_union_keep 4466 drop 534
+
+Acceptance criterion 1 uses 4466 rows after dropping 534, and acceptance criterion 2 requires dropping 534. Task 7's row schema is the inconsistent line.
+
+Recommendation:
+Change clean_eval_n: 4467 to clean_eval_n: 4466. Also have rescore_baselines derive clean_eval_n and clean_eval_dropped from the mask instead of hard-coding either number. Keep the explicit 534 assertion only in tests for the current dataset.
+
+4. Medium: The future-regeneration split plan can miss class-balance targets.
+
+Status: OPEN, plan clarity
+
+Details:
+Task 6 assigns each unique structured_events_hash to train or eval by deterministic hash bucket before narration, then says to "Stratify within each split by journey_family for class balance" at lines 205-207. Once the split assignment is fixed by hash bucket, there is no later stratification step that can move examples across train/eval without breaking the disjointness constraint.
+
+This does not block the immediate correction, because the current dataset is not regenerated. It does matter for the guardrail's future behavior. If duplicate-heavy skeletons are uneven by journey family, a raw hash modulo split can drift from the requested eval_frac and family balance.
+
+Recommendation:
+Change Task 6 to group rows by structured_events_hash within each journey_family and select whole groups into eval until the row-level eval_frac target is approximately met for that family. Preserve the invariant that a structured_events_hash never appears in both splits. Add build_summary fields for requested_eval_frac, actual_eval_frac, and per-family split counts.
+
+5. Medium: Task 9 is already the current pre-review artifact and should not be in the executable build DAG.
+
+Status: OPEN, plan hygiene
+
+Details:
+The plan lists review/_pending-codex-plan-review.md as a new file owned by diagnostic-writer and includes codex-plan-review-brief in the validate-all dependency list. But this review is already being run from that brief, and the brief says it is "written BEFORE /build dispatches." Keeping it as a future delegated task is confusing and creates a false dependency after the artifact has already served its purpose.
+
+Recommendation:
+Remove Task 9 from the implementation DAG and from acceptance criterion 10, or mark it as pre-build/currently complete and not dispatched to diagnostic-writer. The maintainer can keep the brief file as record material, but it should not be part of the build team's work.
+
+6. Medium: "No GPU training ran" needs a mechanical validation method.
+
+Status: OPEN, acceptance-criterion clarity
+
+Details:
+Acceptance criterion 13 says no GPU training ran during the change, but the validation commands do not define how to prove it. The statement is important because the plan's premise is re-score-only correction, but a validator cannot confirm it from the current checklist alone.
+
+Recommendation:
+Make AC13 mechanically checkable. For example: capture the pre-change experiments.jsonl row count and allowed new exp_id suffixes, then assert every new row has parent_exp_id and metric_version: 2 and no new non-v2 training run appeared. Also require no new run directories except v2 metric files under existing baseline/smoke directories, or explicitly list any allowed generated files.
+
+7. Informational: The dependency graph is mostly sound after the Blockers are fixed.
+
+Status: OPEN, informational
+
+Details:
+Task 4 reasonably depends on Task 1. Task 5 does not strictly need bootstrap implementation to edit schema fields, but waiting for Task 4 is a conservative sequencing choice because the launcher row schema reads CI bundle shape. Task 7 does need Task 5 if it appends rows and then calls update_sweep_state. Task 6 does not strictly need Task 3; that dependency is rationale-only, not technical.
+
+The only material missing dependency is from the clean-eval integration finding above: launcher post-processing for future runs must depend on clean-eval-mask before Task #37 can proceed.
+
+Recommendation:
+Keep the current DAG shape, but add the future-run clean-eval integration edge. Optionally allow Task 6 to run in parallel with Task 3 if wall-clock matters.
+
+Bottom line:
+Do not dispatch /build from this plan yet. Fix the tie formula to use fractional target counts, integrate clean-eval filtering into the normal launcher path for new runs, and correct clean_eval_n to 4466. After those changes, the remaining issues are plan hygiene and validation clarity rather than blockers.

@@ -15,6 +15,8 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import collections
+import hashlib
 import json
 import re
 import sys
@@ -192,17 +194,187 @@ def audit_dataset(
 
 
 # ---------------------------------------------------------------------------
+# Train/eval text-hash + structured-events-hash leakage (review 018/019)
+# ---------------------------------------------------------------------------
+
+def _text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _events_hash(structured_events) -> str:
+    return hashlib.sha256(
+        json.dumps(structured_events, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _iter_jsonl(path: Path):
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            yield json.loads(line)
+
+
+def compute_clean_eval_mask(
+    train_path: Path,
+    eval_path: Path,
+) -> tuple[list[bool], dict]:
+    """Return (mask, stats) for cleaning the eval set against train leakage.
+
+    Each eval row passes iff BOTH:
+      - SHA-256(text) NOT IN train text hashes
+      - SHA-256(json.dumps(structured_events, sort_keys=True)) NOT IN train events hashes
+
+    Both `text` and `structured_events` are required on every row.
+
+    Returns:
+      mask: list[bool] of length n_eval; mask[i] == True means the i-th eval
+            row survives (keep it).
+      stats: {
+        "n_train": int,
+        "n_eval": int,
+        "n_kept": int,
+        "n_dropped": int,
+        "n_text_overlap": int,           # text-hash hits (incl. ones also in events)
+        "n_events_overlap": int,         # events-hash hits (incl. ones also in text)
+        "n_text_only": int,              # text-hash hit but NOT events-hash hit
+        "n_events_only": int,            # events-hash hit but NOT text-hash hit
+        "n_both": int,                   # text-hash AND events-hash hit
+        "n_unique_train_text_hashes": int,
+        "n_unique_train_events_hashes": int,
+        "per_family": {
+          "<journey_family>": {
+            "n_eval": int, "n_dropped": int, "n_kept": int,
+            "n_text_only": int, "n_events_only": int, "n_both": int,
+          }, ...
+        }
+      }
+
+    Hard contract (review 018, current dataset): n_dropped == 534
+    (533 both, 1 events-only). The CLI mode prints the per-family table.
+    """
+    train_text = set()
+    train_events = set()
+    n_train = 0
+    for r in _iter_jsonl(train_path):
+        train_text.add(_text_hash(r["text"]))
+        train_events.add(_events_hash(r["structured_events"]))
+        n_train += 1
+
+    mask: list[bool] = []
+    per_family: dict[str, dict[str, int]] = collections.defaultdict(
+        lambda: {"n_eval": 0, "n_dropped": 0, "n_kept": 0,
+                 "n_text_only": 0, "n_events_only": 0, "n_both": 0}
+    )
+    n_eval = 0
+    n_text_overlap = 0
+    n_events_overlap = 0
+    n_text_only = 0
+    n_events_only = 0
+    n_both = 0
+
+    for r in _iter_jsonl(eval_path):
+        n_eval += 1
+        fam = r.get("journey_family", "<unknown>")
+        per_family[fam]["n_eval"] += 1
+
+        text_hit = _text_hash(r["text"]) in train_text
+        ev_hit = _events_hash(r["structured_events"]) in train_events
+
+        if text_hit and ev_hit:
+            n_both += 1
+            n_text_overlap += 1
+            n_events_overlap += 1
+            per_family[fam]["n_both"] += 1
+        elif text_hit:
+            n_text_only += 1
+            n_text_overlap += 1
+            per_family[fam]["n_text_only"] += 1
+        elif ev_hit:
+            n_events_only += 1
+            n_events_overlap += 1
+            per_family[fam]["n_events_only"] += 1
+
+        passes = not (text_hit or ev_hit)
+        mask.append(passes)
+        if passes:
+            per_family[fam]["n_kept"] += 1
+        else:
+            per_family[fam]["n_dropped"] += 1
+
+    n_dropped = sum(1 for m in mask if not m)
+    n_kept = n_eval - n_dropped
+
+    stats = {
+        "n_train": n_train,
+        "n_eval": n_eval,
+        "n_kept": n_kept,
+        "n_dropped": n_dropped,
+        "n_text_overlap": n_text_overlap,
+        "n_events_overlap": n_events_overlap,
+        "n_text_only": n_text_only,
+        "n_events_only": n_events_only,
+        "n_both": n_both,
+        "n_unique_train_text_hashes": len(train_text),
+        "n_unique_train_events_hashes": len(train_events),
+        "per_family": dict(per_family),
+    }
+    return mask, stats
+
+
+def _print_overlap_diagnostic(train_path: Path, eval_path: Path) -> None:
+    mask, stats = compute_clean_eval_mask(train_path, eval_path)
+    print(f"# train/eval overlap diagnostic")
+    print(f"# train: {train_path}")
+    print(f"# eval:  {eval_path}")
+    print(f"n_train={stats['n_train']}  n_eval={stats['n_eval']}")
+    print(f"n_kept={stats['n_kept']}  n_dropped={stats['n_dropped']}")
+    print(
+        f"n_text_overlap={stats['n_text_overlap']}  "
+        f"n_events_overlap={stats['n_events_overlap']}  "
+        f"n_both={stats['n_both']}  "
+        f"n_text_only={stats['n_text_only']}  "
+        f"n_events_only={stats['n_events_only']}"
+    )
+    print(f"n_unique_train_text_hashes={stats['n_unique_train_text_hashes']}")
+    print(f"n_unique_train_events_hashes={stats['n_unique_train_events_hashes']}")
+    print()
+    print(f"{'family':<28} {'n_eval':>7} {'drop':>6} {'keep':>6} {'both':>6} {'txt_o':>6} {'ev_o':>6}")
+    for fam in sorted(stats["per_family"]):
+        f = stats["per_family"][fam]
+        print(
+            f"{fam:<28} {f['n_eval']:>7} {f['n_dropped']:>6} {f['n_kept']:>6} "
+            f"{f['n_both']:>6} {f['n_text_only']:>6} {f['n_events_only']:>6}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def main() -> int:
     p = argparse.ArgumentParser()
-    p.add_argument("--dataset", required=True, type=Path, help="dataset directory of jsonl files")
+    p.add_argument("--dataset", type=Path, help="dataset directory of jsonl files (for --narrative-scan audit)")
     p.add_argument("--modes", default="stripped,opaque,full", help="comma-separated eval modes to audit")
     p.add_argument("--narrative-scan", action="store_true", help="run narrative-leakage scan too")
     p.add_argument("--sample-n", type=int, default=None, help="cap examples scanned (for fast smoke tests)")
     p.add_argument("--strict", action="store_true", help="exit non-zero on any failure")
+    p.add_argument(
+        "--train-eval-overlap",
+        type=Path,
+        help="path to dataset dir with train.jsonl + eval.jsonl; "
+             "prints text-hash + structured_events-hash overlap diagnostic",
+    )
     args = p.parse_args()
+
+    if args.train_eval_overlap is not None:
+        d = args.train_eval_overlap
+        _print_overlap_diagnostic(d / "train.jsonl", d / "eval.jsonl")
+        return 0
+
+    if args.dataset is None:
+        p.error("--dataset is required (or pass --train-eval-overlap DIR)")
 
     modes = [m.strip() for m in args.modes.split(",")]
     summary = audit_dataset(args.dataset, modes, narrative_scan=args.narrative_scan, sample_n=args.sample_n)

@@ -136,18 +136,20 @@ Both entries persisted in `src/auto_research/experiments.jsonl`.
 
 ---
 
-## Day 2 — Architecture + first sweep batch
+## Day 2 — Baselines + evaluation correction
 
-*Filled in by the agent at end of Day 2.*
+**Status: COMPLETE.** Three baselines (`event_only`, `lora_text`, `structured_as_text`) plus a 100-step `xattn` smoke landed; a Codex pre-Task-#37 review surfaced three findings (leakage, sklearn-cliff metric, label-deterministic synthetic data) that invalidated the apparent leaderboard. A re-score-only correction (no GPU training) produced the corrected `*_v2` rows in `src/auto_research/experiments.jsonl`. Full narrative + per-finding evidence: **`docs/day-2-results.md`**; per-family data-overlap diagnostic: **`docs/day-2-data-diagnostic.md`**.
 
-### Architecture surgery friction
-*Where did `qwen_xattn_wrapper.py` integration cost time?*
+Corrected leaderboard (worst-family HN-FPR @ 1% legit FPR, stripped mode, tie-aware exact-target metric, clean eval n=4466 after dropping 534 leaked rows; 1000-resample 95% CI):
 
-### Baselines summary
-*CPT-light, LoRA-text, structured-as-text, event-only classifier — metrics with CIs.*
+| Rank | Arm | Worst HN-FPR (point, 95% CI) |
+|------|-----|------------------------------|
+| 1 | `structured_as_text` | **0.05067** [0.04078, 0.06349] |
+| 2 | `xattn` (100-step smoke) | **0.05366** [0.04277, 0.06536] |
+| 3 | `lora_text` | **0.07014** [0.05635, 0.08468] |
+| 4 | `event_only` | **0.07301** [0.06667, 0.07989] |
 
-### Sweep round-1 results
-*First 4-6 experiments, leader, gates story.*
+All baseline CIs overlap except `structured_as_text` ↔ `event_only` (gap 0.0032). Day-3's sharp x-attn question is: can a fully-trained Task #37 cross-attention model beat `structured_as_text` (5.07%) with **non-overlapping** CIs on this synthetic distribution? Either answer is a deliverable finding. See `docs/day-2-results.md` §5.
 
 ---
 

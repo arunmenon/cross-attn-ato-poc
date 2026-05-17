@@ -1,0 +1,280 @@
+Review comments 019 -- follow-up
+Date: 2026-05-17
+Subject: Disposition of findings in 019-plan-review-baseline-correction/comments.txt
+Author: scaffold maintainer (team lead, plan revision)
+
+Original review file:
+    review/019-plan-review-baseline-correction/comments.txt
+Plan under review:
+    .claude/tasks/baseline-evaluation-correction.md
+
+Plan revision baseline:
+    initial version (committed to .claude/tasks/baseline-evaluation-correction.md)
+Plan revision target:
+    same file, edited in place to address all 6 findings
+
+Codex returned 2 Blockers + 1 High + 3 Mediums. All findings are
+accepted as legitimate. Each is addressed in the plan revision below.
+No code has changed; this is a plan-document revision before /build
+dispatch.
+
+----------------------------------------------------------------------
+1. Blocker: The tie-aware metric formula rounds away the exact target.
+
+Status: FIXED in plan.
+
+Action: Plan Task 1 ("metric-score-risk") rewritten. The formula
+description in the original plan used `need = round(target_fpr *
+n_legit)`. Per Codex's verification run, with `n_legit = 2979`
+(clean eval), this rounds 29.79 -> 30, yielding `event_only clean
+worst = 0.073529` instead of the 0.0730 reference value. The plan's
+own acceptance criterion AC1 requires reproduction within 1e-4, which
+the rounded formula fails.
+
+The revised Task 1 specifies:
+  - `need = target_fpr * n_legit` (FLOAT — explicit "do not round").
+  - `alpha = (need - n_above) / n_tied` when `n_tied > 0 and need >
+    n_above`, else `alpha = 0.0`.
+  - Worked example for event_only clean: `n_legit = 2979`, `need =
+    29.79`, `T = -9.9375`, `n_above = 4`, `n_tied = 141`,
+    `alpha = (29.79 - 4) / 141 = 0.18293...`, reproducing
+    `event_only clean worst = 0.0730` within 1e-4.
+
+Verify (post-implementation):
+    python3 -m eval.score_risk --selftest
+    # Plus the worked-example assertions in AC1.
+
+----------------------------------------------------------------------
+2. Blocker: The plan does not apply the clean-eval mask to new launcher runs.
+
+Status: FIXED in plan.
+
+Action: Plan Task 5 ("launcher-schema") rewritten into three sub-parts:
+  - 5a: Schema bump + ranking (existing scope).
+  - 5b (NEW): Clean-eval surface for ALL future runs. Extends
+    `run_post_processing` to apply `compute_clean_eval_mask` against
+    `train_path` + `eval_fast_path` BEFORE invoking `score_risk.py`
+    and `bootstrap_ci.py`. Materializes
+    `predictions_<mode>_clean.jsonl` in the run dir; scoring consumes
+    the clean file. New record fields: `clean_eval_n`,
+    `clean_eval_dropped`, `clean_eval_mask_text_overlap`,
+    `clean_eval_mask_events_overlap`. Validator confirms via AC1b.
+  - 5c: AGENT_INSTRUCTIONS.md note (expanded from 1-line to cover
+    auto-application of the mask).
+
+Codex's design recommendation #1 (apply mask in
+`run_post_processing`) selected over design #2 (materialize separate
+clean dataset directory). Rationale: design #1 keeps the source of
+truth in the launcher code, doesn't require maintaining two parallel
+dataset directories, and makes the cleaning explicit per-run for
+verification.
+
+Task 5's `Depends On` list expanded to include `clean-eval-mask`
+(Task 2) since 5b needs the mask function. New dependency edge added.
+
+A new acceptance criterion (AC1b) requires dry-run validation that a
+newly-launched x-attn config records `clean_eval_n == 4466` and
+`clean_eval_dropped == 534`.
+
+Verify (post-implementation):
+    python3 scripts/run_next_experiment.py --dry-run-validate-clean-eval \
+        src/auto_research/runs/exp_baseline_event_only/config.yaml
+    # Expected: clean_eval_n=4466, clean_eval_dropped=534
+
+----------------------------------------------------------------------
+3. High: The planned v2 row schema has an impossible clean_eval_n value.
+
+Status: FIXED in plan.
+
+Action: Plan Task 7 row schema changed:
+  - OLD: `clean_eval_n: 4467, clean_eval_dropped: 534` (mathematically
+    impossible on a 5000-row eval set).
+  - NEW: `clean_eval_n` and `clean_eval_dropped` are BOTH derived from
+    the mask output at re-score time. For the current dataset this
+    yields `clean_eval_n = 4466` and `clean_eval_dropped = 534`
+    (union of text-hash + structured_events-hash overlap; Codex's
+    verification confirmed: `mask_text_keep 4467 drop 533` +
+    `mask_union_keep 4466 drop 534`).
+  - The plan's text now explicitly says "derived from the mask, NOT
+    hard-coded" with the rationale that hard-coding either value
+    risks future dataset evolution drifting the numbers without the
+    schema noticing.
+
+AC5 also updated: `clean_eval_n` (== 4466 for the current dataset,
+NOT 4467), `clean_eval_dropped` (== 534).
+
+Verify (post-implementation):
+    grep "clean_eval_n" src/auto_research/experiments.jsonl
+    # Expected: all v2 rows show clean_eval_n=4466
+
+----------------------------------------------------------------------
+4. Medium: The future-regeneration split plan can miss class-balance targets.
+
+Status: FIXED in plan.
+
+Action: Plan Task 6 rewritten. The original "hash[:2] mod N" approach
+locked the split assignment before within-family stratification, so
+class balance per `journey_family` could drift from the requested
+`eval_frac`.
+
+The revised gate uses **class-balanced disjoint stratification**:
+  1. Compute `structured_events_hash` per row.
+  2. Group rows by `(journey_family, structured_events_hash)`.
+  3. For each `journey_family`, walk groups in deterministic order
+     (sorted by group hash). Assign each WHOLE GROUP to eval until
+     the family's eval-row-count / family-total reaches `eval_frac`;
+     remaining groups go to train.
+  4. Invariant preserved: a `structured_events_hash` never appears
+     in both splits (groups are atomic).
+  5. `build_summary.json` gains: `requested_eval_frac`,
+     `actual_eval_frac_overall`, per-family
+     `{actual_eval_frac, n_train, n_eval}`,
+     `n_unique_structured_events_train`,
+     `n_unique_structured_events_eval`,
+     `n_overlap_structured_events: 0` (invariant check).
+
+AC6 updated to reference the new approach and the build_summary
+additions.
+
+Verify (post-implementation, requires a regeneration which is
+explicitly OUT of scope for this plan):
+    # Future regeneration only:
+    python3 data/gen/build_dataset.py --n 1000 --enforce-disjointness
+    cat data/<output>/build_summary.json
+    # Expected: n_overlap_structured_events: 0;
+    # actual_eval_frac_overall ≈ requested_eval_frac within 1%
+
+----------------------------------------------------------------------
+5. Medium: Task 9 is already the current pre-review artifact and should not be in the executable build DAG.
+
+Status: FIXED in plan.
+
+Action: Plan Task 9 ("Codex plan-review brief") removed from the
+build DAG. Replaced with a placeholder note indicating the brief is
+pre-build record material, written by the team lead BEFORE /build
+dispatched (this very review 019 was triggered from that brief).
+
+The file ownership table updated: `review/_pending-codex-plan-
+review.md` is now owned by "team lead (NOT a build agent)" rather
+than diagnostic-writer.
+
+Task 10 (validate-all) `Depends On` list updated: removed
+`codex-plan-review-brief` from dependencies (it's not a build task).
+
+AC10 ("review/_pending-codex-plan-review.md exists") removed from
+the acceptance criteria list. The acceptance criteria renumbered
+accordingly (now 13 items, was 14).
+
+Verify (post-revision):
+    grep -A1 "### 9" .claude/tasks/baseline-evaluation-correction.md
+    # Expected: shows "REMOVED from build DAG (pre-build artifact,
+    # already complete)" instead of a delegated task.
+
+----------------------------------------------------------------------
+6. Medium: "No GPU training ran" needs a mechanical validation method.
+
+Status: FIXED in plan.
+
+Action: AC13 ("No GPU training ran during this change") replaced
+with three mechanically-verifiable sub-criteria (renumbered to AC12
+after Task 9 / AC10 removal):
+
+  - Pre-change snapshot: validator runs
+    `cp src/auto_research/experiments.jsonl /tmp/exp.before` at the
+    moment /build dispatches, recording line count and the set of
+    exp_ids.
+  - Post-change check: every line in experiments.jsonl beyond the
+    snapshot must have `metric_version: 2` AND `parent_exp_id`
+    referencing a pre-existing row. No new exp_ids without `_v2`
+    suffix.
+  - No new directories under `src/auto_research/runs/` beyond
+    pre-change. New files within existing run dirs limited to:
+    `metrics_v2_<mode>.json`, `ci_report_v2_<mode>.json`,
+    `ci_report_v2.json`, `predictions_<mode>_clean.jsonl`. Any other
+    new file flags AC12 fail.
+
+Validation commands section gained:
+    diff <(awk ... /tmp/exp.before) <(python3 -c "import json; ...")
+    | grep '^>' | grep -v '_v2$'
+    # Must be empty.
+
+----------------------------------------------------------------------
+7. Informational: The dependency graph is mostly sound after the Blockers are fixed.
+
+Status: ACKNOWLEDGED + INTEGRATED.
+
+Codex noted:
+  - Task 4 → Task 1 is correct.
+  - Task 5 → Task 4 is conservative but not strictly needed (could
+    parallelize) — KEPT as-is for safety; the launcher writes the CI
+    bundle shape.
+  - Task 7 → Task 5 is correct.
+  - Task 6 → Task 3 is rationale-only, not technical — KEPT as-is so
+    the data fix is informed by the diagnostic.
+
+The only material missing dependency (per Codex's informational note
+and Blocker 2 fix): Task 5 now depends on Task 2 (clean-eval-mask)
+because Task 5b uses the mask function. This edge is added in the
+Blocker 2 disposition above.
+
+No further DAG changes needed.
+
+----------------------------------------------------------------------
+Summary of plan changes
+
+Files edited (all in `.claude/tasks/baseline-evaluation-correction.md`):
+  - Task 1 ("metric-score-risk"): formula rewritten with fractional
+    `need`, worked example added.
+  - Task 5 ("launcher-schema"): split into 5a/5b/5c; 5b adds
+    clean-eval mask application to new launcher runs; `Depends On`
+    expanded to include `clean-eval-mask`; AC1b added.
+  - Task 6 ("data-pipeline-guardrail"): pre-narration gate rewritten
+    as class-balanced disjoint stratification grouped by
+    `(journey_family, structured_events_hash)`.
+  - Task 7 ("rescore-baselines"): row schema fields `clean_eval_n` +
+    `clean_eval_dropped` now explicitly derived from mask; 4467 -> 4466
+    where hard-coded.
+  - Task 9 ("codex-plan-review-brief"): removed from build DAG;
+    replaced with pre-build note.
+  - Task 10 ("validate-all"): `Depends On` list updated (removed
+    `codex-plan-review-brief`).
+  - File ownership table: diagnostic-writer's row updated;
+    `review/_pending-codex-plan-review.md` moved to "team lead (NOT a
+    build agent)" row.
+  - Acceptance Criteria: AC1 reference numbers tagged "FRACTIONAL
+    need, not rounded"; AC1b added (new-run clean-eval validation);
+    AC5 `clean_eval_n` explicit (== 4466); AC6 expanded with
+    build_summary fields; AC10 (Codex brief existence) removed; AC13
+    (no GPU) replaced with three mechanical sub-criteria, renumbered
+    to AC12.
+  - Validation Commands: added AC1b dry-run and AC12 snapshot-diff
+    commands; removed reference to
+    `review/_pending-codex-plan-review.md` from required-file check.
+  - Notes section: added review 019 disposition note pointing here.
+
+No code files changed; this is a plan-document revision only.
+
+----------------------------------------------------------------------
+Next step
+
+The revised plan addresses all 6 review-019 findings. Per Codex's
+bottom line: "After those changes, the remaining issues are plan
+hygiene and validation clarity rather than blockers."
+
+Decision point for the user: re-spin a second Codex pass on the
+revised plan (would be review 020), or proceed directly to /build
+with the revised plan?
+
+Recommendation: proceed directly to /build. The Blockers were all
+specific, mechanical errors (rounding, missing scope, off-by-one);
+the revisions are targeted. A re-review would add latency without
+materially changing the implementation surface. Final correctness is
+verified post-implementation via the metric reference numbers in
+AC1 + AC1b, the snapshot diff in AC12, and the quality-engineer
+validator.
+
+If the user wants a re-review anyway, the next action is: regenerate
+`review/_pending-codex-plan-review.md` with a "v2 review request"
+header pointing at this followup, and ask Codex to focus only on
+whether the six revisions correctly close their respective findings
+(not a full re-audit).
