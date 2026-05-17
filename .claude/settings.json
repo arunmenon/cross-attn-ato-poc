@@ -1,10 +1,30 @@
 {
   "$comment": "Agent containment for the auto-research loop (Task #38). Audit 014 Blocker 3 + audit 015 confirmed + review 016 finding 2 corrected the path-anchoring grammar. Claude Code's permission DSL: `//path` = absolute filesystem path, `/path` = relative to project root. Credential paths live outside the repo so they MUST use `//`. Read denies cover the secrets-reading path that Write/Edit denies do not block. IMPORTANT: this is TOOL-LEVEL containment for Claude's Read/Edit/Write/Bash tools, not OS-level sandboxing — a sufficiently determined Bash subprocess can still read files via shell builtins or python -c. The agent surface is the threat we are bounding; if the threat model widens to malicious tool-use, add a sandboxed user or filesystem ACLs at the OS layer. NOTE: pod's Claude CLI version must honor this file. Verify by attempting a denied operation on the first cron tick.",
   "permissions": {
+    "allow": [
+      "Read(src/auto_research/**)",
+      "Read(PLAN.md)",
+      "Read(README.md)",
+      "Read(docs/**)",
+      "Read(data/cards/**)",
+      "Write(src/auto_research/runs/**)",
+      "Edit(src/auto_research/runs/**)",
+      "Bash(python scripts/run_next_experiment.py:*)",
+      "Bash(python3 scripts/run_next_experiment.py:*)",
+      "Bash(ls:*)",
+      "Bash(cat src/auto_research/sweep_state.yaml)",
+      "Bash(cat src/auto_research/experiments.jsonl)",
+      "Bash(tail src/auto_research/experiments.jsonl)",
+      "Bash(grep:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git add -A)",
+      "Bash(git commit -m:*)"
+    ],
     "deny": [
       "Write(**/experiments.jsonl)",
       "Edit(**/experiments.jsonl)",
-      "Read(**/experiments.jsonl)",
       "Write(**/sweep_state.yaml)",
       "Edit(**/sweep_state.yaml)",
       "Write(**/budget.yaml)",
