@@ -27,6 +27,7 @@ the corresponding `followup.txt`, not here.
 | 013 | auto-loop-readiness  | 2026-05-17 | 7        | closed         | 2e325e2        |
 | 014 | auto-loop-prelaunch-audit | 2026-05-17 | 24   | partial-closed | 7d04064        |
 | 015 | audit-014-meta-review | 2026-05-17 | 11      | closed         | 7d04064        |
+| 016 | fix-pass-014-015     | 2026-05-17 | 2        | closed         | 16549b0        |
 
 ---
 
