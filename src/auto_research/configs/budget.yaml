@@ -1,11 +1,16 @@
 # Auto-research loop budget and halt conditions.
 # Read by run_next_experiment.py on every invocation.
 
+# Review 013 finding #4: max_experiments counts X-ATTN ARM RUNS ONLY.
+# Baselines (cpt_light, lora_text, structured_as_text, event_only) are
+# recorded for Day-3 comparison but excluded from this budget AND from
+# convergence-halt counts.
 max_experiments: 12
-max_gpu_hours: 18           # across Day 2 PM + Day 3 AM/midday
+max_gpu_hours: 18           # across Day 2 PM + Day 3 AM/midday — TOTAL spend, includes baselines
 max_llm_narrator_usd: 200
 
-# Halt conditions — ANY of these halts the loop.
+# Halt conditions — ANY of these halts the loop. All convergence/cascade
+# counts filter to arm == "xattn" (review 013 finding #4).
 halt:
   nan_cascade:
     enabled: true
@@ -20,8 +25,15 @@ halt:
   convergence:
     enabled: true
     min_valid_runs_before_halt: 6  # cannot halt before 6 valid x-attn runs (v3 minor 5)
-    window: 4                      # look at last N runs
-    auc_lift_threshold: 0.005      # if no AUC-stripped lift >= this over window, halt
+    window: 4                      # look at last N x-attn runs
+    # Review 013 finding #1: convergence is now on worst-family HN-FPR
+    # (post-Day-1-pivot win condition), not AUC-stripped (saturated at
+    # 1.0 on every model variant). Threshold stays at 0.005 absolute,
+    # but the scale changes — HN-FPR is 0-10%, so 0.005 = 0.5
+    # percentage points of worst-family improvement.
+    hn_fpr_improvement_threshold: 0.005
+    # Legacy key retained for ops scripts still referencing it.
+    auc_lift_threshold: 0.005
 
 # Per-experiment resource caps (enforced by run_next_experiment.py via timeout)
 per_experiment:

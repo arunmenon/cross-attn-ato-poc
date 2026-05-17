@@ -1,0 +1,128 @@
+Review comments 013
+Date: 2026-05-17
+Subject: Auto-loop readiness — launcher state/ranking/halt + HN-FPR CIs before Task #38
+
+Reviewer: user (pre-Task-#38 readiness pass — sourced from a manual
+walk-through of the launcher, RUNBOOK, agent instructions, and the
+Day-1 hard-negative-FPR pivot). Captured as a review for the same
+audit trail as Codex reviews 1-12.
+
+Reviewed file(s):
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/run_next_experiment.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/eval/bootstrap_ci.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/eval/score_risk.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/RUNBOOK.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/PLAN.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/README.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/AGENT_INSTRUCTIONS.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/configs/sweep_space.yaml
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/model/qwen_xattn_wrapper.py
+
+Repo root used for comparison:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+Summary:
+The Day-1 writeup pivoted the win condition from AUC (saturated at
+1.0) to hard-negative FPR. The conceptual explanation of the
+auto-research loop matches that pivot. But the executable loop -
+launcher ranking, convergence halt, experiments.jsonl row schema,
+bootstrap CIs, and parts of the RUNBOOK - is still wired for the
+pre-pivot AUC objective. Task #38 cannot trust this loop to pick the
+right leader, stop at the right time, or surface the right evidence
+for Day-3 synthesis. Seven findings, four blockers/highs that gate
+Task #38 and three doc cleanups that need to land before Day 3 reads
+results.
+
+Review findings:
+
+1. Blocker: loop objective still uses saturated AUC, not hard-negative FPR.
+
+The writeup says the Day-3 decision is "hard-negative FPR @ 1%," but
+the actual launcher ranks current_best and top_3 by auc_stripped, and
+convergence halt also uses AUC-stripped. See
+scripts/run_next_experiment.py:282 and
+scripts/run_next_experiment.py:502. Given Day-1 AUC saturation, this
+can pick the wrong leader or halt while HN-FPR is still moving.
+
+2. Blocker: hard-negative FPR CIs are not implemented.
+
+Synthesis criterion says "below structured-as-text baseline, with
+non-overlapping bootstrap CIs." But eval/bootstrap_ci.py:126 only
+bootstraps AUC and Recall@FPR, not
+hard_negative_fpr_at_decision_threshold_1pct. score_risk.py computes
+HN-FPR point estimates, but there's no CI surface for the metric now
+being used as the win condition.
+
+3. High: experiments.jsonl rows do not contain the fields the explanation says Day 3 will read.
+
+The explanation says each row has hard-negative FPRs, per-journey
+breakdown, actor differential, and CIs. The launcher appends only
+AUCs, R@FPR=1%, max gate, wall clock, and leakage status. See
+scripts/run_next_experiment.py:652. The richer data exists in per-run
+metrics_*.json / ci_report.json, but the agent's state loop reads
+recent experiments.jsonl rows first.
+
+4. High: baseline rows vs x-attn budget are inconsistent.
+
+The explanation expects about 16 rows: 4 baselines + 12 x-attn runs.
+But max_experiments: 12 counts all successful records, not just
+x-attn. See scripts/run_next_experiment.py:254. If the baselines are
+recorded through the launcher, the sweep can halt after only 8 x-attn
+runs. If baselines are not recorded, the agent loses the comparison
+floor.
+
+5. High: top-3 eval target is still split across old and new plans.
+
+The explanation says Task #41 uses the 15k LLM eval as the real
+comparison. RUNBOOK still says "Top-3 medium eval" and large eval
+afterward, matching the older 50k templated ladder. See
+RUNBOOK.md:230. Before auto-loop output is interpreted, align
+PLAN/RUNBOOK/AGENT instructions around 15k LLM as primary and 50k
+templated as regression-only.
+
+6. Medium: insertion-pattern layer counts in the explanation are wrong.
+
+The actual implementation is every_4 = [12,16,20,24,28,32] = 6 blocks,
+every_8 = [12,20,28] = 3 blocks, and late_only = [32,33,34,35] = 4
+blocks. See src/model/qwen_xattn_wrapper.py:157 and
+src/auto_research/configs/sweep_space.yaml:9. The conceptual write-up
+said 8 / 4 / 3.
+
+7. Medium: RUNBOOK still contains a stale unsafe instruction.
+
+The explanation correctly says the launcher owns experiments.jsonl
+and sweep_state.yaml, but RUNBOOK says the agent should "append a
+one-paragraph summary to experiments.jsonl, update sweep_state.yaml."
+See RUNBOOK.md:295. That contradicts
+src/auto_research/AGENT_INSTRUCTIONS.md:59.
+
+Bottom line:
+The conceptual explanation is right, but the executable loop is still
+wired for the pre-pivot AUC objective. Before Task #38, fix launcher
+state/ranking/halt logic, add HN-FPR CIs, and clarify whether
+max_experiments means total records or x-attn sweep records.
+
+Design decisions for the fix (committed in followup):
+
+- HN-FPR composite for ranking and halt:
+  primary    = max(hn_account_recovery_fpr, hn_large_purchase_fpr,
+                   hn_travel_fpr)   # worst-family
+  tiebreaker = mean of the three
+  Rationale (user, layman-language): "hard negatives are legitimate
+  customers who look suspicious. If one family is still bad, averaging
+  can hide it - travel may always be 0% while account recovery is
+  still falsely blocking customers. In fraud/risk systems, one bad
+  customer segment still matters."
+
+- AUC and R@FPR demoted to "must not regress badly" sanity gates;
+  not the thing being optimized.
+
+- Convergence halt: worst-family HN-FPR improvement < 0.005 absolute
+  over the last 4 valid x-attn runs, after at least 6 valid x-attn
+  runs. (Same numerical threshold as the AUC-era halt; different
+  scale - HN-FPR is 0-10%.)
+
+- Budget separation: baselines are recorded through the launcher (we
+  want them in experiments.jsonl for Day-3 comparison) but excluded
+  from the x-attn sweep budget and from the convergence-count window.
+  The halt logic filters by arm == "xattn".

@@ -228,9 +228,9 @@ Alternative upload paths (S3, R2, HF private dataset) require extra client tooli
 ### Day 3
 
 1. Auto-loop completes round-2 sweep (Task #40).
-2. Top-3 medium eval (Task #41, Hr 8-11).
-3. Top-1 large eval *only if Hr 11 is reached on schedule* (Task #41, Hr 11-12).
-4. Final synthesis (Task #42). **Sacred — never compressed.**
+2. **Top-3 medium eval on `data/eval_medium_15k_llm/` — the 15k LLM-narrated set** (Task #41, Hr 8-11). The Day-1 saturation diagnostic falsified the original PLAN.md assumption that the 50k templated eval distribution-matches the LLM-narrated train set; templated is materially easier (post-Day-1 pivot, review 013 finding #5). Treat `data/eval_medium_50k/` as a regression-only set ("did anything blow up here that didn't on 15k LLM?") — not as a primary comparison surface.
+3. ~~Top-1 large eval~~ (removed; the previous "100-200k templated large eval" was conditional on Hr 11 being reached and the templated saturation finding makes it uninformative regardless). Day-3 headline is the 15k LLM eval × 3 modes × bootstrap CI on **worst-family hard-negative FPR** (the post-Day-1-pivot comparison metric).
+4. Final synthesis (Task #42). **Sacred — never compressed.** Compare top-3 x-attn vs the 4 baselines on **worst-family HN-FPR with non-overlapping bootstrap CIs**. AUC and R@FPR remain in the report as sanity gates only.
 
 ---
 
@@ -292,9 +292,24 @@ src/auto_research/runs/exp_NNN/config.yaml, then run:
 
     python scripts/run_next_experiment.py src/auto_research/runs/exp_NNN/config.yaml
 
-When it completes, read the run's metrics.json and ci_report.json, append a
-one-paragraph summary to experiments.jsonl, update sweep_state.yaml, and
-decide the next action.
+When it completes, the launcher has ALREADY appended a record to
+src/auto_research/experiments.jsonl and updated src/auto_research/sweep_state.yaml.
+Do NOT write either file from the agent side — the launcher owns them
+(review 013 finding #7; matches src/auto_research/AGENT_INSTRUCTIONS.md).
+Your job is to READ those files, plus the run's metrics.json and
+ci_report.json, then decide what config to propose next. You may write
+src/auto_research/runs/exp_NNN/notes.md if you want to record your
+reasoning for future reads.
+
+Ranking + halt: the launcher ranks experiments by worst-family
+hard-negative FPR (lower is better; tiebreaker is mean HN-FPR), not by
+AUC (AUC is saturated at 1.0 on every model variant — review 013
+finding #1). The auto-loop halts when worst-family HN-FPR has not
+improved by >= 0.005 absolute over the last 4 valid x-attn runs (after
+at least 6 valid x-attn runs have completed). Baselines (cpt_light,
+lora_text, structured_as_text, event_only) are recorded in
+experiments.jsonl for Day-3 comparison but do not count toward the
+x-attn sweep budget or convergence count.
 
 Before editing any source code file, run:
     git add -A && git commit -m "snapshot before <change description>"

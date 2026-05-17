@@ -1,0 +1,229 @@
+Review comments 013 -- follow-up
+Date: 2026-05-17
+Subject: Disposition of findings in 013-auto-loop-readiness/comments.txt
+Author: scaffold maintainer
+
+Original review file:
+    review/013-auto-loop-readiness/comments.txt
+
+Repo state at follow-up:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+Baseline commit:
+    2ec44e6 (INDEX backfill for review 012; last commit before this pass)
+
+Design decisions (agreed before coding, captured here for the trail):
+
+  Primary ranking metric:  worst-family HN-FPR (minimize).
+                           max(hn_account_recovery, hn_large_purchase, hn_travel)
+  Tiebreaker:              mean HN-FPR across families.
+  AUC / R@FPR:             sanity gates only ("must not regress badly"),
+                           NOT the optimization objective.
+  Convergence:             halt when worst-family HN-FPR has not improved
+                           by >= 0.005 absolute over the last 4 valid
+                           x-attn runs, after at least 6 valid x-attn runs.
+  Budget separation:       baselines (cpt_light, lora_text, structured_as_text,
+                           event_only) are recorded in experiments.jsonl
+                           for Day-3 comparison but excluded from the
+                           x-attn sweep budget AND from convergence-count
+                           windows.
+
+  Rationale (user): "Hard negatives are legitimate customers who look
+  suspicious. If one family is still bad, averaging can hide it. In
+  fraud/risk systems, one bad customer segment still matters."
+
+Disposition per finding:
+
+1. Blocker: loop objective still uses saturated AUC, not hard-negative FPR.
+
+Status: FIXED.
+
+Action: scripts/run_next_experiment.py rewrites in two places:
+
+  - update_sweep_state() (was: rank by auc_stripped descending).
+    Now ranks x-attn arm rows by (hn_fpr_worst_stripped ASC,
+    hn_fpr_mean_stripped ASC) -- worst-family primary, mean tiebreaker,
+    both lower-is-better. current_best and top_3 expose those fields.
+    AUC stays in current_best as `auc_stripped_sanity` for regression
+    detection.
+
+  - check_halt_conditions() convergence branch (was: AUC-stripped lift
+    >= 0.005 over the window halts when not met). Now reads worst-family
+    HN-FPR from the last `window` valid x-attn rows and halts when
+    `(first - best) < threshold`. Threshold reads from new
+    `hn_fpr_improvement_threshold` budget key with fallback to legacy
+    `auc_lift_threshold`.
+
+  - budget.yaml convergence: added hn_fpr_improvement_threshold: 0.005
+    with comment that the scale changed (HN-FPR is 0-10%, so 0.005 =
+    0.5pp). auc_lift_threshold retained as documented legacy.
+
+Verify (local, no torch):
+
+    python3 -c "
+    import sys; sys.path.insert(0, '.')
+    from scripts.run_next_experiment import _hn_worst, _hn_mean
+    p = {'hn_account_recovery': 0.05, 'hn_large_purchase': 0.01, 'hn_travel': 0.0}
+    assert _hn_worst(p) == 0.05
+    assert abs(_hn_mean(p) - 0.02) < 1e-9
+    print('HN-FPR helpers OK')
+    "
+
+2. Blocker: hard-negative FPR CIs are not implemented.
+
+Status: FIXED.
+
+Action: eval/bootstrap_ci.py grew bootstrap_hard_negative_fpr().
+
+Algorithm: per resample, recompute the decision threshold consistent
+with target_fpr=0.01 on that resample, then compute per-family HN-FPR
+from the resample's hard-negative records using that threshold. Build
+1000 (default) bootstrap samples; report 2.5%/97.5% percentile bounds.
+Output:
+
+    {
+      "target_fpr": 0.01,
+      "per_family": {
+        "hn_account_recovery": {"point", "ci_lo", "ci_hi", ...},
+        "hn_large_purchase":   {...},
+        "hn_travel":           {...}
+      },
+      "worst_family": {"point", "ci_lo", "ci_hi", ...},
+      "mean":         {"point", "ci_lo", "ci_hi", ...}
+    }
+
+main() now always emits this block (`hard_negative_fpr_at_1pct`) into
+ci_report_<mode>.json alongside the AUC + R@FPR CIs.
+
+Verify (local with synthetic preds, no torch):
+
+    On 2000 synthetic predictions (mix of fraud, hard-negatives, and
+    clean legit), the new function returned:
+      hn_account_recovery point=0.0500 CI [0.0237, 0.0589]
+      hn_large_purchase   point=0.0050 CI [0.0000, 0.0159]
+      hn_travel           point=0.0000 CI [0.0000, 0.0000]
+      worst point=0.0500 CI [0.0237, 0.0589]
+      mean  point=0.0183 CI [0.0104, 0.0206]
+
+    Composites and per-family CIs all look sensible; worst-family CI
+    width matches the most-variable family as expected.
+
+3. High: experiments.jsonl rows do not contain the fields Day 3 will read.
+
+Status: FIXED.
+
+Action: scripts/run_next_experiment.py _do_run() success path now
+appends these fields per row:
+
+    hn_fpr_worst_stripped         # primary ranking metric
+    hn_fpr_mean_stripped          # tiebreaker
+    hn_fpr_per_family_stripped    # full {hn_account_recovery, ...} dict
+    hn_fpr_ci_stripped            # bootstrap CI bundle for worst/mean/per-family
+    r_at_fpr_0.1pct               # secondary saturation gauge
+    per_journey_auc_stripped      # Day-3 per-journey breakdown
+    per_actor_auc_stripped        # Day-3 actor differential
+
+The existing AUC / R@FPR=1% / max_gate / wall_clock / leakage_clean
+fields stay -- they're sanity gates now. New helper _load_hn_ci(run_dir)
+reads ci_report_stripped.json's hard_negative_fpr_at_1pct block; if
+the ci_report predates this fix it returns None gracefully.
+
+Verify (will be exercised on the next launcher run): the launcher's
+record dict construction in _do_run() now references all the new keys;
+local AST parse OK. The bootstrap_ci entry point produces the block
+shape _load_hn_ci expects (proven by the synthetic-prediction smoke
+above).
+
+4. High: baseline rows vs x-attn budget are inconsistent.
+
+Status: FIXED.
+
+Action: check_halt_conditions() now filters by arm == "xattn" before
+applying both the max_experiments budget and the convergence /
+nan_cascade / zero_gate halt windows. Baselines are still recorded in
+experiments.jsonl (we want them there for Day-3 comparison) but they
+no longer consume the 12-experiment x-attn sweep budget.
+
+The max_gpu_hours cap is intentionally NOT filtered -- it's a total-
+cost gate, not a sweep-progress gate, so baselines' GPU time DOES
+count against it. Documented in the budget.yaml comment.
+
+Verify: budget.yaml comment + run_next_experiment.py docstring both
+explicitly state "max_experiments counts X-ATTN ARM RUNS ONLY".
+
+5. High: top-3 eval target split across old and new plans.
+
+Status: FIXED.
+
+Action: RUNBOOK.md §3 Day 3 rewritten:
+
+    Top-3 medium eval on data/eval_medium_15k_llm/ -- the 15k LLM-
+    narrated set (Task #41). The Day-1 saturation diagnostic falsified
+    the original PLAN.md assumption that the 50k templated eval
+    distribution-matches the LLM-narrated train set; templated is
+    materially easier (post-Day-1 pivot, review 013 finding #5). Treat
+    data/eval_medium_50k/ as a regression-only set ("did anything blow
+    up here that didn't on 15k LLM?") -- not as a primary comparison
+    surface.
+
+The old "Top-1 large eval" line is struck (the 100-200k templated
+large eval is uninformative given the saturation finding, and was
+conditional on Hr 11 anyway). Day-3 headline metric is worst-family
+HN-FPR on the 15k LLM eval x 3 modes with bootstrap CIs.
+
+PLAN.md wording is consistent with this since the Day-1 writeup
+already noted the saturation. AGENT_INSTRUCTIONS.md does not name the
+eval set directly; it reads sweep_state.yaml and per-run metrics.json
+which are now keyed by the 15k file.
+
+6. Medium: insertion-pattern layer counts in the explanation were wrong.
+
+Status: FIXED (in conversational explanation; no doc change required).
+
+Action: my prior explanation said every_4 = 8 blocks, every_8 = 4
+blocks, late_only = 3 blocks. The implementation at
+src/model/qwen_xattn_wrapper.py:compute_insertion_layers is:
+
+  every_4   = [12, 16, 20, 24, 28, 32] = 6 blocks (n_hidden=36)
+  every_8   = [12, 20, 28]              = 3 blocks
+  late_only = [32, 33, 34, 35]          = 4 blocks
+
+Verified by `grep -rn` across RUNBOOK / PLAN / AGENT_INSTRUCTIONS:
+none of them claim specific block counts -- they cite only the pattern
+names. So the only correction needed was to my conversational prose;
+no committed doc text required changing. Recording the correct mapping
+in this followup so a future reader sees the right numbers in the
+audit trail.
+
+7. Medium: RUNBOOK §6 still says agent appends to experiments.jsonl.
+
+Status: FIXED.
+
+Action: RUNBOOK §6 agent loop prompt rewritten. Old text told the agent
+to "append a one-paragraph summary to experiments.jsonl, update
+sweep_state.yaml". New text:
+
+    When it completes, the launcher has ALREADY appended a record to
+    src/auto_research/experiments.jsonl and updated sweep_state.yaml.
+    Do NOT write either file from the agent side -- the launcher owns
+    them (review 013 finding #7; matches AGENT_INSTRUCTIONS.md). Your
+    job is to READ those files, plus the run's metrics.json and
+    ci_report.json, then decide what config to propose next.
+
+Also adds an explicit note in the prompt about the ranking/halt metric
+being worst-family HN-FPR (not AUC), and that baselines don't count
+toward the x-attn sweep budget. That way the prompt and
+AGENT_INSTRUCTIONS.md tell the same story.
+
+Bottom line:
+The auto-loop is now wired for the post-Day-1 win condition. Worst-
+family HN-FPR drives ranking and convergence; mean HN-FPR is the
+tiebreaker; baselines are recorded but quarantined from the x-attn
+budget; CIs cover the metric Day 3 reports on; experiments.jsonl rows
+carry every field the synthesis needs. Safe to launch Task #36
+baselines + Task #37 first manual x-attn run + Task #38 auto-loop
+agent.
+
+Notes on the INDEX backfill:
+This followup is committed alongside the code/doc fixes (commit A).
+Then INDEX.md's 013 row is added with commit A's hash in a small
+follow-up (commit B). Same two-commit pattern.

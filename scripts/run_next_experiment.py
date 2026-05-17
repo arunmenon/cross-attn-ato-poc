@@ -244,55 +244,118 @@ def _load_history() -> list[dict]:
     return out
 
 
+# --- HN-FPR helpers (review 013 finding #1 + #3) -----------------------
+
+def _hn_worst(hn_point: dict[str, float] | None) -> float | None:
+    """Worst-family HN-FPR (max). None if dict is empty or contains only NaN."""
+    if not hn_point:
+        return None
+    vals = [v for v in hn_point.values() if isinstance(v, (int, float))]
+    finite = [float(v) for v in vals if v == v]  # NaN-aware
+    return max(finite) if finite else None
+
+
+def _hn_mean(hn_point: dict[str, float] | None) -> float | None:
+    """Mean HN-FPR across families (tiebreaker)."""
+    if not hn_point:
+        return None
+    vals = [v for v in hn_point.values() if isinstance(v, (int, float))]
+    finite = [float(v) for v in vals if v == v]
+    return sum(finite) / len(finite) if finite else None
+
+
+def _load_hn_ci(run_dir: Path, mode: str = "stripped") -> dict | None:
+    """Read the hard_negative_fpr_at_1pct block from ci_report_<mode>.json.
+    Returns the full per-family + worst/mean CI bundle, or None if absent
+    (e.g., ci_report was produced by an old bootstrap_ci before HN-FPR
+    support landed in review 013).
+    """
+    ci_path = run_dir / f"ci_report_{mode}.json"
+    if not ci_path.exists():
+        return None
+    try:
+        data = json.loads(ci_path.read_text())
+    except json.JSONDecodeError:
+        return None
+    return data.get("hard_negative_fpr_at_1pct")
+
+
 def check_halt_conditions() -> str | None:
-    """Returns reason string if halted, None if clear to launch."""
+    """Returns reason string if halted, None if clear to launch.
+
+    Review 013 finding #4: budget caps and convergence count only
+    x-attn arm runs. Baselines (cpt_light, lora_text, structured_as_text,
+    event_only) are recorded for Day-3 comparison but don't consume the
+    x-attn sweep budget or trigger convergence halt.
+
+    Review 013 finding #1: convergence is now on worst-family HN-FPR
+    (the post-Day-1-pivot win condition), not AUC-stripped (saturated
+    at 1.0 on every model variant).
+    """
     if not BUDGET_YAML.exists():
         return None
     budget = yaml.safe_load(BUDGET_YAML.read_text())
     history = _load_history()
 
-    # Budget caps
-    valid = [h for h in history if h.get("status") == "ok"]
-    if len(valid) >= budget.get("max_experiments", 999):
-        return f"max_experiments ({budget['max_experiments']}) reached"
+    # Filter to x-attn arm for budget + halt counts (review 013 finding #4)
+    xattn_history = [h for h in history if h.get("arm") == "xattn"]
+    xattn_valid_all = [h for h in xattn_history if h.get("status") == "ok"]
 
+    # Budget caps -- x-attn only
+    if len(xattn_valid_all) >= budget.get("max_experiments", 999):
+        return (
+            f"max_experiments ({budget['max_experiments']}) reached "
+            f"for x-attn arm; baselines excluded from this count"
+        )
+
+    # GPU hours -- whole history (cost cap is about total spend, not just x-attn)
     gpu_hours = sum(h.get("wall_clock_min", 0) for h in history) / 60.0
     if gpu_hours >= budget.get("max_gpu_hours", 999):
         return f"max_gpu_hours ({budget['max_gpu_hours']}) reached"
 
     halt = budget.get("halt", {})
 
-    # NaN cascade
+    # NaN cascade -- x-attn only (review 013 finding #4)
     if halt.get("nan_cascade", {}).get("enabled"):
         n = halt["nan_cascade"]["consecutive_threshold"]
-        xattn_hist = [h for h in history if h.get("arm") == "xattn"][-n:]
-        if len(xattn_hist) == n and all(h.get("status") == "nan" for h in xattn_hist):
+        recent = xattn_history[-n:]
+        if len(recent) == n and all(h.get("status") == "nan" for h in recent):
             return f"nan_cascade: last {n} x-attn runs were NaN"
 
-    # Zero gates
+    # Zero gates -- x-attn only (always was, kept)
     if halt.get("zero_gate_activation", {}).get("enabled"):
         n = halt["zero_gate_activation"]["consecutive_threshold"]
         mag_thresh = halt["zero_gate_activation"]["magnitude_threshold"]
-        xattn_valid = [h for h in history if h.get("arm") == "xattn" and h.get("status") == "ok"][-n:]
-        if len(xattn_valid) == n and all(
-            (h.get("max_gate_magnitude") or 0) < mag_thresh for h in xattn_valid
+        recent = xattn_valid_all[-n:]
+        if len(recent) == n and all(
+            (h.get("max_gate_magnitude") or 0) < mag_thresh for h in recent
         ):
             return f"zero_gate_activation: last {n} x-attn runs had max gate < {mag_thresh}"
 
-    # Convergence
+    # Convergence -- worst-family HN-FPR over a sliding window (review 013
+    # finding #1). Compares the WORST (max) recent worst-family value
+    # against the FIRST in the window. If best is not at least `thresh`
+    # better than first, we have not improved.
     conv = halt.get("convergence", {})
     if conv.get("enabled"):
         min_runs = conv.get("min_valid_runs_before_halt", 6)
         window = conv.get("window", 4)
-        thresh = conv.get("auc_lift_threshold", 0.005)
-        xattn_valid = [h for h in history if h.get("arm") == "xattn" and h.get("status") == "ok"]
-        if len(xattn_valid) >= min_runs:
-            recent = xattn_valid[-window:]
+        thresh = conv.get("hn_fpr_improvement_threshold",
+                          conv.get("auc_lift_threshold", 0.005))
+        if len(xattn_valid_all) >= min_runs:
+            recent = xattn_valid_all[-window:]
             if len(recent) == window:
-                aucs = [h.get("auc_stripped") for h in recent]
-                if all(a is not None for a in aucs):
-                    if max(aucs) - aucs[0] < thresh:
-                        return f"convergence: no AUC-stripped lift >= {thresh} over last {window} runs"
+                worst_values = [h.get("hn_fpr_worst_stripped") for h in recent]
+                if all(v is not None for v in worst_values):
+                    # Lower HN-FPR is better. "Improvement" = first - best.
+                    best = min(worst_values)
+                    first = worst_values[0]
+                    if (first - best) < thresh:
+                        return (
+                            f"convergence: no worst-family HN-FPR "
+                            f"improvement >= {thresh} over last {window} "
+                            f"x-attn runs (first={first:.4f}, best={best:.4f})"
+                        )
 
     return None
 
@@ -499,13 +562,23 @@ def update_sweep_state() -> None:
     failed = [h for h in history if h.get("status") not in ("ok", None)]
     gpu_hours = sum(h.get("wall_clock_min", 0) or 0 for h in history) / 60.0
 
-    # Rank by AUC-stripped (xattn arm specifically — baselines don't compete
-    # with each other in the same way).
+    # Rank by HN-FPR composite (review 013 finding #1).
+    # Primary: worst-family HN-FPR (minimize -- a single bad customer
+    # segment still matters in fraud/risk).
+    # Tiebreaker: mean HN-FPR (minimize).
+    # AUC is now a sanity gate (must not regress badly), not the objective.
     xattn_completed = [
         h for h in completed
-        if h.get("arm") == "xattn" and h.get("auc_stripped") is not None
+        if h.get("arm") == "xattn" and h.get("hn_fpr_worst_stripped") is not None
     ]
-    ranked = sorted(xattn_completed, key=lambda h: h["auc_stripped"], reverse=True)
+    # sort ascending on (worst, mean) — both lower-is-better
+    ranked = sorted(
+        xattn_completed,
+        key=lambda h: (
+            h["hn_fpr_worst_stripped"],
+            h.get("hn_fpr_mean_stripped", float("inf")),
+        ),
+    )
 
     current_best: dict | None = None
     if ranked:
@@ -513,12 +586,18 @@ def update_sweep_state() -> None:
         current_best = {
             "exp_id": b["exp_id"],
             "arm": b["arm"],
-            "auc_stripped": b["auc_stripped"],
+            "hn_fpr_worst_stripped": b["hn_fpr_worst_stripped"],
+            "hn_fpr_mean_stripped": b.get("hn_fpr_mean_stripped"),
+            "auc_stripped_sanity": b.get("auc_stripped"),
             "config_summary": b.get("config_summary"),
         }
 
     top_3 = [
-        {"exp_id": h["exp_id"], "auc_stripped": h["auc_stripped"]}
+        {
+            "exp_id": h["exp_id"],
+            "hn_fpr_worst_stripped": h["hn_fpr_worst_stripped"],
+            "hn_fpr_mean_stripped": h.get("hn_fpr_mean_stripped"),
+        }
         for h in ranked[:3]
     ]
 
@@ -649,16 +728,33 @@ def _do_run(config_path: Path) -> int:
         train_metrics_path = run_dir / "metrics.json"
         train_metrics = json.loads(train_metrics_path.read_text()) if train_metrics_path.exists() else {}
 
+        # Review 013 finding #3: experiments.jsonl rows now carry the
+        # HN-FPR fields the auto-loop ranks/halts on, plus per-family
+        # detail + CI bounds for Day-3 audit. AUC stays in the row as a
+        # sanity field; it's no longer the comparison metric.
+        hn_point = (stripped.get("hard_negative_fpr_at_decision_threshold_1pct") or {})
+        hn_ci = _load_hn_ci(run_dir, mode="stripped")  # may be None pre-bootstrap
         record = {
             "exp_id": cfg["exp_id"],
             "arm": cfg["arm"],
             "config_hash": config_hash,
             "config_summary": _summarize_config(cfg),
             "status": train_metrics.get("status", "ok"),
+            # Primary comparison metric (review 013 finding #1)
+            "hn_fpr_worst_stripped": _hn_worst(hn_point),
+            "hn_fpr_mean_stripped":  _hn_mean(hn_point),
+            "hn_fpr_per_family_stripped": hn_point,  # full dict for Day-3
+            "hn_fpr_ci_stripped": hn_ci,             # worst/mean/per-family CI bounds
+            # AUC + R@FPR retained as sanity gates (saturated at 1.0; check
+            # for regression, not as a leader board)
             "auc_stripped": stripped.get("auc"),
             "auc_opaque": opaque.get("auc"),
             "auc_full": full.get("auc"),
             "r_at_fpr_1pct": (stripped.get("r_at_fpr_0.01") or {}).get("recall"),
+            "r_at_fpr_0.1pct": (stripped.get("r_at_fpr_0.001") or {}).get("recall"),
+            # Per-stratum AUCs (Day-3 per-journey + per-actor breakdowns)
+            "per_journey_auc_stripped": stripped.get("per_journey_auc"),
+            "per_actor_auc_stripped":   stripped.get("per_actor_auc"),
             "max_gate_magnitude": train_metrics.get("max_gate_magnitude"),
             "wall_clock_min": wall_clock_min,
             "timestamp": dt.datetime.utcnow().isoformat() + "Z",
