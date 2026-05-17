@@ -356,12 +356,19 @@ def check_halt_conditions() -> str | None:
     xattn_history_v2 = [h for h in xattn_history if h.get("metric_version", 1) >= 2]
     xattn_valid_v2 = [h for h in xattn_valid_all if h.get("metric_version", 1) >= 2]
 
-    # Budget caps -- x-attn only (counts v1 + v2 for sweep-budget purposes;
-    # baselines are the only exclusion review 013 finding #4 addresses).
-    if len(xattn_valid_all) >= budget.get("max_experiments", 999):
+    # Budget caps -- x-attn v2 only (review 020 High 2). The previous
+    # implementation used xattn_valid_all, which double-counts the v1
+    # and v2 companion rows of the same underlying experiment (e.g.,
+    # exp_xa_smoke_001 + exp_xa_smoke_001_v2). max_experiments is meant
+    # to cap real GPU-trained x-attn experiments; v1 rows are
+    # pre-metric-correction history and v2 rows are the rescore
+    # companions of those same experiments — counting them as separate
+    # toward the cap would stop one real experiment early.
+    if len(xattn_valid_v2) >= budget.get("max_experiments", 999):
         return (
             f"max_experiments ({budget['max_experiments']}) reached "
-            f"for x-attn arm; baselines excluded from this count"
+            f"for x-attn arm; baselines excluded from this count "
+            f"(v2 rows only; v1 history rows do not count)"
         )
 
     # GPU hours -- whole history (cost cap is about total spend, not just x-attn)
@@ -703,16 +710,34 @@ def run_post_processing(
       - Writes predictions_{mode}_clean.jsonl + clean_eval_mask.json when
         the clean-eval surface is in effect.
     """
-    # 1. Parse training log → metrics.json + gate_trajectory.json
+    # 1. Pre-compute clean-eval mask FIRST (review 020 Blocker fix).
+    # When a config is provided (a real launcher run), the clean-eval
+    # mask MUST be resolvable BEFORE any downstream work. Otherwise we
+    # might do parse + score + bootstrap effort and then either crash
+    # late or — worse — emit a metric_version=2 row scored on the raw
+    # /leaky eval (silently reintroducing review 018 finding 1
+    # leakage). Fail closed up front. The legacy fallback path (cfg is
+    # None) keeps the pre-v2 behavior so stand-alone debug invocations
+    # still work, but those don't append rows downstream.
+    mask_bundle = compute_and_cache_clean_eval_mask(cfg or {}, run_dir)
+    clean_active = mask_bundle is not None
+    if cfg is not None and not clean_active:
+        data = cfg.get("data") or {}
+        raise RuntimeError(
+            "review 020 Blocker: clean-eval mask could not be resolved for "
+            f"run_dir={run_dir}. cfg.data.train_path={data.get('train_path')!r}, "
+            f"cfg.data.eval_fast_path={data.get('eval_fast_path')!r} (or eval_path). "
+            "Both must point to existing directories containing train.jsonl + eval.jsonl. "
+            "Refusing to score on raw/leaky eval and append a metric_version=2 row "
+            "(would silently reintroduce review 018 finding 1 leakage)."
+        )
+
+    # 2. Parse training log → metrics.json + gate_trajectory.json
     subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts" / "parse_metrics.py"),
          "--run-dir", str(run_dir)],
         check=True,
     )
-
-    # 2. Pre-compute clean-eval mask (once per run, cached on disk).
-    mask_bundle = compute_and_cache_clean_eval_mask(cfg or {}, run_dir)
-    clean_active = mask_bundle is not None
 
     # 3. Score risk for each eval mode that produced predictions
     summary: dict[str, dict] = {}

@@ -482,11 +482,21 @@ def build(
     else:
         raise ValueError(f"unknown mode: {mode!r}")
 
-    # Pre-narration disjoint stratification (Gate A). The split decision
-    # is made on the journeys BEFORE narration so identical structured
-    # skeletons can never end up in opposite splits (the narrator caches
-    # by events_hash and would emit identical text — review 018).
+    # Disjoint stratification (Gate A). The split decision is made on
+    # the post-narration journeys, but BEFORE final record assembly /
+    # write. The split groups journeys by structured_events_hash and
+    # assigns whole groups atomically, so identical structured
+    # skeletons can never end up in opposite splits (the narrator
+    # caches by events_hash and would emit identical text across
+    # train/eval if both held the same hash — review 018 Finding 1).
     # Whole (journey_family, events_hash) groups are atomic.
+    # NOTE (review 020 Minor 4): the disjointness invariant does not
+    # depend on temporal ordering of narration vs split — it depends
+    # on atomic group assignment by events_hash. For future
+    # regenerations that want to avoid paying the narration cost on
+    # train rows that end up in eval (and vice versa), the split call
+    # could be moved earlier; that is an optimization, not a
+    # correctness issue.
     split_stats: dict | None = None
     train_idx: list[int] = []
     eval_idx: list[int] = []

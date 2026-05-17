@@ -154,7 +154,7 @@ python3 scripts/rescore_baselines.py --auto-detect
 
 The `experiments.jsonl` cited above is at `src/auto_research/experiments.jsonl`; the v2 rows are the last four. The full `hn_fpr_ci_stripped` bundle on each v2 row contains `per_family`, `worst_family`, `mean`, `tie_fraction_mean`, `achieved_fpr_mean`, `threshold_mean`, `alpha_mean`, plus the corresponding `_point` fields. Per-run artifacts (`metrics_v2_<mode>.json`, `ci_report_v2_<mode>.json`, `predictions_<mode>_clean.jsonl`, `clean_eval_mask.json`) live under each run dir on the pod and rsync down on request.
 
-> **Note on `sweep_state.yaml` schema bump.** At the time this writeup landed, the on-pod `sweep_state.yaml` still reads `schema_version: 1`; pipeline-eng's Task #5 schema-bump is committed in repo but the next pod-sync will overwrite the on-pod copy to `schema_version: 2` with the `metric_definition` block. The numerical leaderboard above does not depend on this — `update_sweep_state`'s ranking filter is computed at read-time from `metric_version` per row, not from the YAML header.
+> **Note on `sweep_state.yaml`.** Post-team-build state (verified by review 020): the on-pod and local copies both read `schema_version: 2` with the `metric_definition` block, `halted: false`, `n_xattn_runs: 1`, and `current_best.exp_id: exp_xa_smoke_001_v2` (worst HN-FPR = 0.0537, the only metric_version-2 x-attn row in history). `update_sweep_state`'s ranking filter is computed at read-time from `metric_version` per row, so v1 rows remain in `experiments.jsonl` for audit but are excluded from `current_best` / `top_3`.
 
 ## How this maps to README.md Day-2 claims
 

@@ -1,0 +1,241 @@
+Review comments 020 -- follow-up
+Date: 2026-05-17
+Subject: Disposition of findings in 020-baseline-correction-implementation/comments.txt
+Author: scaffold maintainer (team lead, post-team-build fix pass)
+
+Original review file:
+    review/020-baseline-correction-implementation/comments.txt
+
+Repo state at follow-up:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+Plan executed:
+    .claude/tasks/baseline-evaluation-correction.md (via /team-build)
+Baseline commit:
+    b078dd0 (the launcher PYTHONPATH fix) + uncommitted team-build state
+
+Codex review 020 confirmed the metric-engine and diagnostic parts are
+correct, but identified 1 Blocker + 2 Highs + 2 Minors that must land
+before the system is "walk-away launch-ready." All five findings are
+accepted. Each is addressed in this fix pass.
+
+----------------------------------------------------------------------
+1. BLOCKER: launcher fail-open if clean-eval paths don't resolve
+
+Status: FIXED.
+
+Codex's concern: a future config with missing or unresolvable
+data.train_path / data.eval_fast_path would cause run_post_processing
+to silently fall back to scoring raw/leaky eval, while STILL emitting
+a metric_version=2 row. validate_config doesn't reject configs with
+unresolvable paths, so the failure mode is detection-only at the
+review-eyes-on level — exactly the kind of silent reintroduction of
+the review-018 leakage we corrected.
+
+Action: scripts/run_next_experiment.py:706-728 (in run_post_processing):
+The clean-eval-mask resolution check now runs FIRST (before
+parse_metrics.py, before score_risk, before bootstrap_ci). If `cfg` is
+provided (a real launcher run, not a stand-alone debug invocation) AND
+the mask bundle can't be resolved, raise RuntimeError with the
+specific config paths logged. This converts a silent-leakage fail-open
+into a hard-stop fail-closed.
+
+Specifically:
+- If `cfg is None` (legacy debug path): clean_active=False, no mask,
+  raw-eval fallback proceeds. Won't append rows.
+- If `cfg is not None` AND `compute_and_cache_clean_eval_mask()`
+  returns None (paths don't resolve): RAISE RuntimeError. The trainer
+  output is preserved on disk but no metric_version=2 row is appended.
+
+Verify (local):
+
+    python3 - <<'PY'
+    import sys; sys.path.insert(0, '.')
+    from scripts.run_next_experiment import run_post_processing
+    from pathlib import Path
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        rd = Path(td) / "exp_test"; rd.mkdir()
+        cfg = {"arm": "xattn", "data": {"train_path": "/nope", "eval_fast_path": "/nope"}}
+        try:
+            run_post_processing(rd, ["stripped"], cfg=cfg)
+            print("FAIL: expected RuntimeError")
+        except RuntimeError as e:
+            assert "review 020 Blocker" in str(e)
+            print("PASS: clean-eval fail-closed works")
+    PY
+
+Verified post-fix on the pod: dry-run-validate-clean-eval against the
+real baseline config still resolves correctly (clean_eval_n=4466,
+clean_eval_dropped=534) — the happy path is unchanged.
+
+----------------------------------------------------------------------
+2. HIGH: max_experiments double-counts v1/v2 companion rows
+
+Status: FIXED.
+
+Codex's concern: the lead's halt-filter extension applied
+metric_version >= 2 to convergence, nan_cascade, zero_gate_activation,
+current_best, and top_3, but missed the max_experiments cap. That cap
+still used xattn_valid_all, which counts both exp_xa_smoke_001 (v1)
+and exp_xa_smoke_001_v2 as separate experiments toward the 12-run
+budget. The auto-loop could stop one real experiment early.
+
+Action: scripts/run_next_experiment.py:359-372 (max_experiments
+check in check_halt_conditions). Changed:
+  if len(xattn_valid_all) >= budget.get("max_experiments", 999):
+to:
+  if len(xattn_valid_v2) >= budget.get("max_experiments", 999):
+plus a 7-line comment explaining the v1/v2 companion-row issue.
+
+Now consistent with the other halt conditions (nan_cascade,
+zero_gate_activation, convergence) and with current_best/top_3 — all
+filter to metric_version >= 2.
+
+Verify (local):
+
+    python3 - <<'PY'
+    import re
+    src = open("scripts/run_next_experiment.py").read()
+    m = re.search(r'if len\(xattn_valid_(v2|all)\) >= budget\.get\("max_experiments"', src)
+    assert m and m.group(1) == "v2"
+    print("PASS: max_experiments uses xattn_valid_v2")
+    PY
+
+----------------------------------------------------------------------
+3. HIGH: rescore_baselines.py emits status="rescored_v2" instead of patched contract
+
+Status: FIXED.
+
+Codex's concern: the original team-build run wrote status="rescored_v2"
+to the v2 rows in experiments.jsonl. The team-lead patched the live
+experiments.jsonl in-place to status="ok" + provenance="rescored_v2"
+so the launcher's update_sweep_state filter (which treats "ok" as
+completed) would pick the v2 rows up correctly. But the SCRIPT
+(scripts/rescore_baselines.py) still emits the old shape. Rerunning
+the documented `python3 scripts/rescore_baselines.py --auto-detect`
+command would re-append rows that update_sweep_state classifies as
+failed/non-completed — re-introducing the same problem.
+
+Action: scripts/rescore_baselines.py:281-298 (the row construction in
+the rescore script). Changed:
+  "status": "rescored_v2"
+to:
+  "status": "ok"
+  + added a new field `provenance: "rescored_v2"` placed alongside
+    `parent_exp_id` near the top of the row schema.
+
+Added a 7-line comment above the dict explaining the contract:
+status semantics belong to the launcher's filter; rescore origin is
+preserved in a separate provenance field. Future rescores emit the
+correct shape directly; no manual patch needed.
+
+Verify (local):
+
+    python3 - <<'PY'
+    src = open("scripts/rescore_baselines.py").read()
+    assert '"status": "ok"' in src
+    assert '"provenance": "rescored_v2"' in src
+    assert '"status": "rescored_v2"' not in src
+    print("PASS: rescore script emits status='ok' + provenance='rescored_v2'")
+    PY
+
+----------------------------------------------------------------------
+4. MINOR: build_dataset.py comment claims pre-narration split, but split is post-narration
+
+Status: FIXED.
+
+Codex's concern: the comment at data/gen/build_dataset.py:485-489
+said the split decision is made BEFORE narration, but the actual
+order is narrate → assign_disjoint_splits → assemble records. Not a
+correctness bug (the disjointness invariant depends on atomic group
+assignment by events_hash, not on temporal ordering of narration vs
+split), but a documentation/code mismatch that would mislead future
+maintainers.
+
+Action: data/gen/build_dataset.py:485-499. Rewrote the comment block
+to:
+- Drop the "Pre-narration" misnomer (the split is post-narration but
+  pre-record-assembly).
+- Explain that the disjointness invariant comes from atomic group
+  assignment, not from narration ordering.
+- Add an explicit "for future regenerations" note that moving the
+  split BEFORE narration would avoid paying narration cost on rows
+  that end up in the opposite split — an optimization, not a
+  correctness fix.
+
+No code change; comment-only.
+
+----------------------------------------------------------------------
+5. MINOR: docs/day-2-results.md has stale pod-state note
+
+Status: FIXED.
+
+Codex's concern: docs/day-2-results.md:157 still said the on-pod
+sweep_state.yaml reads schema_version: 1, but post-team-build the pod
+correctly reads schema_version: 2 with halted: false, n_xattn_runs:
+1, current_best: exp_xa_smoke_001_v2. Stale historically; would
+contradict the team-build report if committed as-is.
+
+Action: docs/day-2-results.md:157. Rewrote the note to reflect
+current verified state: schema_version: 2, metric_definition block
+present, halted: false, n_xattn_runs: 1, current_best.exp_id:
+exp_xa_smoke_001_v2 (worst HN-FPR 0.0537). Preserved the explanation
+that filtering happens at read-time from metric_version per row.
+
+----------------------------------------------------------------------
+Post-fix verification
+
+Local probes (all PASS):
+  - Blocker 1 fail-closed test: PASS (RuntimeError raised with
+    "review 020 Blocker" reference on unresolvable paths)
+  - High 2 grep check: PASS (max_experiments uses xattn_valid_v2)
+  - High 3 grep check: PASS (status='ok' + provenance='rescored_v2',
+    no stale 'rescored_v2' status)
+
+Pod re-validation (after rsync of the 3 modified files):
+  - python3 -m eval.score_risk --selftest: PASS
+  - python3 -m eval.bootstrap_ci --selftest: PASS
+  - python3 scripts/run_next_experiment.py --dry-run-validate-clean-eval
+    src/auto_research/runs/exp_baseline_event_only/config.yaml:
+    clean_eval_n=4466, clean_eval_dropped=534, mask shapes consistent
+  - sweep_state.yaml after re-running update_sweep_state with the new
+    code: n_completed=8, n_xattn_runs=1, halted=false (unchanged
+    semantically — fixes don't alter the current ranking)
+
+----------------------------------------------------------------------
+Commit anchors
+
+This fix pass touches:
+  - scripts/run_next_experiment.py (Blocker 1 + High 2)
+  - scripts/rescore_baselines.py (High 3)
+  - data/gen/build_dataset.py (Minor 4 — comment only)
+  - docs/day-2-results.md (Minor 5)
+  - review/020-baseline-correction-implementation/followup.txt (this file)
+
+No new files; only 5 edits to existing files. No regeneration triggered.
+The experiments.jsonl v2 rows (already patched in place to status='ok'
++ provenance='rescored_v2') are unchanged.
+
+----------------------------------------------------------------------
+Status going forward
+
+Codex's bottom line in review 020 was:
+
+> Must land before proceeding as a durable launch surface:
+> 1. Fail closed when clean-eval mask paths are absent/unresolvable for v2 rows.
+> 2. Count only v2/canonical x-attn rows for max_experiments.
+> 3. Make rescore_baselines.py emit the same status/provenance shape as the patched rows.
+
+All three landed. The system is now (per Codex's framing) walk-away
+launch-ready for Task #37 (first real x-attn full run) and Task #38
+(auto-loop budgeted sweep).
+
+Next step per Codex's recommendation:
+> 1. Run one full manual x-attn experiment.
+> 2. Confirm it appends a clean metric_version=2 row.
+> 3. Then activate the auto-loop.
+
+The plan from baseline-correction.md does NOT include #1-#3 above
+(those are Task #37 / Task #38 surface). Recommend the user proceed
+with /git-commits on the team-build + this follow-up fix pass, then
+dispatch Task #37 as the next plan.

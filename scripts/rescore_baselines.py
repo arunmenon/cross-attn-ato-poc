@@ -271,13 +271,22 @@ def rescore_run(
     # bundle with per_family/worst_family/mean/etc).
     hn_ci_stripped = per_mode_ci.get(primary)
 
+    # Review 020 High 3: status MUST be "ok" so the launcher's
+    # update_sweep_state filter (which treats `status == "ok"` as a
+    # completed row) picks v2 rows up correctly. The rescore origin is
+    # recorded under a separate `provenance` field so the audit trail is
+    # preserved without breaking the launcher's row contract. The
+    # original team-build run used status="rescored_v2" + a team-lead
+    # patch on the live experiments.jsonl; this corrects the script
+    # itself so re-running per docs/day-2-results.md is reproducible.
     row = {
         "exp_id": f"{exp_id}_v2",
         "parent_exp_id": exp_id,
+        "provenance": "rescored_v2",
         "arm": arm,
         "config_hash": None,  # mirrors of v1 row's config; not recomputed (no config drift)
         "config_summary": arm,
-        "status": "rescored_v2",
+        "status": "ok",
         "metric_version": 2,
         "hn_fpr_worst_stripped": _hn_worst(hn_point_for_row),
         "hn_fpr_mean_stripped": _hn_mean(hn_point_for_row),

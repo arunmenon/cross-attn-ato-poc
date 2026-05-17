@@ -1,0 +1,257 @@
+Review 020: baseline-correction implementation
+Date: 2026-05-17
+Repo root: /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+Diff base: b078dd0
+Scope: Verify the team-build implementation for review 018 + review 019 baseline-evaluation correction.
+
+Reviewed files
+review/_pending-codex-implementation-changelog.md
+review/CODEX_PROMPT.md
+review/README.md
+eval/score_risk.py
+eval/bootstrap_ci.py
+eval/leakage_checks.py
+scripts/run_next_experiment.py
+scripts/rescore_baselines.py
+scripts/diagnose_data_overlap.py
+data/gen/build_dataset.py
+src/auto_research/AGENT_INSTRUCTIONS.md
+src/auto_research/configs/budget.yaml
+docs/day-2-data-diagnostic.md
+docs/day-2-results.md
+README.md
+PLAN.md
+src/auto_research/experiments.jsonl
+src/auto_research/sweep_state.yaml
+
+Summary
+The core metric correction is sound. The new tie-aware HN-FPR formula uses fractional need, emits alpha/threshold diagnostics, and hits achieved_fpr=0.01 in the selftests. The clean-eval mask reproduces the review-018 leak counts exactly. The current pod state also has schema_version=2, four v2 rows, halted=false, and current_best=exp_xa_smoke_001_v2.
+
+However, the implementation is not fully closed. I found three issues that should be fixed before treating this as a durable launch surface: one Blocker in the launcher's fail-open clean-eval path, and two Highs in x-attn budget counting and rescore-script reproducibility. There are also two doc/comment nits.
+
+Verification run
+Local commands:
+
+1. python3 -B -m eval.leakage_checks --train-eval-overlap data/train_llm_narrated
+
+Output:
+n_train=20000  n_eval=5000
+n_kept=4466  n_dropped=534
+n_text_overlap=533  n_events_overlap=534  n_both=533  n_text_only=0  n_events_only=1
+
+2. python3 -B scripts/diagnose_data_overlap.py --check
+
+Output:
+text_overlap     = 533/5000 (10.7%)
+events_overlap   = 534/5000 (10.7%)
+skeleton_overlap = 4661/5000 (93.2%)
+CHECK OK: review-018 reference numbers reproduced exactly.
+
+3. python3 -B scripts/run_next_experiment.py --halt-check
+
+Output:
+clear to launch
+
+4. python3 -B -c '<v2 row schema check>'
+
+Output:
+v2 rows: 4
+all 4 v2 rows pass schema checks
+
+5. python3 -B -m data.gen.feature_bucketer --self-test
+Output:
+feature_bucketer self-test OK
+
+6. python3 -B -m data.gen.cheap_template_generator --self-test
+Output:
+cheap_template_generator self-test OK (54 family/actor combos, no leakage)
+
+7. python3 -B -m src.tokenizer.fencer
+Output:
+fencer self-test OK: {'<email>': 1, '<device_id>': 1, '<ip>': 1, '<amount>': 1, '<phone>': 1, '<browser>': 1, '<acct_id>': 1}
+
+8. python3 -B -m data.gen.pii_fencer
+Output:
+pii_fencer self-test OK (incl. review-004 #2 negative cases)
+
+9. python3 -B scripts/parse_metrics.py --self-test
+Output:
+parse_metrics merge contract OK (trainer metrics survive)
+
+Pod commands:
+
+10. /workspace/.venv/bin/python -B -m eval.score_risk --selftest
+
+Output:
+selftest A pass: n_above=0 n_tied=5 alpha=0.400000 achieved=0.010000
+selftest B pass: need=29.7900 n_above=4 n_tied=141 alpha=0.182908 achieved=0.010000 threshold=-9.9375
+selftest C pass: hn_test=0.045755 expected=0.045755
+selftest OK
+
+11. /workspace/.venv/bin/python -B -m eval.bootstrap_ci --selftest
+
+Output:
+selftest pass: worst_point=0.0333 [0.0155, 0.0534] alpha_mean=0.5495 tie_fraction_mean=0.003401 achieved_fpr_mean=0.010000
+selftest OK
+
+12. /workspace/.venv/bin/python -B scripts/run_next_experiment.py --dry-run-validate-clean-eval src/auto_research/runs/exp_baseline_event_only/config.yaml
+
+Output:
+train: /workspace/data/train_llm_narrated/train.jsonl
+eval:  /workspace/data/eval_fast_5k/eval.jsonl
+clean_eval_n=4466
+clean_eval_dropped=534
+clean_eval_mask_text_overlap=533
+clean_eval_mask_events_overlap=534
+
+13. Pod v2 row check:
+
+Output:
+4
+[('exp_baseline_event_only_v2', 'ok', 'rescored_v2', 4466, 534), ('exp_baseline_lora_text_v2', 'ok', 'rescored_v2', 4466, 534), ('exp_baseline_structured_as_text_v2', 'ok', 'rescored_v2', 4466, 534), ('exp_xa_smoke_001_v2', 'ok', 'rescored_v2', 4466, 534)]
+
+14. Pod run-dir check:
+
+Output:
+exp_baseline_event_only
+exp_baseline_lora_text
+exp_baseline_structured_as_text
+exp_stage0_001
+exp_vslice_001
+exp_xa_smoke_001
+
+Note: local system Python does not have numpy/sklearn, so eval.score_risk and eval.bootstrap_ci selftests were run in the pod venv.
+
+AC status
+AC1: PASS. Current v2 numbers reproduce the corrected leaderboard.
+AC1b: PASS on pod. The local checkout cannot resolve /workspace paths by design.
+AC2: PASS. compute_clean_eval_mask drops exactly 534 rows.
+AC3: PASS. CI bundles include tie_fraction, achieved_fpr, threshold, alpha.
+AC4: PASS for current state. sweep_state.yaml is schema_version=2 and current_best is exp_xa_smoke_001_v2.
+AC5: PASS for current rows, but see Finding 3: the script that regenerates rows still emits the wrong status shape.
+AC6: PARTIAL. Cross-split structured-events disjointness and text-overlap assertions exist, but the implementation is not actually pre-narration despite the comments/docs saying it is.
+AC7: PASS. docs/day-2-data-diagnostic.md exists and reproduces the review-018 diagnostic.
+AC8: PASS with a minor stale operational note; see Finding 5.
+AC9: PASS for the metric-definition additions in PLAN.md and AGENT_INSTRUCTIONS.md.
+AC10: PASS. Layer-A torch-free smokes pass locally.
+AC11: PASS. Metric and bootstrap selftests pass in the pod venv.
+AC12: PASS. Pod run directories are unchanged; rescore wrote artifacts inside existing run dirs only.
+AC13: PASS within reviewed scope. I did not find a closed-review regression in the touched auto-loop/baseline surface.
+
+Findings
+
+1. BLOCKER: New launcher rows can still be marked metric_version=2 after scoring the raw, leaky eval if the clean-eval mask cannot be resolved.
+
+Files:
+scripts/run_next_experiment.py:117-145
+scripts/run_next_experiment.py:597-663
+scripts/run_next_experiment.py:682-697
+scripts/run_next_experiment.py:713-735
+scripts/run_next_experiment.py:1008-1016
+
+The launcher applies the clean-eval mask only if compute_and_cache_clean_eval_mask() returns a bundle. If paths are missing or unresolvable, _resolve_clean_eval_paths() returns None, run_post_processing() falls back to raw predictions, and the record builder still writes metric_version: 2. validate_config() does not require data.train_path or data.eval_fast_path, and it also does not reject unresolvable paths.
+
+Verification:
+python3 -B - <<'PY'
+from scripts.run_next_experiment import validate_config
+print(validate_config({'arm': 'xattn'}))
+print(validate_config({'arm': 'xattn', 'data': {'train_path': '/missing/train', 'eval_fast_path': '/missing/eval'}}))
+PY
+
+Output:
+[]
+[]
+
+Why this matters:
+Review 019 Blocker 2 was specifically about ensuring every new run inherits the corrected clean-eval surface. This implementation handles the happy path, and the pod dry-run proves the current baseline config resolves correctly, but it is fail-open. An agent-written Task #37/#38 config with a missing or misspelled path could train, score on leaked eval, append metric_version=2, and enter sweep_state as if it were comparable to the corrected rows.
+
+Required adjustment:
+For metric_version=2 rows, missing/unresolvable clean-eval paths should be a hard launch or post-processing failure, not a raw-eval fallback. Alternatively, validate_config() must require resolvable data.train_path plus eval_fast_path/eval_path for all arms that emit v2 metrics.
+
+2. HIGH: max_experiments still double-counts v1/v2 companion rows for the same x-attn experiment.
+
+File:
+scripts/run_next_experiment.py:354-365
+
+The lead integration correctly extended metric_version >= 2 filtering to nan_cascade, zero_gate_activation, convergence, current_best, and top_3. The max_experiments cap still uses xattn_valid_all, which includes both exp_xa_smoke_001 and exp_xa_smoke_001_v2.
+
+Verification:
+python3 -B - <<'PY'
+import json
+rows=[json.loads(l) for l in open('src/auto_research/experiments.jsonl')]
+x_all=[r['exp_id'] for r in rows if r.get('arm')=='xattn' and r.get('status')=='ok']
+x_v2=[r['exp_id'] for r in rows if r.get('arm')=='xattn' and r.get('status')=='ok' and r.get('metric_version',1)>=2]
+print('xattn_valid_all', len(x_all), x_all)
+print('xattn_valid_v2', len(x_v2), x_v2)
+PY
+
+Output:
+xattn_valid_all 2 ['exp_xa_smoke_001', 'exp_xa_smoke_001_v2']
+xattn_valid_v2 1 ['exp_xa_smoke_001_v2']
+
+Why this matters:
+sweep_state.yaml reports n_xattn_runs: 1, but the halt budget sees 2. With max_experiments: 12, the loop can stop one real v2 experiment early today; future rescoring or duplicate companion rows would make the drift worse.
+
+Required adjustment:
+Use xattn_valid_v2 for the max_experiments cap, or count unique canonical experiments after collapsing parent_exp_id companion rows.
+
+3. HIGH: scripts/rescore_baselines.py still emits status="rescored_v2" instead of the committed row contract.
+
+File:
+scripts/rescore_baselines.py:274-304
+
+The current experiments.jsonl rows were patched to status="ok" with provenance="rescored_v2"; both local and pod state verify that. But the script that is documented as the reproducibility path still emits "status": "rescored_v2" and does not emit provenance. That means rerunning the documented command can append rows that update_sweep_state() treats as failed/non-completed instead of valid v2 comparison rows.
+
+Evidence:
+scripts/rescore_baselines.py:280 sets "status": "rescored_v2".
+scripts/rescore_baselines.py:274-304 does not set "provenance".
+docs/day-2-results.md:150-153 tells readers to rerun scripts/rescore_baselines.py --auto-detect to re-derive the v2 leaderboard.
+
+Why this matters:
+AC5 passes for the current patched rows, but not for the reproducible implementation. This is exactly the kind of one-time manual correction that will be lost on rerun.
+
+Required adjustment:
+Make rescore_baselines.py emit status="ok" plus provenance="rescored_v2" directly, matching the runtime row contract.
+
+4. MINOR: build_dataset.py claims the split is pre-narration, but the actual call happens after narration.
+
+File:
+data/gen/build_dataset.py:466-494
+
+The implementation samples journeys, narrates them, then calls assign_disjoint_splits(). The comment at lines 485-489 says "Pre-narration disjoint stratification" and says the split decision is made before narration. It is not.
+
+This is not reopening the leakage bug by itself: because the split groups identical structured_events hashes atomically, cross-split structured-events leakage should still be prevented, and Gate B asserts no cross-split text overlap after records are assembled. But the code/comment mismatch matters for future data-regeneration expectations and for AC6 wording. The implementation prevents cross-split leakage; it does not avoid narration/cache work before the split.
+
+5. MINOR: docs/day-2-results.md still contains a stale pod-state note.
+
+File:
+docs/day-2-results.md:157
+
+The document says the on-pod sweep_state.yaml still reads schema_version: 1 and that the next pod sync will update it. The pod now reads schema_version: 2 with halted: false and current_best=exp_xa_smoke_001_v2. The stale note is harmless historically, but if committed as the final Day-2 record it contradicts the team-build report and the verified pod state.
+
+Answers to the 8 changelog questions
+1. Tie-aware formula correctness: Yes. The implementation uses fractional need = target_fpr * n_legit and alpha = (need - n_above) / n_tied, clamped to [0, 1]. Pod selftests cover the review-019 event_only-style fixture.
+
+2. Bootstrap stochastics: Production bootstrap defaults seed=0, so rescores are deterministic unless a caller overrides seed. The selftest and CI bundles are stable.
+
+3. Halt-filter extension scope: Yes, max_experiments is still affected. See Finding 2.
+
+4. Status semantics for rescored rows: Yes, the script should emit status="ok" plus provenance="rescored_v2". See Finding 3.
+
+5. Intra-split diagnostic vs hard assertion: The diagnostic-only choice is acceptable for current scope. Review 018 identified cross-split leakage as the validity blocker; intra-split duplicates are expected under the saturated synthetic distribution and should be documented, not hard-failed.
+
+6. Disjoint stratification class balance: Best-effort group assignment is acceptable for the current guardrail, as long as actual_eval_frac is surfaced. For future data regeneration, low-diversity families may need a tighter balancing algorithm, but I would not block this fix pass on it.
+
+7. AC12 mechanical verification: The remote find check is sufficient for "no new run directories." An audit log of artifact files would be nice, not required.
+
+8. Future Task #37 readiness: Not fully. The current standard pod config resolves the clean-eval mask correctly, and current sweep_state will rank v2 rows correctly. But the launcher is not fail-closed, so a fresh x-attn config can still produce a metric_version=2 row on raw/leaky eval if paths are missing or unresolvable. Fix Finding 1 before treating Task #37/#38 as unattended-safe. Fix Finding 2 before starting the auto-loop budgeted sweep.
+
+Bottom line
+The metric-engine and diagnostic parts are correct. The current patched artifacts also look internally consistent. But the team-build implementation does not fully close reviews 018 + 019 yet.
+
+Must land before proceeding as a durable launch surface:
+1. Fail closed when clean-eval mask paths are absent/unresolvable for v2 rows.
+2. Count only v2/canonical x-attn rows for max_experiments.
+3. Make rescore_baselines.py emit the same status/provenance shape as the patched rows.
+
+After those fixes, Task #37 can run against the corrected clean, tie-aware surface and Task #38 can optimize on worst-family HN-FPR without reopening the review-018/019 confounders.
