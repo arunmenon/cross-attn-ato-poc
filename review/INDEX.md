@@ -29,6 +29,9 @@ the corresponding `followup.txt`, not here.
 | 015 | audit-014-meta-review | 2026-05-17 | 11      | closed         | 7d04064        |
 | 016 | fix-pass-014-015     | 2026-05-17 | 2        | closed         | 16549b0        |
 | 017 | review-016-response  | 2026-05-17 | 1        | closed         | 7e7201d        |
+| 018 | day-2-baseline-findings | 2026-05-17 | 3      | closed         | a373c14        |
+| 019 | plan-review-baseline-correction | 2026-05-17 | 6 | closed       | a373c14        |
+| 020 | baseline-correction-implementation | 2026-05-17 | 5 | closed   | e36c7a8        |
 
 ---
 
