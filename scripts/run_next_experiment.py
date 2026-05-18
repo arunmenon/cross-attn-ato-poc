@@ -951,30 +951,55 @@ def _do_run(config_path: Path) -> int:
     run_dir = config_path.parent
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # F8 (2026-05-18): detach launcher from claude's session so claude's
-    # 180m timeout SIGTERM doesn't cascade to launcher → trainer via the
-    # pipe chain. exp_xa_stress_012 was killed mid-run at 07:30Z when
-    # the 04:30 claude session timed out — F6 (start_new_session=True
-    # for the trainer subprocess) only isolated the trainer's session,
-    # but the launcher itself was a bash-tool child of claude and died
-    # with claude, which broke the trainer's stdout pipe (SIGPIPE) and
-    # killed the trainer too.
+    # F8 (2026-05-18): protect launcher from claude's 180m timeout
+    # SIGTERM cascade. exp_xa_stress_012 was killed at 07:30Z when the
+    # 04:30 cron session timed out — F6 (start_new_session=True for
+    # the trainer subprocess) only isolated the trainer's session, but
+    # the launcher itself was a bash-tool child of claude and died
+    # with claude, which broke the trainer's stdout pipe (SIGPIPE)
+    # and killed the trainer too.
     #
-    # Two complementary moves, both applied AFTER the cheap checks (so
-    # config/dedup/halt/lock errors still surface to claude's stdout):
-    #   1. os.setsid()  — launcher leaves claude's session, becomes
-    #      its own session leader. No SIGHUP cascade.
-    #   2. dup stdout/stderr to launcher.log — claude's stdout pipe
-    #      breaks when claude dies; if the launcher writes to that
-    #      pipe after that point, SIGPIPE kills it. Redirecting to a
-    #      file removes the risk.
+    # Three defenses, in order of which signal they block:
     #
-    # Idempotent and benign: if setsid() raises EPERM (already a
-    # session leader, e.g., when invoked via setsid(1) directly) we
-    # log and proceed.
+    #   1. signal.SIGHUP → SIG_IGN
+    #      When claude (the session leader of claude's bash-tool
+    #      session) dies, the kernel sends SIGHUP to every process in
+    #      that session. Claude's Bash tool puts each command into its
+    #      own process group (verified by PGID==PID on the launcher),
+    #      so os.setsid() refuses with EPERM (POSIX: a PG leader
+    #      cannot setsid). Without an extra defense the launcher dies
+    #      from SIGHUP. Ignoring it explicitly is the simplest fix.
+    #
+    #   2. signal.SIGPIPE → SIG_IGN
+    #      Claude's stdout pipe breaks when claude dies; any
+    #      subsequent print() on the launcher's still-inherited fd 1
+    #      raises SIGPIPE and the default action kills the launcher.
+    #      Ignoring it is defense-in-depth alongside the stdout
+    #      redirect below.
+    #
+    #   3. dup stdout/stderr to launcher.log
+    #      Belt-and-suspenders so the launcher's prints don't even
+    #      try to write to claude's pipe in the first place. Also
+    #      gives us an auditable per-run log distinct from train.log.
+    #
+    # We still try os.setsid() opportunistically — if it succeeds
+    # we get the cleanest detachment. If it fails (the common case
+    # under claude's Bash tool), the SIGHUP/SIGPIPE handlers keep
+    # the launcher alive anyway. All three are applied AFTER the
+    # cheap checks so config/dedup/halt/lock errors still surface
+    # to claude's stdout.
+    import signal
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+
+    _setsid_ok = False
     try:
         os.setsid()
+        _setsid_ok = True
     except OSError as _setsid_err:
+        # EPERM here is expected when launcher is already a PG leader
+        # (claude's Bash tool does this). SIGHUP IGN handles the
+        # SIGHUP-from-session-leader-death case as a substitute.
         print(f"[launcher] os.setsid() skipped: {_setsid_err}", file=sys.stderr)
 
     _launcher_log = run_dir / "launcher.log"
@@ -983,8 +1008,9 @@ def _do_run(config_path: Path) -> int:
     os.dup2(_flog.fileno(), 2)
     sys.stdout = _flog
     sys.stderr = _flog
-    print(f"[launcher] detached from parent session (pid={os.getpid()}, sid={os.getsid(0)}); "
-          f"logs to {_launcher_log}", flush=True)
+    _sid_state = "own-session" if _setsid_ok else "shared-session-but-SIGHUP-ignored"
+    print(f"[launcher] survival mode active (pid={os.getpid()}, sid={os.getsid(0)}, "
+          f"state={_sid_state}); logs to {_launcher_log}", flush=True)
 
     try:
         # 5. Launch trainer with per-experiment wall-clock cap (review 008 #4)
