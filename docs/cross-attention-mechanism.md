@@ -700,6 +700,40 @@ comparison, and the answer (so far) is "the two mechanisms tie."
 Terms used above, with one-line definitions and links to where they
 appear in the code.
 
+**CI (Confidence Interval)** — A range of plausible values around a
+measured number, accounting for the fact that the measurement was
+taken on a finite sample.
+
+When you see something like `0.0524 [0.0420, 0.0647]` in this POC:
+
+- `0.0524` is the **point estimate** — `hn_fpr_worst` computed on the
+  actual eval set of 4,466 examples.
+- `[0.0420, 0.0647]` is the **95% bootstrap CI** — the range that the
+  point estimate would fall in 95% of the time if we resampled the
+  eval set.
+
+**How we compute it (code: `eval/bootstrap_ci.py`):**
+
+1. Take the 4,466 evaluated predictions.
+2. Resample them with replacement (some examples picked twice, others
+   not at all — still 4,466 rows total).
+3. Recompute `hn_fpr_worst` on the resampled set.
+4. Repeat 1,000 times.
+5. Sort the 1,000 numbers; the 25th-lowest is `ci_lo`, the 25th-highest
+   is `ci_hi`.
+
+**Why it's load-bearing** in this POC: two runs are **statistically
+tied** if their CIs overlap. Without CIs, you might say "leader 0.0524
+beats baseline 0.0507 by 3%" — but with CIs you see leader's CI
+includes 0.0647 and baseline's CI includes 0.0408, so they overlap
+heavily and we **cannot** conclude one is better. Every "no statistical
+separation" claim in the sweep is shorthand for "CIs overlap."
+
+The headline win condition for the expanded sweep's early-exit was
+**CI-strict**: a new arm would only count as beating the leader if its
+`ci_hi < 0.0420` (the leader's `ci_lo`) — i.e., the CIs don't overlap
+at all. No arm in the sweep got close.
+
 **CPT (Continued Pre-Training)** — Running an already-pretrained
 language model through another round of standard next-token-prediction
 training, but on a *new* corpus. Teaches the LM domain-specific
