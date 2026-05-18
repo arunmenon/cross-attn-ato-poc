@@ -16,6 +16,7 @@ alongside `PLAN.md` and the git diff to give a grounded review.
 |---|---|
 | `docs/experiments-log.md` | **Running history of every experiment**, with hypothesis, dials moved, result, and what was learned. Append-only; updated as new arms land. |
 | `docs/auto-research-loop.md` | **Plain-language walkthrough of the auto-research loop**: cron → agent_tick → claude → launcher → trainer. Explains the agent-proposes-launcher-enforces design, the shared state surface, halt conditions, and the F-numbered fix lineage. |
+| `docs/cross-attention-mechanism.md` | **Architecture, hypothesis, and alternatives** for the cross-attention pathway. The Flamingo-style gated x-attn block, the Perceiver-Resampler, the side-stream encoder choices (small_transformer vs FT-Tx vs CNN+LSTM), the gate-init math, the parameter budget, and what the sweep so far says about the hypothesis. |
 
 ### Per-day results
 
