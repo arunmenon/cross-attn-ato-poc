@@ -1,0 +1,84 @@
+{
+  "auc": {
+    "point": 1.0,
+    "ci_lo": 0.9999999999999999,
+    "ci_hi": 1.0,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "r_at_fpr_0.001": {
+    "target_fpr": 0.001,
+    "point": 1.0,
+    "ci_lo": 1.0,
+    "ci_hi": 1.0,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "r_at_fpr_0.01": {
+    "target_fpr": 0.01,
+    "point": 1.0,
+    "ci_lo": 1.0,
+    "ci_hi": 1.0,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "r_at_fpr_0.05": {
+    "target_fpr": 0.05,
+    "point": 1.0,
+    "ci_lo": 1.0,
+    "ci_hi": 1.0,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "hard_negative_fpr_at_1pct": {
+    "target_fpr": 0.01,
+    "metric_version": 2,
+    "per_family": {
+      "hn_account_recovery": {
+        "point": 0.06501633986928104,
+        "ci_lo": 0.05478581140350878,
+        "ci_hi": 0.07414265255292653,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "hn_large_purchase": {
+        "point": 0.010166147455867082,
+        "ci_lo": 0.0024754489337822723,
+        "ci_hi": 0.022188152922248,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "hn_travel": {
+        "point": 0.0,
+        "ci_lo": 0.0,
+        "ci_hi": 0.0,
+        "resamples": 1000,
+        "confidence": 0.95
+      }
+    },
+    "worst_family": {
+      "point": 0.06501633986928104,
+      "ci_lo": 0.05478581140350878,
+      "ci_hi": 0.07414265255292653,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "mean": {
+      "point": 0.02506082910838271,
+      "ci_lo": 0.022956393896155843,
+      "ci_hi": 0.02726882386524982,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "tie_fraction_mean": 0.0014912422849912318,
+    "achieved_fpr_mean": 0.01,
+    "threshold_mean": -7.52775,
+    "alpha_mean": 0.5315124242701745,
+    "threshold_point": -7.5,
+    "alpha_point": 0.26333333333333303,
+    "tie_fraction_point": 0.0010070493454179255,
+    "achieved_fpr_point": 0.01,
+    "resamples": 1000,
+    "confidence": 0.95
+  }
+}

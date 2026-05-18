@@ -1,0 +1,82 @@
+# Round-2 perturbation #1: every_8 / slots=64 / gate=zero / small_transformer.
+#
+# Top-1 from Round-1 (round1_002: every_8 / slots=64 / gate=small_0.01,
+# HN-FPR-worst-stripped 0.0524 CI [0.042, 0.065]) with the only
+# unexplored half of the gate_init dial: zero (true Flamingo init,
+# base LM preserved exactly at step 0).
+#
+# Hypothesis: round1_002 already lands a max-gate magnitude of ~0.0112
+# at step 1500, meaning the small_0.01 starting bias contributes most of
+# the final magnitude — gates haven't moved far from init. Two plausible
+# outcomes with gate_init=zero:
+#
+#   (a) Gates fail to leave 0 (max_gate < 0.005 at step 1500): the
+#       Round-1 result was the init bias talking, not learned cross-attn
+#       signal. Worst-family HN-FPR would regress toward the LM-only
+#       baseline (~CPT-light-merged level). Halts zero_gate cascade if
+#       a second zero-init run also collapses.
+#
+#   (b) Gates open under learning pressure alone (~0.01+ at step 1500)
+#       AND HN-FPR matches or beats round1_002: confirms cross-attn is
+#       providing real lift, not init-bias artifact. The cleaner story
+#       for the Day-3 synthesis.
+#
+# Either outcome materially sharpens the cross-attn vs structured-as-text
+# comparison: (a) reframes Round-1 as init-bias; (b) cements the
+# claim that x-attn learns useful side-stream features.
+
+exp_id: exp_xa_round2_007
+arm: xattn
+
+xattn:
+  insertion_pattern: every_8
+  gate_init: zero
+  resampler_slots: 64
+  encoder: small_transformer
+  lora_r_on_q: 16
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8
+  lr: 1.0e-4
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated
+  eval_fast_path: /workspace/data/eval_fast_5k
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  Round-2 gate_init=zero perturbation of Round-1 leader. Direct
+  comparator: round1_002 (every_8 / slots=64 / small_0.01) at
+  HN-FPR-worst-stripped 0.0524 CI [0.0420, 0.0647]. Same architecture,
+  only dial changed is gate_init small_0.01 -> zero.
+
+  Probes whether Round-1's HN-FPR signal comes from learned cross-attn
+  or from the small_0.01 starting bias. round1_002's final max-gate
+  magnitude was 0.0112 — barely above the (lowered, post-review-014)
+  0.005 "gate open" threshold — so the init bias is a sizeable fraction
+  of the final magnitude. A successful zero-init run would close that
+  ambiguity for the Day-3 synthesis.
+
+  Halt-relevant: if max_gate < 0.005 at step 1500 this counts as one
+  zero_gate consecutive failure. A second zero-init run regressing the
+  same way would halt the sweep — that itself is a finding worth
+  capturing in the writeup.

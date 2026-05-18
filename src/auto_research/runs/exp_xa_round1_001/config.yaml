@@ -1,0 +1,77 @@
+# Task #37: first FULL x-attn run against the corrected metric_version=2 surface.
+#
+# Round-1 spread starting point (PLAN.md "Proposer heuristic" §Round 1).
+# Mirrors exp_xa_smoke_001's architectural shape (every_4 / small_0.01 /
+# 64 slots / small_transformer) but at 1500 steps instead of 100. Bar
+# to beat: structured_as_text_v2 worst HN-FPR = 0.0507 on the clean
+# eval (n=4466, tie-aware exact-target at 1% legit FPR).
+#
+# Critical post-reviews 018/019/020 invariants that the launcher
+# enforces for this run:
+#   - clean-eval mask resolves at /workspace/data/* (dry-run verified
+#     clean_eval_n=4466, clean_eval_dropped=534 before launch).
+#   - metric_version: 2 attached to the appended row, tie-aware HN-FPR
+#     computed on the clean eval.
+#   - On post-processing failure to resolve the mask, the launcher
+#     fails closed (review 020 Blocker fix at run_post_processing).
+
+exp_id: exp_xa_round1_001
+arm: xattn
+
+xattn:
+  insertion_pattern: every_4
+  gate_init: small_0.01
+  resampler_slots: 64
+  encoder: small_transformer
+  lora_r_on_q: 16
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-merged
+  steps: 1500                          # full-train, not the 100-step smoke
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8                        # effective batch = 32
+  lr: 1.0e-4                           # PLAN.md x-attn default
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated
+  eval_fast_path: /workspace/data/eval_fast_5k
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000            # real-run scale
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  First FULL (1500-step) x-attn run against the corrected
+  metric_version=2 surface. Configuration mirrors exp_xa_smoke_001
+  exactly (every_4 / slots=64 / gate=small_0.01 / small_transformer);
+  the only difference is steps (1500 vs 100). The smoke at 100 steps
+  scored worst HN-FPR=0.0537 on the clean eval. Bar to beat for this
+  run: structured_as_text_v2 worst HN-FPR=0.0507. Three possible
+  outcomes:
+
+  (a) Below 0.0507 with meaningfully separated CI: strong evidence
+      that x-attn provides classification lift on this synthetic
+      surface. Proceed to full Round-1 spread (6 cells) via auto-loop.
+  (b) Around 0.0507 with overlapping CIs: inconclusive at this scale;
+      run the rest of Round-1 spread before deciding on Task #38.
+  (c) Worse than 0.0507: real Day-3 finding — "x-attn does not
+      outperform structured-as-text concat on this synthetic surface."
+      Reframe x-attn's value as grounding/explanation per PLAN.md
+      "Risks" §Event-only classifier wins.
+
+  Either way the launcher's metric_version=2 path is exercised
+  end-to-end, validating the review-018/019/020 correction stack
+  before unattended auto-loop activation.

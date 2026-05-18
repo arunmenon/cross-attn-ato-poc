@@ -1,0 +1,22 @@
+The tokenizer you are loading from '/workspace/checkpoints/qwen3-8b-cpt-light-merged' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:00<00:00, 120.32it/s]
+structured_as_text: trainable params = 665,149,440
+train: 20000 examples; eval: 5000 examples
+total_steps=1500
+step     0 loss 1.9852
+step   100 loss 1.7892
+step   200 loss 1.7194
+step   300 loss 1.6689
+step   400 loss 1.7603
+step   500 loss 1.6717
+step   600 loss 1.6086
+step   700 loss 1.5971
+step   800 loss 1.7756
+step   900 loss 1.7098
+step  1000 loss 1.6562
+step  1100 loss 1.8112
+step  1200 loss 1.6610
+step  1300 loss 1.5527
+step  1400 loss 1.7328
+wrote src/auto_research/runs/exp_baseline_structured_as_text/metrics.json + lora_adapter/

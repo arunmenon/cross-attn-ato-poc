@@ -1,0 +1,51 @@
+# Task #36 baseline #1 of 3: LoRA-text-only on RAW Qwen3-8B.
+#
+# Per PLAN.md "Baselines §2": LoRA r=16 on raw Qwen3-8B (no CPT-light
+# warmup), trained on the SAME narrative + verdict-footer text the
+# x-attn arm sees. Tells us whether CPT-light is pulling its weight vs
+# LoRA alone — if this baseline ties CPT-light-merged on HN-FPR, the
+# Stage-0 CPT pass added no classification signal beyond what LoRA
+# gives us in one stage.
+#
+# Per-arm checkpoint rule (review 007 finding #3 / launcher
+# validate_config): lora_text MUST start from raw Qwen3-8B, NOT the
+# merged CPT checkpoint. Omitting `base_checkpoint` lets the trainer's
+# per-arm default (`Qwen/Qwen3-8B`) apply.
+
+exp_id: exp_baseline_lora_text
+arm: lora_text
+
+training:
+  # base_checkpoint OMITTED — trainer defaults to Qwen/Qwen3-8B.
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8                            # effective batch = 32
+  lr: 1.0e-4                               # LoRA-text default per PLAN.md
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated
+  eval_fast_path: /workspace/data/eval_fast_5k
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000                # real-run scale, not smoke
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  Day-2 baseline #2 of 4. Raw Qwen3-8B + LoRA r=16 on q_proj, eval-mode
+  dropout 50/25/25 active in training. Comparator for CPT-light-merged
+  (already in experiments.jsonl as exp_stage0_001). If LoRA-text alone
+  reaches the same HN-FPR as CPT-light-merged within overlapping CIs,
+  the CPT pass earned its keep on perplexity but not on classification.

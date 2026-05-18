@@ -1,0 +1,112 @@
+clear to launch
+[agent_tick] 2026-05-17T19:00:01Z launching claude
+I have the state I need and a proposed config ready, but my Write attempt is pending permission approval. Let me summarize what I'd do and wait for your go-ahead.
+
+## State
+
+From `sweep_state.yaml`:
+- `n_xattn_runs: 2`, `halted: false`, `n_failed: 2`, `gpu_hours_used: 3.038 / 18`
+- Current best: `exp_xa_smoke_001_v2` — worst HN-FPR-stripped **0.0537** (mean 0.0261), AUC saturated 1.0
+- Round-1 cell 1 (`exp_xa_round1_001`, every_4 / slots=64 / small_0.01, 1500 steps) finished with worst HN-FPR-stripped **0.0572** [0.0455, 0.0691], worst family `hn_account_recovery`, `max_gate_magnitude=0.0106` (gates barely cracked)
+- Structured-as-text bar is ~0.0507 — neither x-attn run beats it yet
+- Convergence halt cannot fire until 6 valid x-attn runs exist; we have 2
+
+`experiments.jsonl` is in `.claude/settings.json`'s Read-deny list by design, so I worked from `sweep_state.yaml` + per-run `metrics.json` / `ci_report.json`.
+
+## Proposed next run
+
+Round-1 spread cell 2 per `AGENT_INSTRUCTIONS.md`:
+
+| dial | value |
+|---|---|
+| `insertion_pattern` | `every_8` |
+| `resampler_slots` | 64 |
+| `gate_init` | `small_0.01` |
+| `encoder` | `small_transformer` |
+| `steps` | 1500 |
+
+Only delta vs. cell 1 is `every_4 → every_8` (3 x-attn layers from layer 12 instead of 6). Reads against cell 1's 0.0572 worst HN-FPR and tells us whether the flat-gates story is density-limited or gate-init-limited.
+
+## Blocker
+
+The Write to `src/auto_research/runs/exp_xa_round1_002/config.yaml` is showing **"Claude requested permissions … but you haven't granted it yet"** — the prompt seems to be pending in your harness. Once you approve the Write, I'll launch `python scripts/run_next_experiment.py src/auto_research/runs/exp_xa_round1_002/config.yaml` and write `notes.md` on completion.
+
+No source code edits are needed for this run, so no git-checkpoint commit is required first. I have not edited anything.
+[agent_tick] 2026-05-17T19:03:34Z tick complete (rc=0)
+[agent_tick] 2026-05-17T19:30:01Z GPU lock held by live PID=45147; skipping this tick
+[agent_tick] 2026-05-17T20:00:01Z GPU lock held by live PID=47510; skipping this tick
+[agent_tick] 2026-05-17T20:30:01Z GPU lock held by live PID=47510; skipping this tick
+[agent_tick] 2026-05-17T21:00:01Z GPU lock held by live PID=49903; skipping this tick
+[agent_tick] 2026-05-17T21:30:01Z GPU lock held by live PID=49903; skipping this tick
+[agent_tick] 2026-05-17T22:00:01Z GPU lock held by live PID=52301; skipping this tick
+[agent_tick] 2026-05-17T22:30:01Z stale GPU lock (PID=52301); removing and proceeding
+clear to launch
+[agent_tick] 2026-05-17T22:30:01Z launching claude
+[agent_tick] 2026-05-17T23:00:01Z GPU lock held by live PID=54252; skipping this tick
+The README.md write was denied. I'll stop trying to modify it and summarize what was accomplished, leaving the Day-2 README writeup for the user to decide on.
+
+## Summary of this loop
+
+**State at start**: n_xattn_runs=5, halted=false, orphaned `exp_xa_round1_005` directory (launcher died at model load on the prior agent invocation).
+
+**Actions taken**:
+1. Marked `exp_xa_round1_005` failed via `python scripts/run_next_experiment.py --mark-failed src/auto_research/runs/exp_xa_round1_005` (per AGENT_INSTRUCTIONS — same-config retry is forbidden, so the every_8 × slots=128 cell stays empty).
+2. Proposed and launched `exp_xa_round1_006` (late_only / slots=128) — the last Round-1 spread cell.
+3. Wrote `runs/exp_xa_round1_006/notes.md` with the result interpretation.
+
+**Result of exp_xa_round1_006**: worst-family HN-FPR = 0.0604 [0.0472, 0.0709], mean 0.0255, gate_max 0.0109. Statistically tied with round1_003 (late_only/64 = 0.0586) — confirms the slots dial is dead on this surface.
+
+**Halt**: launcher tripped convergence after this run — `no worst-family HN-FPR improvement >= 0.005 over last 4 x-attn runs (first=0.0524, best=0.0524)`. Auto-loop is done.
+
+**Round-1 leader**: `exp_xa_round1_002` (every_8 / slots=64) at 0.0524 [0.0420, 0.0647]. Statistically tied with `structured_as_text` (0.0507); beats `event_only` (0.0730) by non-overlapping CI.
+
+**Not done** (denied or out of scope):
+- The Day-2 README section. I drafted it but the README.md write was denied — let me know if you want me to retry, write to a different path, or adjust the draft before writing.
+[agent_tick] 2026-05-17T23:22:52Z tick complete (rc=0)
+HALT: convergence: no worst-family HN-FPR improvement >= 0.005 over last 4 x-attn runs (first=0.0524, best=0.0524)
+[agent_tick] launcher reports halted; skipping this tick
+HALT: convergence: no worst-family HN-FPR improvement >= 0.005 over last 4 x-attn runs (first=0.0524, best=0.0524)
+[agent_tick] launcher reports halted; skipping this tick
+HALT: convergence: no worst-family HN-FPR improvement >= 0.005 over last 4 x-attn runs (first=0.0524, best=0.0524)
+[agent_tick] launcher reports halted; skipping this tick
+HALT: convergence: no worst-family HN-FPR improvement >= 0.005 over last 4 x-attn runs (first=0.0524, best=0.0524)
+[agent_tick] launcher reports halted; skipping this tick
+HALT: convergence: no worst-family HN-FPR improvement >= 0.005 over last 4 x-attn runs (first=0.0524, best=0.0524)
+[agent_tick] launcher reports halted; skipping this tick
+clear to launch
+[agent_tick] 2026-05-18T02:00:01Z launching claude
+[agent_tick] 2026-05-18T02:30:01Z GPU lock held by live PID=61957; skipping this tick
+[agent_tick] 2026-05-18T03:00:01Z GPU lock held by live PID=64361; skipping this tick
+[agent_tick] 2026-05-18T03:30:01Z GPU lock held by live PID=64361; skipping this tick
+All Round-2 work and Day-3 synthesis is now persisted. Final status:
+
+**Sweep status:** halted on `zero_gate_activation` (2 consecutive xattn runs with `max_gate < 0.005`).
+- `n_xattn_runs`: 8/12 budget, `gpu_hours_used`: 7.735/18.000.
+
+**Round-2 runs (both today, 2026-05-18):**
+- `exp_xa_round2_007` — every_8/64/gate=zero — HN-FPR-worst 0.0608 [0.0475, 0.0716], max_gate **0.0038**
+- `exp_xa_round2_008` — every_4/64/gate=zero — HN-FPR-worst 0.0594 [0.0470, 0.0708], max_gate **0.0041**
+
+**Headline finding:** With `gate_init=zero`, gates barely moved from zero, yet HN-FPR is statistically tied with the matched `gate_init=small_0.01` Round-1 siblings (CIs heavily overlap). Round-1's "gates opened to ~0.011" was init-bias carried, not learned signal. Cross-attn provides no detectable classification lift over structured-as-text on the 5k clean-eval surface.
+
+**Writes made (all in agent-owned files):**
+- `src/auto_research/runs/exp_xa_round2_007/{config.yaml,notes.md}`
+- `src/auto_research/runs/exp_xa_round2_008/{config.yaml,notes.md}`
+- `README.md` — Day-3 section + Final synthesis (v3 question answered, friction catalog, gates story, per-baseline deltas, Day-4 recommendation: pivot to medium-eval head-to-head, then stop architectural sweep if tied).
+
+Not touched: `experiments.jsonl`, `sweep_state.yaml` (launcher-owned).
+
+Per AGENT_INSTRUCTIONS halt policy, stopping here.
+[agent_tick] 2026-05-18T03:44:42Z tick complete (rc=0)
+HALT: zero_gate_activation: last 2 x-attn runs had max gate < 0.005
+[agent_tick] 2026-05-18T04:00:01Z launching claude
+Halted — no new experiments to launch. The state is already in good shape:
+
+- `sweep_state.yaml` reports `halted: true`, `halt_reason: 'zero_gate_activation: last 2 x-attn runs had max gate < 0.005'`. Round-2's `exp_xa_round2_007` (max_gate=0.00385) and `exp_xa_round2_008` (max_gate=0.00412) both landed below the 0.005 floor, tripping the halt correctly.
+- Per-run agent artifacts (`runs/exp_xa_round2_007/notes.md`, `runs/exp_xa_round2_008/notes.md`) are present.
+- The **Day-3 README section is already written** (README.md lines 215-507) and covers all required pieces: round-2 sweep results, matched-architecture pair table, "gates-from-zero" finding, "HN-FPR-from-zero" finding, failure-mode invariance, final synthesis answering the v3 question, integration-friction catalog, per-baseline deltas with CI overlap, per-journey/per-actor/hard-negative breakdown, and the pivot-then-stop Day-4 recommendation.
+
+Per `AGENT_INSTRUCTIONS.md` §"Halt conditions" ("do not propose new experiments. Write the daily section of the README, then stop") and the user instruction ("if a halt condition is met, stop launching new experiments and write the Day-3 README section as appropriate"), the right action is to stop. No new `runs/exp_NNN/config.yaml` to write. Budget remaining (4 x-attn slots, ~10 GPU hours) is preserved for a user-decided extension (e.g., the 50k medium-eval head-to-head called out as Day-4 action #1).
+[agent_tick] 2026-05-18T04:00:51Z tick complete (rc=0)
+clear to launch
+[agent_tick] 2026-05-18T04:30:01Z launching claude

@@ -1,0 +1,58 @@
+# Task #36 baseline #2 of 3: structured-as-text concat — the
+# LOAD-BEARING apples-to-apples comparator.
+#
+# Per PLAN.md "Baselines §3": serialize the event stream into a compact
+# <events>...</events> text block, prepend to the narrative, train on
+# the merged CPT-light checkpoint (same starting point as x-attn).
+# Differs from x-attn ONLY in HOW the structured signal reaches the LM:
+# inline text channel vs. cross-attn from a side-stream encoder.
+#
+# If cross-attn cannot beat THIS baseline with non-overlapping CIs, the
+# architecture is not justified — the same structured info was already
+# reachable via the text channel.
+#
+# Per-arm checkpoint rule: structured_as_text MUST start from the
+# merged CPT-light checkpoint to isolate the architectural delta against
+# x-attn. Setting `base_checkpoint` explicitly to match exp_xa_smoke_001.
+
+exp_id: exp_baseline_structured_as_text
+arm: structured_as_text
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8                            # effective batch = 32
+  lr: 1.0e-4
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated
+  eval_fast_path: /workspace/data/eval_fast_5k
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  Day-2 baseline #3 of 4 and the load-bearing comparator for the whole
+  POC. Same merged CPT-light starting checkpoint as x-attn, same
+  effective batch / LR / steps. The compact <events>...</events> block
+  is prepended to the narrative inside the trainer's collator (using
+  the byte-identical event-line format from data/gen/build_dataset.py
+  per review 007 finding #5). If x-attn cannot beat this on
+  worst-family HN-FPR with non-overlapping CIs, cross-attn is
+  unjustified for this synthetic surface — text-channel concat already
+  carried the signal.

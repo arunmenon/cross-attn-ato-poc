@@ -1,0 +1,69 @@
+# Round-1 spread cell #5: every_8 / slots=128 / gate=small_0.01 / small_transformer.
+#
+# Isolates the slots dial against round1_002 (every_8 / slots=64; current
+# best at HN-FPR-worst 0.0524). every_8 has the lowest x-attn-layer count
+# (3 layers), so this is the cleanest test of "does more resampler
+# capacity help when the LM-side x-attn budget is small."
+#
+# If round1_005 lands materially better than round1_002 (<= 0.045
+# with non-overlapping CIs): new leader, and slots=128 becomes the
+# Round-2 base.
+# If tied (CIs overlap 0.05-0.06): slots dial is dead, cell #6 may be
+# skipped, and Round-2 perturbations focus on every_8 / slots=64 with
+# gate_init=zero.
+
+exp_id: exp_xa_round1_005
+arm: xattn
+
+xattn:
+  insertion_pattern: every_8
+  gate_init: small_0.01
+  resampler_slots: 128
+  encoder: small_transformer
+  lora_r_on_q: 16
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8
+  lr: 1.0e-4
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated
+  eval_fast_path: /workspace/data/eval_fast_5k
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  Round-1 cell #5: every_8 / slots=128. Tests whether the resampler-
+  capacity dial helps when the x-attn-layer budget is at its minimum
+  (3 layers in every_8). Direct comparator: round1_002 (every_8 /
+  slots=64), current best at HN-FPR-worst 0.0524.
+
+  Outcomes:
+  - Materially better (<= 0.045 non-overlapping CIs): new leader,
+    slots=128 wins where every_4 it didn't because fewer x-attn
+    layers means the resampler-output capacity isn't competing with
+    LM-side attention budget. Promote every_8/128 to Round-2 base.
+  - Tied (CIs overlap, worst still ~0.05-0.06): slots dial confirmed
+    dead on this surface. Skip cell #6 (late_only/128) to save
+    budget for Round-2 gate_init=zero perturbations of
+    every_8/64 and every_4/64.
+  - Materially worse: same conclusion as "tied" — drop slots=128
+    from Round-2 candidate set.

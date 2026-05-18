@@ -1,0 +1,254 @@
+{
+  "stripped": {
+    "auc": {
+      "point": 1.0,
+      "ci_lo": 0.9999999999999999,
+      "ci_hi": 1.0,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "r_at_fpr_0.001": {
+      "target_fpr": 0.001,
+      "point": 1.0,
+      "ci_lo": 1.0,
+      "ci_hi": 1.0,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "r_at_fpr_0.01": {
+      "target_fpr": 0.01,
+      "point": 1.0,
+      "ci_lo": 1.0,
+      "ci_hi": 1.0,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "r_at_fpr_0.05": {
+      "target_fpr": 0.05,
+      "point": 1.0,
+      "ci_lo": 1.0,
+      "ci_hi": 1.0,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "hard_negative_fpr_at_1pct": {
+      "target_fpr": 0.01,
+      "metric_version": 2,
+      "per_family": {
+        "hn_account_recovery": {
+          "point": 0.05243872549019608,
+          "ci_lo": 0.04132552649134575,
+          "ci_hi": 0.0646681056701031,
+          "resamples": 1000,
+          "confidence": 0.95
+        },
+        "hn_large_purchase": {
+          "point": 0.02615264797507788,
+          "ci_lo": 0.011450639209243144,
+          "ci_hi": 0.039972951482987046,
+          "resamples": 1000,
+          "confidence": 0.95
+        },
+        "hn_travel": {
+          "point": 0.0,
+          "ci_lo": 0.0,
+          "ci_hi": 0.0,
+          "resamples": 1000,
+          "confidence": 0.95
+        }
+      },
+      "worst_family": {
+        "point": 0.05243872549019608,
+        "ci_lo": 0.04197711847179795,
+        "ci_hi": 0.0646681056701031,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "mean": {
+        "point": 0.02619712448842465,
+        "ci_lo": 0.02410921850185086,
+        "ci_hi": 0.02829264270938195,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "tie_fraction_mean": 0.002052424155484944,
+      "achieved_fpr_mean": 0.01,
+      "threshold_mean": -9.404625,
+      "alpha_mean": 0.4766240596443032,
+      "threshold_point": -9.5,
+      "alpha_point": 0.3949999999999996,
+      "tie_fraction_point": 0.000671366230278617,
+      "achieved_fpr_point": 0.01,
+      "resamples": 1000,
+      "confidence": 0.95
+    }
+  },
+  "opaque": {
+    "auc": {
+      "point": 1.0,
+      "ci_lo": 0.9999999999999999,
+      "ci_hi": 1.0,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "r_at_fpr_0.001": {
+      "target_fpr": 0.001,
+      "point": 1.0,
+      "ci_lo": 1.0,
+      "ci_hi": 1.0,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "r_at_fpr_0.01": {
+      "target_fpr": 0.01,
+      "point": 1.0,
+      "ci_lo": 1.0,
+      "ci_hi": 1.0,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "r_at_fpr_0.05": {
+      "target_fpr": 0.05,
+      "point": 1.0,
+      "ci_lo": 1.0,
+      "ci_hi": 1.0,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "hard_negative_fpr_at_1pct": {
+      "target_fpr": 0.01,
+      "metric_version": 2,
+      "per_family": {
+        "hn_account_recovery": {
+          "point": 0.06321078431372548,
+          "ci_lo": 0.05228664283231542,
+          "ci_hi": 0.0738576588227872,
+          "resamples": 1000,
+          "confidence": 0.95
+        },
+        "hn_large_purchase": {
+          "point": 0.012461059190031152,
+          "ci_lo": 0.0029235516115871077,
+          "ci_hi": 0.02548178997223583,
+          "resamples": 1000,
+          "confidence": 0.95
+        },
+        "hn_travel": {
+          "point": 0.0,
+          "ci_lo": 0.0,
+          "ci_hi": 0.0,
+          "resamples": 1000,
+          "confidence": 0.95
+        }
+      },
+      "worst_family": {
+        "point": 0.06321078431372548,
+        "ci_lo": 0.05228664283231542,
+        "ci_hi": 0.0738576588227872,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "mean": {
+        "point": 0.025223947834585547,
+        "ci_lo": 0.02318947507568547,
+        "ci_hi": 0.02733677240802391,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "tie_fraction_mean": 0.0013002028171664386,
+      "achieved_fpr_mean": 0.01,
+      "threshold_mean": -7.680624953269959,
+      "alpha_mean": 0.5179434325674329,
+      "threshold_point": -7.625,
+      "alpha_point": 0.5966666666666663,
+      "tie_fraction_point": 0.0010070493454179255,
+      "achieved_fpr_point": 0.01,
+      "resamples": 1000,
+      "confidence": 0.95
+    }
+  },
+  "full": {
+    "auc": {
+      "point": 1.0000000000000002,
+      "ci_lo": 0.9999999999999999,
+      "ci_hi": 1.0000000000000002,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "r_at_fpr_0.001": {
+      "target_fpr": 0.001,
+      "point": 1.0,
+      "ci_lo": 1.0,
+      "ci_hi": 1.0,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "r_at_fpr_0.01": {
+      "target_fpr": 0.01,
+      "point": 1.0,
+      "ci_lo": 1.0,
+      "ci_hi": 1.0,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "r_at_fpr_0.05": {
+      "target_fpr": 0.05,
+      "point": 1.0,
+      "ci_lo": 1.0,
+      "ci_hi": 1.0,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "hard_negative_fpr_at_1pct": {
+      "target_fpr": 0.01,
+      "metric_version": 2,
+      "per_family": {
+        "hn_account_recovery": {
+          "point": 0.06075980392156863,
+          "ci_lo": 0.0478145523343812,
+          "ci_hi": 0.07206379485527359,
+          "resamples": 1000,
+          "confidence": 0.95
+        },
+        "hn_large_purchase": {
+          "point": 0.01557632398753894,
+          "ci_lo": 0.0032258064516129032,
+          "ci_hi": 0.031058319304967007,
+          "resamples": 1000,
+          "confidence": 0.95
+        },
+        "hn_travel": {
+          "point": 0.0,
+          "ci_lo": 0.0,
+          "ci_hi": 0.0,
+          "resamples": 1000,
+          "confidence": 0.95
+        }
+      },
+      "worst_family": {
+        "point": 0.06075980392156863,
+        "ci_lo": 0.0478145523343812,
+        "ci_hi": 0.07206379485527359,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "mean": {
+        "point": 0.025445375969702522,
+        "ci_lo": 0.02340222565111946,
+        "ci_hi": 0.02764827588022287,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "tie_fraction_mean": 0.001282445907962162,
+      "achieved_fpr_mean": 0.01,
+      "threshold_mean": -7.961124967098236,
+      "alpha_mean": 0.5041206616161619,
+      "threshold_point": -8.0,
+      "alpha_point": 0.5966666666666663,
+      "tie_fraction_point": 0.0010070493454179255,
+      "achieved_fpr_point": 0.01,
+      "resamples": 1000,
+      "confidence": 0.95
+    }
+  }
+}

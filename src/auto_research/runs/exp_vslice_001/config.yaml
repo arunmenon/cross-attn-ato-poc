@@ -1,0 +1,56 @@
+# Task #32 — vertical slice make-or-break smoke.
+#
+# Not a real training run. Goal: prove the entire pipeline (data ->
+# trainer -> eval -> CI -> metrics) holds end-to-end with no NaN, no
+# OOM, no CUDA assert, and produces a valid AUC + bootstrap CI.
+#
+# Pass criteria (from PLAN.md "Smoke tests — three layers" + Task #32):
+#   1. 100 steps complete; no NaN.
+#   2. PagedAdamW8bit (Blackwell paged-kernel) does not fall back to CPU.
+#   3. eval produces predictions_<mode>.jsonl for all 3 modes.
+#   4. AUC is computable (any value in [0,1] — even 0.50 random-guess).
+#   5. bootstrap CI produces a [lo, hi] interval.
+#   6. Leakage scan reports clean=True on the audit subset.
+#
+# Fail -> stay on vertical slice, fix the integration break, do NOT
+# proceed to Task #33 (full Stage-0 CPT-light).
+
+exp_id: exp_vslice_001
+arm: cpt_light
+
+training:
+  # base_checkpoint omitted -> trainer default Qwen/Qwen3-8B (raw)
+  # per review 007 finding #3.
+  steps: 100
+  seq_len: 2048
+  micro_batch: 2
+  grad_accum: 4                           # effective batch = 8
+  lr: 5e-5                                # CPT-light default per PLAN.md
+  warmup_steps: 10                        # proportional to 100 total
+  precision: bf16
+  optimizer: paged_adamw_8bit             # validated on Blackwell SM_120
+  stress_run: false
+  seed: 0
+
+data:
+  train_path: /workspace/data/train_llm_narrated
+  eval_fast_path: /workspace/data/eval_fast_5k
+  eval_mode_dropout:                      # PLAN.md Patch 2 — exercised during training
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 200                # smaller for smoke speed; 1000 in real runs
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  Vertical slice smoke run (Task #32). Tests data loader, custom token
+  install + embed resize, Stage-0 LoRA attach, eval-mode dropout
+  collator, paged_adamw_8bit on Blackwell, three-mode eval, bootstrap
+  CI, and atomic metrics write. Not training to convergence; 100 steps
+  on ~800 random records. AUC near 0.5 is expected and a PASS.

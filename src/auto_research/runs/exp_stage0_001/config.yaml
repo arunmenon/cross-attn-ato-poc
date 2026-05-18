@@ -1,0 +1,59 @@
+# Task #33 — full Stage-0 CPT-light.
+#
+# Per PLAN.md Day-1 Hr 6-10. Trains the CPT-light adapter on the full
+# 20k LLM-narrated train set, then `scripts/merge_stage0_lora.py`
+# merges the LoRA into the base to produce
+# `/workspace/checkpoints/qwen3-8b-cpt-light-merged/` -- which is
+# (a) baseline #1 for the Day-3 comparison and (b) the starting
+# checkpoint for Stage-1 cross-attention training (Tasks #35-#37).
+#
+# Hyperparameters match PLAN.md "Training pipeline":
+#   steps=1500, seq_len=2048, micro_batch=4, grad_accum=8 (eff=32),
+#   lr=5e-5 (CPT-light), warmup=500, paged_adamw_8bit, bf16.
+#
+# bootstrap_resamples bumped to 1000 (vs vslice 200) for the full
+# statistical power needed at the Day-1 writeup checkpoint.
+#
+# Pre-requisites verified before launch:
+#   - Vertical slice (exp_vslice_001) passed all 6 gates
+#   - Blackwell PagedAdamW8bit.step() OK
+#   - Qwen3-8B weights cached in /workspace/.hf
+#   - Data symlinks resolve
+
+exp_id: exp_stage0_001
+arm: cpt_light
+
+training:
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8                           # effective batch = 32
+  lr: 5.0e-5                              # CPT-light default per PLAN.md
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+  seed: 0
+
+data:
+  train_path: /workspace/data/train_llm_narrated
+  eval_fast_path: /workspace/data/eval_fast_5k
+  eval_mode_dropout:                      # PLAN.md Patch 2
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000               # full power; smoke used 200
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  Stage-0 CPT-light proper (Task #33). 1500 steps on full 20k train.
+  Output: stage0_lora_adapter -> merge -> qwen3-8b-cpt-light-merged
+  (baseline #1 + Stage-1 starting checkpoint). Three-mode eval on
+  the 5k LLM-narrated fast eval with bootstrap CI=1000 resamples for
+  the Day-1 writeup CI bands.

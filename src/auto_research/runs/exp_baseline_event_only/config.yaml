@@ -1,0 +1,56 @@
+# Task #36 baseline #3 of 3: event-only classifier — does the LM matter?
+#
+# Per PLAN.md "Baselines §4": SmallTransformerEncoder (the same one
+# used by QwenXAttnWrapper as the side-stream encoder) + a 2-class
+# linear head. No LM. No eval-mode dropout (eval modes only affect
+# text-side tokens which this baseline does not see).
+#
+# If this baseline wins the bake-off on HN-FPR, the Day-3 synthesis
+# pivots: "cross-attn's value is explanation/grounding, not
+# classification — the structured stream alone carries the signal."
+# That's a real result for the POC.
+#
+# Per-arm rule: event_only has NO LM, so base_checkpoint is omitted.
+
+exp_id: exp_baseline_event_only
+arm: event_only
+
+training:
+  # base_checkpoint OMITTED — event_only does not load an LM.
+  steps: 1500
+  seq_len: 2048                            # validator requires; unused by this arm
+  micro_batch: 4
+  grad_accum: 8
+  lr: 1.0e-4
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated
+  eval_fast_path: /workspace/data/eval_fast_5k
+  # eval_mode_dropout has no effect for event_only (text side is not
+  # consumed) but the launcher's schema expects the key shape; keep the
+  # standard 50/25/25 for config consistency.
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]          # all three identical by construction
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  Day-2 baseline #4 of 4. Small transformer (6 layers) + classification
+  head over the structured event stream alone. No LM. The decisive
+  question this baseline answers: does the LM contribute classification
+  signal, or could a tiny dedicated model on the events alone match it?
+  If this matches or beats the LM-based baselines on HN-FPR, the
+  finding is "synthetic ATO signal lives in the structured stream;
+  x-attn earns its keep as explanation/grounding tool."

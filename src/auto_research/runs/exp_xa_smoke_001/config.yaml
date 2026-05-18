@@ -1,0 +1,71 @@
+# Task #35 — x-attn vertical slice smoke (100 steps, real data, via the launcher).
+#
+# Analogous to exp_vslice_001 for CPT-light: 100-step end-to-end smoke
+# to surface integration bugs before Task #37's 1500-step real run.
+# Three things this exercises that scripts/preflight_xattn.py couldn't:
+#
+#   1. parse_structured_events() in the train_xattn collator on real
+#      JSON-string structured_events from load_paired_dataset
+#      (review 011 finding #1).
+#   2. scripts/run_next_experiment.py launcher harness — config
+#      whitelist + GPU lockfile + atomic write + post-run parse +
+#      experiments.jsonl append. First live invocation (smoke + Stage-0
+#      went direct via `accelerate launch`). Must be green before Task
+#      #38 hands the launcher to the agent.
+#   3. Gate trajectory + cross-attn KV cache hook lifecycle through
+#      training mode + real eval-mode dropout batches (preflight_xattn
+#      used model.eval() and one forward; this is the training path).
+#
+# Pass criteria — six gates (parallel to exp_vslice_001):
+#   1. 100 steps complete, no NaN, no OOM.
+#   2. paged_adamw_8bit stays on GPU.
+#   3. predictions_<mode>.jsonl emitted for all 3 modes (5k each).
+#   4. gate_trajectory.json written with all gates > 0.
+#   5. bootstrap CI [lo, hi] computed per mode.
+#   6. run_next_experiment.py appends one valid row to experiments.jsonl.
+
+exp_id: exp_xa_smoke_001
+arm: xattn
+
+xattn:
+  insertion_pattern: every_4               # conservative — sparsest hook density we sweep
+  gate_init: small_0.01                    # PLAN.md sweep default
+  resampler_slots: 64                      # PLAN.md sweep default
+  encoder: small_transformer
+  lora_r_on_q: 16
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-merged
+  steps: 100
+  seq_len: 2048
+  micro_batch: 2
+  grad_accum: 4                            # effective batch = 8 (smoke-scale, not real-run 32)
+  lr: 1.0e-4                               # x-attn default per PLAN.md
+  warmup_steps: 10                         # proportional to 100 total
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated
+  eval_fast_path: /workspace/data/eval_fast_5k
+  eval_mode_dropout:                       # PLAN.md Patch 2
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 200                 # smaller for smoke speed; 1000 in real runs
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  X-attn vertical slice smoke (Task #35). Tests parse_structured_events
+  collator wiring (review 011), run_next_experiment.py launcher harness
+  (first live invocation), and gate trajectory in real training-mode
+  batches. Not training to convergence — 100 steps on ~800 random
+  records. AUC near 0.99-1.0 is expected and a PASS (saturated surface
+  same as Stage-0). Hard-neg FPR is the discrimination metric.

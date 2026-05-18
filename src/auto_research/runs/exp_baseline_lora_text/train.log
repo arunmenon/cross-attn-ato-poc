@@ -1,0 +1,24 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+Fetching 5 files:   0%|          | 0/5 [00:00<?, ?it/s]Fetching 5 files:  20%|██        | 1/5 [02:59<11:56, 179.05s/it]Fetching 5 files:  40%|████      | 2/5 [03:03<03:49, 76.55s/it] Fetching 5 files:  60%|██████    | 3/5 [03:05<01:24, 42.48s/it]Fetching 5 files: 100%|██████████| 5/5 [03:05<00:00, 37.16s/it]
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:00<00:00, 150.68it/s]
+/workspace/.venv/lib/python3.12/site-packages/peft/utils/save_and_load.py:257: UserWarning: Setting `save_embedding_layers` to `True` as the embedding layer has been resized during finetuning.
+  warnings.warn(
+lora_text_only: trainable params = 626,221,056
+train: 20000 examples; eval: 5000 examples
+total_steps=1500 seq_len=2048
+step     0 loss 5.5028
+step   100 loss 4.3347
+step   200 loss 3.3734
+step   300 loss 2.3376
+step   400 loss 1.6223
+step   500 loss 1.7334
+step   600 loss 1.6465
+step   700 loss 1.3739
+step   800 loss 1.5232
+step   900 loss 1.3591
+step  1000 loss 1.6942
+step  1100 loss 1.5862
+step  1200 loss 1.6306
+step  1300 loss 1.3629
+step  1400 loss 1.4202
+wrote src/auto_research/runs/exp_baseline_lora_text/metrics.json + lora_adapter/

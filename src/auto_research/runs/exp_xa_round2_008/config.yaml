@@ -1,0 +1,86 @@
+# Round-2 perturbation #2: every_4 / slots=64 / gate=zero / small_transformer.
+#
+# Matched sibling of round1_001 (every_4 / slots=64 / gate=small_0.01,
+# HN-FPR-worst-stripped 0.0572 CI [...]). Same purpose as round2_007 but
+# on the second-best Round-1 architecture (top-2 by HN-FPR-worst among
+# 1500-step runs):
+#
+#   1. round1_002 — every_8 / slots=64 / small_0.01 — 0.0524  -> round2_007 (gate=zero)
+#   2. round1_001 — every_4 / slots=64 / small_0.01 — 0.0572  -> THIS (round2_008)
+#
+# Round-2 hypothesis under test (now on a second architecture):
+# round2_007 showed max_gate 0.00385 at step 1500 — below the 0.005 "gate
+# open" threshold. Either:
+#   (a) every_8 is structurally hostile to zero-init gate learning, and
+#       every_4 (6 layers, 2x denser) will open gates more reliably.
+#   (b) Zero-init systematically fails to open on this task regardless
+#       of insertion pattern, in which case round2_008 lands max_gate <
+#       0.005 too and the zero_gate consecutive_threshold=2 halt fires.
+#       That's a clean stop with a real, writeup-ready finding: gates
+#       don't open under pure-learning-pressure on this task, so the
+#       small_0.01 init bias is what makes the Round-1 results look
+#       "gate-active" at all.
+#
+# Either outcome closes the init-bias question for Day-3 synthesis.
+
+exp_id: exp_xa_round2_008
+arm: xattn
+
+xattn:
+  insertion_pattern: every_4
+  gate_init: zero
+  resampler_slots: 64
+  encoder: small_transformer
+  lora_r_on_q: 16
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8
+  lr: 1.0e-4
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated
+  eval_fast_path: /workspace/data/eval_fast_5k
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  Round-2 gate_init=zero perturbation of the second-best Round-1
+  architecture. Direct comparator: round1_001 (every_4 / slots=64 /
+  small_0.01) at HN-FPR-worst-stripped 0.0572 [CI in experiments.jsonl].
+  Same architecture, only dial changed is gate_init small_0.01 -> zero.
+
+  Probes whether round2_007's near-zero gate magnitude (0.00385 at step
+  1500) reflects something specific to every_8 (3 x-attn layers, sparse
+  hook density) or a task-wide property of zero-init under this
+  optimizer/lr/data regime. every_4 has 2x the x-attn layers (6), so
+  twice as many learnable gates getting gradient signal — if zero-init
+  is structurally weak, every_4 has the most charitable shot at opening
+  gates without init bias.
+
+  If max_gate < 0.005 again: zero_gate cascade halts the loop. Finding:
+  cross-attn gates don't open under pure-learning-pressure on this task
+  in 1500 steps; Round-1's gate-magnitude story was init-bias dominated.
+  That answers the Day-3 question (cross-attn lift vs init artifact)
+  decisively in favor of "marginal-at-best lift" without further runs.
+
+  If max_gate >= 0.005 with comparable or better HN-FPR: gates *can*
+  learn from zero, every_8 was structurally harder, and the answer is
+  "real but small lift, conditional on enough x-attn-layer density."

@@ -1,0 +1,19 @@
+/workspace/.venv/lib/python3.12/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+The following values were not passed to `accelerate launch` and had defaults used instead:
+	`--num_machines` was set to a value of `1`
+	`--dynamo_backend` was set to a value of `'no'`
+To avoid this warning pass in values for each of the problematic parameters or run `accelerate config`.
+/workspace/.venv/lib/python3.12/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:00<00:00, 168.51it/s]
+/workspace/.venv/lib/python3.12/site-packages/peft/utils/save_and_load.py:257: UserWarning: Setting `save_embedding_layers` to `True` as the embedding layer has been resized during finetuning.
+  warnings.warn(
+cpt_light: trainable params = 665,149,440
+train: 20000 examples; eval: 5000 examples
+total_steps=100 lr=5e-05
+LoRA targets: ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
+step     0 loss 5.6519
+wrote /workspace/cross_attn_ato_poc/src/auto_research/runs/exp_vslice_001/metrics.json + /workspace/cross_attn_ato_poc/src/auto_research/runs/exp_vslice_001/stage0_lora_adapter/
+next: run scripts/merge_stage0_lora.py --lora /workspace/cross_attn_ato_poc/src/auto_research/runs/exp_vslice_001/stage0_lora_adapter --out /workspace/checkpoints/qwen3-8b-cpt-light-merged

@@ -1,0 +1,71 @@
+# Round-1 spread cell #2: every_8 / slots=64 / gate=small_0.01 / small_transformer.
+#
+# Cell #1 (every_4 / slots=64) is done — two x-attn runs both landed near
+# HN-FPR-worst ~0.054-0.057, tied with structured_as_text_v2 (0.0507) within
+# overlapping CIs. To finish Round-1 spread, this is cell #2 in the order
+# listed in src/auto_research/AGENT_INSTRUCTIONS.md §"Round 1 — Spread".
+#
+# Hypothesis: every_8 inserts 3 x-attn layers (vs every_4's 6) starting at
+# layer 12. Lower architectural budget → may either under-utilize the
+# resampler (worse HN-FPR) or force the gates to commit harder (better).
+# Either outcome is informative for the insertion_pattern dial.
+
+exp_id: exp_xa_round1_002
+arm: xattn
+
+xattn:
+  insertion_pattern: every_8
+  gate_init: small_0.01
+  resampler_slots: 64
+  encoder: small_transformer
+  lora_r_on_q: 16
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8
+  lr: 1.0e-4
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated
+  eval_fast_path: /workspace/data/eval_fast_5k
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  Round-1 spread cell #2 (every_8 / slots=64 / gate=small_0.01 /
+  small_transformer). Cell #1 (every_4 / slots=64) is done — both
+  x-attn runs at that config landed at HN-FPR-worst ~0.054-0.057,
+  statistically tied with structured_as_text_v2 (0.0507) within
+  overlapping CIs. Bar to beat for this cell: structured_as_text_v2
+  worst HN-FPR = 0.0507, and current x-attn best 0.0537.
+
+  every_8 inserts 3 x-attn layers (half of every_4's 6) starting at
+  layer 12. Two plausible outcomes:
+
+  (a) Worse than every_4: insertion density matters; commit to
+      every_4 family and pivot remaining Round-1 budget toward
+      gate_init / slots perturbations of every_4.
+  (b) Comparable or better: every_8 is the cheaper architectural
+      win; continue Round-1 spread to late_only and slots=128 before
+      perturbing the leader.
+
+  Either way this finishes one of two outstanding insertion_pattern
+  cells (every_8, late_only) needed before convergence-halt becomes
+  eligible at ≥6 valid x-attn runs.

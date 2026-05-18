@@ -1,0 +1,80 @@
+# Round-1 spread cell #6: late_only / slots=128 / gate=small_0.01 / small_transformer.
+#
+# Final Round-1 cell, completing the 3 (insertion) x 2 (slots) grid at the
+# fixed gate_init=small_0.01 / encoder=small_transformer corner.
+#
+# Comparators after this run lands:
+#   round1_003 (late_only / slots=64):  HN-FPR-worst 0.0586
+#   round1_002 (every_8  / slots=64):   HN-FPR-worst 0.0524 (current best)
+#   round1_001 (every_4  / slots=64):   HN-FPR-worst 0.0572
+#   round1_004 (every_4  / slots=128):  HN-FPR-worst 0.0608 (slots=128 hurt every_4)
+#   round1_005 (every_8  / slots=128):  FAILED (launcher died at model load)
+#
+# The slots=128 dial appears mildly harmful or neutral on every_4. This run
+# tests whether the cheaper late_only pattern (only 4 x-attn layers) benefits
+# from more resampler capacity (128 K/V slots) where there's less LM-side
+# attention competing for the same surface.
+#
+# Outcomes:
+# - Materially better than round1_003 (<= 0.045 non-overlapping CIs) AND
+#   beats round1_002: new leader, slots=128 wins where x-attn-layer count
+#   is small. Promote late_only/128 to Round-2 base.
+# - Mildly better than round1_003 but worse than round1_002: slots dial is
+#   shape-dependent. Round-2 still bases on every_8/64.
+# - Tied or worse vs round1_003: slots dial is dead on this surface. Round-2
+#   focuses on gate_init=zero perturbations of every_8/64 and every_4/64.
+
+exp_id: exp_xa_round1_006
+arm: xattn
+
+xattn:
+  insertion_pattern: late_only
+  gate_init: small_0.01
+  resampler_slots: 128
+  encoder: small_transformer
+  lora_r_on_q: 16
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8
+  lr: 1.0e-4
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated
+  eval_fast_path: /workspace/data/eval_fast_5k
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  Round-1 cell #6 (last spread cell): late_only / slots=128. Completes the
+  3 x 2 insertion x slots grid at the fixed (gate=small_0.01, encoder=small)
+  corner. Direct comparator: round1_003 (late_only / slots=64) at 0.0586.
+
+  Round-1 evidence so far suggests slots=128 was neutral-to-harmful on
+  every_4 (0.0608 vs 0.0572). late_only has the smallest x-attn-layer
+  budget (4 layers), so this is the most charitable test for slots=128.
+
+  Outcomes:
+  - Beats round1_002 (current best 0.0524) with non-overlapping CIs:
+    new leader; slots=128 wins on the lowest-x-attn-budget pattern.
+  - Beats round1_003 but not round1_002: slots dial confirmed shape-
+    dependent. Round-2 still bases on every_8/64.
+  - Ties or worsens round1_003: slots dial confirmed dead. Round-2
+    bases on every_8/64 and every_4/64, perturbed by gate_init=zero.

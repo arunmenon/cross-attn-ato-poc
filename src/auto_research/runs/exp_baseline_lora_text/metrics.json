@@ -1,0 +1,23 @@
+{
+  "status": "ok",
+  "arm": "lora_text",
+  "final_train_loss": 1.3126789331436157,
+  "n_steps": 1500,
+  "wall_clock_sec": 2621.63236951828,
+  "n_trainable": 626221056,
+  "predictions": {
+    "stripped": 5000,
+    "opaque": 5000,
+    "full": 5000
+  },
+  "max_gate_magnitude": null,
+  "n_train_loss_records": 0,
+  "final_eval_loss": null,
+  "final_eval_auc": {
+    "stripped": null,
+    "opaque": null,
+    "full": null
+  },
+  "gate_trajectory_n_records": 0,
+  "train_runtime_seconds": null
+}

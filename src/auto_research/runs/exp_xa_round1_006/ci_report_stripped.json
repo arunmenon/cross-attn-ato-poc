@@ -1,0 +1,84 @@
+{
+  "auc": {
+    "point": 1.0,
+    "ci_lo": 0.9999999999999999,
+    "ci_hi": 1.0000000000000002,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "r_at_fpr_0.001": {
+    "target_fpr": 0.001,
+    "point": 1.0,
+    "ci_lo": 1.0,
+    "ci_hi": 1.0,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "r_at_fpr_0.01": {
+    "target_fpr": 0.01,
+    "point": 1.0,
+    "ci_lo": 1.0,
+    "ci_hi": 1.0,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "r_at_fpr_0.05": {
+    "target_fpr": 0.05,
+    "point": 1.0,
+    "ci_lo": 1.0,
+    "ci_hi": 1.0,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "hard_negative_fpr_at_1pct": {
+    "target_fpr": 0.01,
+    "metric_version": 2,
+    "per_family": {
+      "hn_account_recovery": {
+        "point": 0.06037254901960784,
+        "ci_lo": 0.04719992766726944,
+        "ci_hi": 0.07085894277207887,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "hn_large_purchase": {
+        "point": 0.01606853582554517,
+        "ci_lo": 0.005614787428009157,
+        "ci_hi": 0.03152908939299564,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "hn_travel": {
+        "point": 0.0,
+        "ci_lo": 0.0,
+        "ci_hi": 0.0,
+        "resamples": 1000,
+        "confidence": 0.95
+      }
+    },
+    "worst_family": {
+      "point": 0.06037254901960784,
+      "ci_lo": 0.04719992766726944,
+      "ci_hi": 0.07085894277207887,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "mean": {
+      "point": 0.025480361615051003,
+      "ci_lo": 0.023548163491996926,
+      "ci_hi": 0.02772710603841457,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "tie_fraction_mean": 0.001366423756913794,
+    "achieved_fpr_mean": 0.01,
+    "threshold_mean": -9.162125,
+    "alpha_mean": 0.5076497741702743,
+    "threshold_point": -9.25,
+    "alpha_point": 0.15799999999999984,
+    "tie_fraction_point": 0.0016784155756965425,
+    "achieved_fpr_point": 0.01,
+    "resamples": 1000,
+    "confidence": 0.95
+  }
+}

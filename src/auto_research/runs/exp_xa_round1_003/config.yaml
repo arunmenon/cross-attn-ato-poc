@@ -1,0 +1,77 @@
+# Round-1 spread cell #3: late_only / slots=64 / gate=small_0.01 / small_transformer.
+#
+# After cell #1 (every_4/64 → HN-FPR-worst 0.057) and cell #2 (every_8/64 →
+# 0.052), late_only is the third insertion_pattern. late_only inserts
+# 4 x-attn layers on the last 4 transformer blocks only — the cheapest
+# placement, and the one most likely to behave as a pure "late fusion"
+# read of the side-stream encoder.
+#
+# Hypothesis: if late_only also lands in the 0.05-0.06 band on
+# HN-FPR-worst-stripped (with hn_account_recovery as the binding family),
+# the bottleneck is data-shaped (hn_account_recovery saturation against
+# the clean eval), not architectural — that's a real Day-3 finding.
+# If late_only is meaningfully better or worse, the insertion_pattern
+# dial actually matters and we'll perturb the winner along
+# gate_init=zero in Round-2.
+
+exp_id: exp_xa_round1_003
+arm: xattn
+
+xattn:
+  insertion_pattern: late_only
+  gate_init: small_0.01
+  resampler_slots: 64
+  encoder: small_transformer
+  lora_r_on_q: 16
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8
+  lr: 1.0e-4
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated
+  eval_fast_path: /workspace/data/eval_fast_5k
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  Round-1 spread cell #3 (late_only / slots=64 / gate=small_0.01 /
+  small_transformer). Finishes the insertion_pattern sweep at
+  slots=64. Prior cells at slots=64:
+    - every_4 (round1_001): HN-FPR-worst 0.0572 [0.046, 0.069]
+    - every_8 (round1_002): HN-FPR-worst 0.0524 [0.042, 0.065]
+  Both worst-family is hn_account_recovery.
+
+  late_only inserts 4 x-attn layers on the final 4 transformer
+  blocks. Three outcomes:
+
+  (a) Materially better (< 0.045 with non-overlapping CIs): late
+      placement is the architectural sweet spot; commit to late_only
+      family for Round-2 gate_init perturbation.
+  (b) Tied 0.05-0.06 (CIs overlap every_4 and every_8): bottleneck
+      is data-shaped — hn_account_recovery hard negatives saturate
+      below model-architectural variance on this synthetic surface.
+      Headline finding shifts: "insertion_pattern dial is dominated
+      by hn_account_recovery noise floor; pick the cheapest
+      (late_only) and report parity."
+  (c) Materially worse (> 0.07): every_N patterns dominate; late
+      placement starves the gates of useful context. Drop late_only
+      from Round-2 perturbation set.

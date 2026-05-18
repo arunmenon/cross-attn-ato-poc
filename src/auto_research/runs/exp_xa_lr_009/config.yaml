@@ -1,0 +1,83 @@
+# Phase 1 — Training-dial sweep, run #1 (per
+# .claude/tasks/xattn-expanded-sweep-plan.md and the "Expanded Sweep
+# directive" in src/auto_research/AGENT_INSTRUCTIONS.md).
+#
+# Base architecture = current x-attn leader (exp_xa_round1_002):
+#   every_8 / slots=64 / gate=small_0.01 / encoder=small_transformer / lora_r=16
+# Only LR + warmup move. This is the most aggressive of the three Phase-1
+# cells: lr=3e-4 (3x prior) AND warmup=100 (5x shorter than prior 500).
+# Tests both gate-learning-rate hypotheses at once.
+#
+# Dedup check (insertion_pattern, gate_init, resampler_slots, encoder,
+# lora_r_on_q, lr, warmup_steps, steps, seq_len):
+#   (every_8, small_0.01, 64, small_transformer, 16, 3e-4, 100, 1500, 2048)
+# No prior status=ok row matches. round1_002 had (... 1e-4, 500, ...);
+# round2_007 had (... gate=zero, 1e-4, 500, ...). Distinct tuple.
+
+exp_id: exp_xa_lr_009
+arm: xattn
+
+xattn:
+  insertion_pattern: every_8
+  gate_init: small_0.01
+  resampler_slots: 64
+  encoder: small_transformer
+  lora_r_on_q: 16
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8
+  lr: 3.0e-4
+  warmup_steps: 100
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated
+  eval_fast_path: /workspace/data/eval_fast_5k
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  Phase 1 of the post-Day-3 expanded sweep. Central scientific
+  question: can cross-attention gates actually learn to use the side
+  stream, or were Round-1's "open" gates (~0.011) just init-bias
+  carried forward? Round-2's gate_init=zero perturbations (round2_007,
+  round2_008) confirmed gates moved < 0.005 from init in 1500 steps
+  under lr=1e-4 / warmup=500. The hypothesis being tested here:
+
+    (a) lr=1e-4 is too low for gates to escape init-bias, OR
+    (b) warmup=500 gates the gates from any meaningful gradient signal
+        early in training (by step 500, half the run is over and the
+        side stream has barely contributed loss gradient).
+
+  This config probes both at once: lr=3e-4 (3x) AND warmup=100 (1/5x).
+  Aggressive on purpose — Phase 1's exp_xa_lr_010 (3e-4, 500) and
+  exp_xa_lr_011 (3e-5, 500) isolate the two dials separately if this
+  run produces a signal.
+
+  Bar to beat (CI-strictly, for early-exit):
+    structured_as_text_v2 HN-FPR-worst = 0.0507 [0.0408, 0.0635]
+    current_best (round1_002)         = 0.0524 [0.0420, 0.0647]
+  For early-exit-on-success: max_gate_magnitude >= 0.05 AND
+  hn_fpr_ci_stripped.worst_family.ci_hi < 0.0420 (current_best
+  CI-low). If either trigger misses, continue Phase 1 with lr_010.
+
+  Risk: lr=3e-4 + warmup=100 may cause loss spikes / NaN on bf16. If
+  NaN: counts toward nan_cascade (threshold=2); the next cell (lr_010,
+  same lr but warmup=500) is the natural safety follow-up that still
+  probes the lr hypothesis without the short-warmup risk.

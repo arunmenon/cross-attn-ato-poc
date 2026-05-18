@@ -1,0 +1,28 @@
+/workspace/.venv/lib/python3.12/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+/workspace/.venv/lib/python3.12/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+The tokenizer you are loading from '/workspace/checkpoints/qwen3-8b-cpt-light-merged' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:00<00:00, 114.78it/s]
+/workspace/cross_attn_ato_poc/src/model/encoders/small_transformer.py:245: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+trainable params (actual)   : 113,604,614
+trainable params (estimated): 113,639,430
+step     0 loss 1.3340  max_gate 0.0000
+step   100 loss 1.4489  max_gate 0.0009
+step   200 loss 1.1940  max_gate 0.0036
+step   300 loss 1.3041  max_gate 0.0028
+step   400 loss 1.5383  max_gate 0.0017
+step   500 loss 1.1892  max_gate 0.0017
+step   600 loss 1.1262  max_gate 0.0012
+step   700 loss 1.3380  max_gate 0.0019
+step   800 loss 1.1911  max_gate 0.0017
+step   900 loss 1.3038  max_gate 0.0016
+step  1000 loss 1.3812  max_gate 0.0009
+step  1100 loss 1.3812  max_gate 0.0012
+step  1200 loss 1.1872  max_gate 0.0014
+step  1300 loss 1.3470  max_gate 0.0015
+step  1400 loss 1.2107  max_gate 0.0015
+wrote src/auto_research/runs/exp_xa_round2_007/metrics.json + xattn_state.pt + gate_trajectory.json
+max gate magnitude across training: 0.0038

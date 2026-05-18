@@ -1,0 +1,75 @@
+{
+  "auc": {
+    "point": 1.0,
+    "ci_lo": 0.9999999999999999,
+    "ci_hi": 1.0,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "r_at_fpr_0.001": {
+    "target_fpr": 0.001,
+    "point": 1.0,
+    "ci_lo": 1.0,
+    "ci_hi": 1.0,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "r_at_fpr_0.01": {
+    "target_fpr": 0.01,
+    "point": 1.0,
+    "ci_lo": 1.0,
+    "ci_hi": 1.0,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "r_at_fpr_0.05": {
+    "target_fpr": 0.05,
+    "point": 1.0,
+    "ci_lo": 1.0,
+    "ci_hi": 1.0,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "hard_negative_fpr_at_1pct": {
+    "target_fpr": 0.01,
+    "per_family": {
+      "hn_account_recovery": {
+        "point": 0.004098360655737705,
+        "ci_lo": 0.0,
+        "ci_hi": 0.011217300156907795,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "hn_large_purchase": {
+        "point": 0.06048387096774194,
+        "ci_lo": 0.041745369367950716,
+        "ci_hi": 0.06536148201611933,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "hn_travel": {
+        "point": 0.004016064257028112,
+        "ci_lo": 0.0,
+        "ci_hi": 0.009690392865206593,
+        "resamples": 1000,
+        "confidence": 0.95
+      }
+    },
+    "worst_family": {
+      "point": 0.06048387096774194,
+      "ci_lo": 0.041745369367950716,
+      "ci_hi": 0.06536148201611933,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "mean": {
+      "point": 0.022866098626835918,
+      "ci_lo": 0.016688817083713628,
+      "ci_hi": 0.023672419410519795,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "resamples": 1000,
+    "confidence": 0.95
+  }
+}

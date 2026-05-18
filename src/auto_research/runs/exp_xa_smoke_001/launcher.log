@@ -1,0 +1,13 @@
+wrote src/auto_research/runs/exp_xa_smoke_001/metrics.json (status=ok)
+wrote src/auto_research/runs/exp_xa_smoke_001/metrics_stripped.json
+wrote src/auto_research/runs/exp_xa_smoke_001/ci_report_stripped.json
+wrote src/auto_research/runs/exp_xa_smoke_001/metrics_opaque.json
+wrote src/auto_research/runs/exp_xa_smoke_001/ci_report_opaque.json
+wrote src/auto_research/runs/exp_xa_smoke_001/metrics_full.json
+wrote src/auto_research/runs/exp_xa_smoke_001/ci_report_full.json
+/workspace/cross_attn_ato_poc/scripts/run_next_experiment.py:664: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  "timestamp": dt.datetime.utcnow().isoformat() + "Z",
+/workspace/cross_attn_ato_poc/scripts/run_next_experiment.py:537: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  "last_updated": dt.datetime.utcnow().isoformat() + "Z",
+launching: accelerate launch --config_file /workspace/cross_attn_ato_poc/src/train/accelerate_configs/single_h100.yaml /workspace/cross_attn_ato_poc/src/train/train_xattn.py --config src/auto_research/runs/exp_xa_smoke_001/config.yaml (timeout=90min)
+OK: appended exp exp_xa_smoke_001 to /workspace/cross_attn_ato_poc/src/auto_research/experiments.jsonl

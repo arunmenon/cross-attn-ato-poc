@@ -1,0 +1,52 @@
+{
+  "n": 5000,
+  "auc": 0.9929132989545157,
+  "r_at_fpr_0.001": {
+    "target_fpr": 0.001,
+    "achieved_fpr": 0.000856898029134533,
+    "recall": 0.5023348899266178,
+    "threshold": 2.875,
+    "n_positive": 1499,
+    "n_negative": 3501
+  },
+  "r_at_fpr_0.01": {
+    "target_fpr": 0.01,
+    "achieved_fpr": 0.007997714938588975,
+    "recall": 0.7431621080720481,
+    "threshold": 1.625,
+    "n_positive": 1499,
+    "n_negative": 3501
+  },
+  "r_at_fpr_0.05": {
+    "target_fpr": 0.05,
+    "achieved_fpr": 0.046843758926021134,
+    "recall": 0.9853235490326885,
+    "threshold": -1.25,
+    "n_positive": 1499,
+    "n_negative": 3501
+  },
+  "per_journey_auc": {
+    "clean": NaN,
+    "cred_stuff": 0.9963707280545326,
+    "hn_account_recovery": NaN,
+    "hn_large_purchase": NaN,
+    "hn_travel": NaN,
+    "malware_rat": 0.9820118962149811,
+    "mule_chain": 0.994713934687809,
+    "phish_takeover": 0.9999999999999999,
+    "sim_swap": 0.9910910972598826
+  },
+  "per_actor_auc": {
+    "agent_adversarial": NaN,
+    "agent_buying": NaN,
+    "agent_compromised": NaN,
+    "agent_finance": NaN,
+    "human": 0.9919529092461423,
+    "hybrid": 0.9996610169491525
+  },
+  "hard_negative_fpr_at_decision_threshold_1pct": {
+    "hn_account_recovery": 0.0,
+    "hn_large_purchase": 0.056451612903225805,
+    "hn_travel": 0.0
+  }
+}

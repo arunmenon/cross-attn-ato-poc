@@ -1,0 +1,12 @@
+/workspace/.venv/lib/python3.12/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+`torch_dtype` is deprecated! Use `dtype` instead!
+[diag] loading base Qwen3-8B + adapter from /workspace/cross_attn_ato_poc/src/auto_research/runs/exp_stage0_001/stage0_lora_adapter
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:00<00:00, 174.28it/s]
+[diag] 8.85B params
+[diag] loading templated eval from /workspace/data/eval_medium_15k_llm
+[diag] full templated eval = 15000 records
+[diag] sub-sampled to 10653 records, ~1666/family
+[diag] running three-mode eval (batch_size=4)
+[diag] eval done: {'stripped': 10653, 'opaque': 10653, 'full': 10653}
+[diag] DONE

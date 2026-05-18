@@ -1,0 +1,15 @@
+{
+  "status": "ok",
+  "arm": "cpt_light",
+  "final_train_loss": 2.6152225136756897,
+  "n_steps": 100,
+  "wall_clock_sec": 516.777529001236,
+  "n_trainable": 665149440,
+  "predictions": {
+    "stripped": 5000,
+    "opaque": 5000,
+    "full": 5000
+  },
+  "max_gate_magnitude": null,
+  "adapter_path": "/workspace/cross_attn_ato_poc/src/auto_research/runs/exp_vslice_001/stage0_lora_adapter"
+}

@@ -1,0 +1,71 @@
+# Round-1 spread cell #4: every_4 / slots=128 / gate=small_0.01 / small_transformer.
+#
+# First slots=128 run. Doubles the resampler output length to 128
+# compressed K/V tokens. Hypothesis: if slots=64 was an information
+# bottleneck, slots=128 should drop HN-FPR-worst meaningfully. If
+# slots=64 wasn't the bottleneck (data-shaped saturation on
+# hn_account_recovery), slots=128 will tie within CIs and burn budget
+# for no benefit.
+#
+# Re-uses every_4 from round1_001 to isolate the slots dial: the only
+# delta from round1_001 is resampler_slots 64 → 128.
+
+exp_id: exp_xa_round1_004
+arm: xattn
+
+xattn:
+  insertion_pattern: every_4
+  gate_init: small_0.01
+  resampler_slots: 128
+  encoder: small_transformer
+  lora_r_on_q: 16
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8
+  lr: 1.0e-4
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated
+  eval_fast_path: /workspace/data/eval_fast_5k
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  Round-1 spread cell #4 — first slots=128 run. Isolates the
+  resampler_slots dial against round1_001 (every_4 / slots=64 /
+  gate=small_0.01 / small_transformer; HN-FPR-worst 0.0572).
+
+  After three slots=64 runs landing 0.052-0.059 with hn_account_recovery
+  as the binding family in all three, the open question is whether the
+  bottleneck is (a) the resampler compression at 64 tokens or (b)
+  data-shaped hn_account_recovery saturation on the clean eval.
+
+  Outcomes for round1_004 vs round1_001:
+  - Materially better (worst-family ≤ 0.040, non-overlapping CIs):
+    slots dial matters; commit to slots=128 family for the rest of
+    Round-1 (round1_005, round1_006) and Round-2 perturbations.
+  - Tied (CIs overlap, worst still ~0.05-0.06): slots was not the
+    bottleneck; finish the slots=128 spread anyway for completeness
+    (cells #5 #6 keep budget usage well under 18h), then commit to
+    cheapest top-1 family for Round-2 gate_init perturbation.
+  - Materially worse: slots=128 is over-parameterized and hurts;
+    drop slots=128 from Round-2 and skip cell #5 / cell #6 to save
+    budget for gate_init perturbations.

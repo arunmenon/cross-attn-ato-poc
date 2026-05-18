@@ -1,0 +1,35 @@
+schema_version: 2
+metric_definition:
+  name: hn_fpr_worst_stripped
+  lower_is_better: true
+  metric_version: 2
+  description: 'Tie-aware exact-target legit-FPR worst-family hard-negative FPR at
+    decision threshold 1% (review 018/019). Per-resample (threshold, alpha) interpolation
+    hits target_fpr = 0.01 exactly; tied-at-threshold legit/hn rows are weighted by
+    alpha. Evaluated against the clean-eval surface (predictions_<mode>_clean.jsonl),
+    which removes train/eval text-hash and structured_events-hash overlap before scoring.
+    Tiebreaker: hn_fpr_mean_stripped. AUC is a sanity gate, not the objective.'
+n_completed: 15
+n_failed: 3
+n_xattn_runs: 8
+gpu_hours_used: 7.735
+current_best:
+  exp_id: exp_xa_round1_002
+  arm: xattn
+  hn_fpr_worst_stripped: 0.05243872549019608
+  hn_fpr_mean_stripped: 0.02619712448842465
+  auc_stripped_sanity: 1.0
+  config_summary: every_8 / slots=64 / gate=small_0.01 / small_transformer
+top_3:
+- exp_id: exp_xa_round1_002
+  hn_fpr_worst_stripped: 0.05243872549019608
+  hn_fpr_mean_stripped: 0.02619712448842465
+- exp_id: exp_xa_smoke_001_v2
+  hn_fpr_worst_stripped: 0.05366421568627451
+  hn_fpr_mean_stripped: 0.026086410420866166
+- exp_id: exp_xa_round1_001
+  hn_fpr_worst_stripped: 0.05721200980392157
+  hn_fpr_mean_stripped: 0.025765893195284346
+halted: false
+halt_reason: null
+last_updated: '2026-05-18T04:26:45.116894Z'

@@ -1,0 +1,11 @@
+/workspace/.venv/lib/python3.12/site-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+`torch_dtype` is deprecated! Use `dtype` instead!
+loading base model: Qwen/Qwen3-8B
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:00<00:00, 197.34it/s]
+loading tokenizer: /workspace/cross_attn_ato_poc/src/auto_research/runs/exp_stage0_001/stage0_lora_adapter
+resizing embeddings: 151936 -> 151734
+loading LoRA adapter from: /workspace/cross_attn_ato_poc/src/auto_research/runs/exp_stage0_001/stage0_lora_adapter
+merging LoRA into base...
+saving merged checkpoint to: /workspace/checkpoints/qwen3-8b-cpt-light-merged
+done
