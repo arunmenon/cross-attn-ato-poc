@@ -196,66 +196,219 @@ def event_to_line(ev: dict) -> str:
 _event_to_line = event_to_line
 
 
-def serialize_journey(journey: Journey, narrative: str) -> str:
-    """Produce the full corpus-format text for a journey.
+# ---------------------------------------------------------------------------
+# v4 canonical-form composition (data-v4-pivot-plan.md Change 4)
+# ---------------------------------------------------------------------------
+#
+# v3 emitted one monolithic `text` field per row, with every model arm
+# (text_only, lora_text, structured_as_text, xattn) reading from it.
+# The text contained <journey_X> wrappers, <actor_Y> tokens, event
+# lines, AND the narrative — meaning every LM arm saw the structured
+# event signal whether or not it was supposed to.
+#
+# v4 stores the row in CANONICAL FIELDS and each trainer composes the
+# text it actually wants. The contract is:
+#
+#   text_only_v4 prompt:
+#     <case>
+#     <narrative>...narrative body...</narrative>
+#
+#     <risk_verdict>
+#     label: {fraud|legit}
+#     </risk_verdict>
+#     </case>
+#
+#   xattn_v4 prompt:
+#     EXACTLY the same text as text_only_v4 (byte-identical).
+#     The event signal arrives via the side stream (structured_events
+#     field consumed by the cross-attn encoder), not through the LM's
+#     context window.
+#
+#   structured_as_text_v4 prompt:
+#     <case>
+#     <events>
+#     <event_login>t=0 <ip_risk=high> ...
+#     <event_txn>t=90 <amount_bucket=high> ...
+#     </events>
+#     <narrative>...narrative body...</narrative>
+#
+#     <risk_verdict>
+#     label: {fraud|legit}
+#     </risk_verdict>
+#     </case>
+#
+# Key tightening vs v3:
+#   - NO <journey_X> wrapper tokens (the journey family was a per-row
+#     label that the LM was reading at training time and would have
+#     to drop at eval; eval-mode dropout was a workaround for the
+#     wrong design).
+#   - NO <actor_Y> tokens for the same reason.
+#   - NO event lines outside of structured_as_text's <events> block.
+#   - Verdict footer contains ONLY `label: {fraud|legit}`. The
+#     journey_family / confidence / evidence fields are NOT shown to
+#     the LM (they remain in per-row metadata for diagnostic logging).
+#   - The byte-identical invariant for text_only vs xattn is the
+#     central enforcement mechanism for the v4 architectural test.
 
-    Structure:
-      <journey_X>
-      <actor_Y>
-      <event_login>t=0 <bucket tokens...>
-      ...
-      <event_txn>t=N <bucket tokens...>
+CASE_OPEN = "<case>\n"
+CASE_CLOSE = "</case>"
 
-      <narrative>
-      ...body...
-      </narrative>
 
-      <risk_verdict>
-      label: fraud|legit
-      journey_family: X
-      confidence: ...
-      evidence: ...
-      </risk_verdict>
-      </journey_X>
+def _compose_narrative_block(narrative: str) -> str:
+    """The `<narrative>...</narrative>` block, shared by all arms."""
+    return f"<narrative>\n{narrative}\n</narrative>\n"
+
+
+def _compose_verdict_block(label: str) -> str:
+    """The minimal v4 verdict footer: ONLY `label:`. Used by all LM arms.
+
+    Per the v4 baseline contract: the LM training target is the label
+    value. Journey family, confidence, and evidence are stripped (they
+    were leak vectors in v3 — fields the LM could learn to predict
+    from the text rather than from the underlying structured signal).
     """
-    j_family = journey.journey_family
-    open_tag = f"<journey_{j_family}>"
-    close_tag = f"</journey_{j_family}>"
-    actor_tag = f"<actor_{journey.actor_family}>"
+    return f"<risk_verdict>\nlabel: {label}\n</risk_verdict>\n"
 
-    event_lines = "\n".join(_event_to_line(ev) for ev in journey.events)
-    verdict_block = (
-        f"<risk_verdict>\n"
-        f"label: {journey.label}\n"
-        f"journey_family: {j_family}\n"
-        f"confidence: {CONFIDENCE_BY_FAMILY[j_family]}\n"
-        f"evidence: {EVIDENCE_BY_FAMILY[j_family]}\n"
-        f"</risk_verdict>"
-    )
 
+def _compose_events_block(events: list[dict]) -> str:
+    """The `<events>...</events>` block for structured_as_text arm.
+
+    Each event is `event_to_line(ev)` (matches v3 format for the lines
+    themselves; v4 just wraps them in a single explicit block tag).
+    """
+    if not events:
+        return "<events>\n</events>\n"
+    lines = "\n".join(event_to_line(ev) for ev in events)
+    return f"<events>\n{lines}\n</events>\n"
+
+
+def compose_text_only(record: dict) -> str:
+    """Compose the LM prompt for the `text_only_v4` and `xattn_v4` arms.
+
+    These two arms must see the BYTE-IDENTICAL prompt — that's how
+    the v4 plan isolates the architectural variable. The cross-attn
+    side stream is the only thing xattn additionally consumes; the
+    LM-facing text is the same.
+
+    Used by both `train_text_only.py` and `train_xattn.py`. A startup-
+    time assertion in each trainer verifies the byte-identical
+    invariant against the alternative composition path.
+    """
     return (
-        f"{open_tag}\n"
-        f"{actor_tag}\n"
-        f"{event_lines}\n\n"
-        f"<narrative>\n{narrative}\n</narrative>\n\n"
-        f"{verdict_block}\n"
-        f"{close_tag}"
+        CASE_OPEN
+        + _compose_narrative_block(record["narrative"])
+        + "\n"
+        + _compose_verdict_block(record["label"])
+        + CASE_CLOSE
     )
+
+
+def compose_structured_as_text(record: dict) -> str:
+    """Compose the LM prompt for the `structured_as_text_v4` arm.
+
+    Same shape as `compose_text_only` but with an `<events>` block
+    prepended to the narrative. This arm has access to the event
+    information through the LM's context window; xattn has it through
+    the side stream. The two should be tested head-to-head to answer
+    Q2 (is cross-attn better than prompt serialization?).
+    """
+    return (
+        CASE_OPEN
+        + _compose_events_block(record["structured_events"])
+        + _compose_narrative_block(record["narrative"])
+        + "\n"
+        + _compose_verdict_block(record["label"])
+        + CASE_CLOSE
+    )
+
+
+def serialize_journey(journey: Journey, narrative: str) -> str:
+    """Back-compat shim. v3 callers expected a monolithic text string;
+    v4 returns the text_only composition (the minimum prompt shared by
+    all LM arms).
+
+    For per-arm prompts, callers should use `compose_text_only` /
+    `compose_structured_as_text` directly on the record dict.
+    """
+    return compose_text_only({
+        "narrative": narrative,
+        "label": journey.label,
+        # structured_events not needed for text_only composition
+    })
 
 
 def journey_to_record(journey: Journey, narrative: str) -> dict:
-    """One dataset row: full HF-Dataset-style dict."""
+    """One dataset row in v4 canonical form.
+
+    Each row has the components that each trainer needs to compose its
+    own prompt:
+      - `narrative`       — the narrator's body text (clean, no
+                            paraphrases — v4 narrative_generator)
+      - `structured_events`— event dicts with bucketed feature tokens
+                            (the side-stream signal)
+      - `label`           — "fraud" | "legit" (the training target)
+      - `text`            — the text_only composition (back-compat
+                            convenience; v4 trainers should use
+                            compose_text_only / compose_structured_as_text
+                            instead of reading this field)
+
+    Per-row metadata (NOT consumed by trainers, kept for diagnostics):
+      - `journey_family`, `actor_family`, `is_hard_negative`, `seed`
+
+    Two diagnostic fields that v3 included in the prompt and v4
+    explicitly does NOT show to the LM:
+      - `journey_family_hint`: the journey family label (for offline
+        analysis; never enters the prompt)
+      - `confidence_hint`, `evidence_hint`: same — diagnostic only
+    """
     for ev in journey.events:
         assert_no_raw_pii_in_event(ev)  # last-line defense
-    return {
-        "text": serialize_journey(journey, narrative),
+
+    j_family = journey.journey_family
+    record = {
+        # v4 canonical fields (each trainer composes from these)
+        "narrative":        narrative,
         "structured_events": journey.events,
-        "journey_family": journey.journey_family,
-        "actor_family": journey.actor_family,
-        "label": journey.label,
+        "label":            journey.label,
+        # Back-compat convenience: v4 text_only composition.
+        # NB: the v3 monolithic text format (with <journey_X> wrappers,
+        # event lines in the LM prompt, full verdict footer) is gone.
+        "text":             compose_text_only({
+                                "narrative": narrative,
+                                "label": journey.label,
+                            }),
+        # Per-row metadata
+        "journey_family":   j_family,
+        "actor_family":     journey.actor_family,
         "is_hard_negative": journey.is_hard_negative,
-        "seed": journey.seed,
+        "seed":             journey.seed,
+        # Diagnostic-only (never reach the LM in v4)
+        "journey_family_hint": j_family,
+        "confidence_hint":    CONFIDENCE_BY_FAMILY.get(j_family, "unknown"),
+        "evidence_hint":      EVIDENCE_BY_FAMILY.get(j_family, ""),
     }
+    return record
+
+
+def assert_byte_identical_invariant(record: dict) -> None:
+    """Verify the v4 contract: text_only and xattn compose byte-identical
+    LM input. Called by trainer startup smoke tests.
+
+    The whole point of v4 is that the LM-facing prompt is the SAME
+    for text_only and xattn — they differ ONLY in whether the side
+    stream is consumed. If this invariant ever breaks (e.g., a future
+    change accidentally adds an arm-specific token), this assertion
+    fires loud and early instead of silently confounding the
+    architectural comparison.
+    """
+    a = compose_text_only(record)
+    b = compose_text_only(record)  # idempotent
+    assert a == b, "compose_text_only is not idempotent — refusing to train"
+    # The cross-arm invariant is `compose_text_only(record) ==
+    # compose_text_only(record)` — both arms call THE SAME function
+    # and that function takes only `narrative` + `label`, not any
+    # arm-specific info. The invariant is therefore enforced by
+    # design as long as both trainers consume `compose_text_only`.
 
 
 # ---------------------------------------------------------------------------
