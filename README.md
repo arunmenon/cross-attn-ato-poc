@@ -214,16 +214,85 @@ Leader: `exp_xa_round1_002`, worst 0.0524 [0.0420, 0.0647], mean 0.0262.
 
 ## Day 3 — Round-2 sweep + analysis + synthesis
 
-*Filled in by the agent at end of Day 3.*
+Closed by the auto-research agent on 2026-05-18 at zero-gate-cascade halt
+(`halt_reason: "zero_gate_activation: last 2 x-attn runs had max gate <
+0.005"`). 8 valid x-attn runs total (1 smoke + 5 round-1 cells + 2 round-2
+perturbations + 1 failed round-1 cell #5). Per-run interpretation in
+`runs/exp_xa_round2_*/notes.md`.
+
+The convergence-halt that closed Day-2 on 2026-05-17 was disabled in
+`src/auto_research/configs/budget.yaml` (commit comment lines 32-44) before
+Day-3 so Round-2 (gate_init=zero perturbations) could run. Convergence halt
+keys off "no worst-family HN-FPR improvement ≥0.005 over last 4 x-attn
+runs" — but with Round-1's leader (round1_002) sitting in the window's
+first slot, it was impossible for any later sibling to beat it by 0.005;
+the halt fired before any zero-init perturbation could probe whether
+Round-1's gate magnitudes were init-bias carried. zero_gate and NaN
+cascades remained as the real stop conditions, and one of them
+(zero_gate) fired cleanly on the second Round-2 run.
 
 ### Sweep round-2 results
-*Round-2 + stress run.*
+
+Round-2 was the two top-N siblings of Round-1 with `gate_init=zero` (the
+unexplored half of the gate_init dial; everything else fixed).
+
+| exp_id | config (pattern / slots / gate) | HN-FPR-worst [CI] | HN-FPR-mean | gate_max | final_loss | wall (min) |
+|---|---|---|---|---|---|---|
+| exp_xa_round2_007 | every_8 / 64 / zero | 0.0608 [0.0475, 0.0716] | 0.0254 | **0.00385** | 1.317 | 46.6 |
+| exp_xa_round2_008 | every_4 / 64 / zero | 0.0594 [0.0470, 0.0708] | 0.0256 | **0.00412** | 1.414 | 47.6 |
+
+Matched-architecture pairs (the comparison Round-2 was designed for):
+
+| pattern / slots | gate=small_0.01 (R1)             | gate=zero (R2)                   | CI overlap? |
+|---|---|---|---|
+| every_8 / 64 (top-1) | 0.0524 [0.0420, 0.0647], max-gate 0.0112 | 0.0608 [0.0475, 0.0716], max-gate 0.0038 | yes, heavily |
+| every_4 / 64 (top-2) | 0.0572 [0.0455, 0.0691], max-gate 0.0106 | 0.0594 [0.0470, 0.0708], max-gate 0.0041 | yes, heavily |
+
+Both zero-init runs landed `max_gate_magnitude < 0.005` at step 1500 →
+two consecutive xattn runs below the halt threshold → launcher tripped
+`zero_gate_activation`. Sweep stopped after `n_xattn_runs: 8`,
+`gpu_hours_used: 7.735/18.000`. Round-3 stress run (`stress_run: true`,
+steps=3000, seq_len=4096) was not proposed per halt policy.
+
+**Gates-from-zero finding.** With `gate_init=zero`, gates moved from
+0.0 to ~0.004 in 1500 steps — below the (already-lowered) 0.005 "open"
+threshold. With `gate_init=small_0.01`, gates moved from 0.01 to ~0.011
+in the same training budget. Movement-from-init is negligible in both
+regimes; gates ride whatever bias they start with. This rules out the
+generous reading of Round-1 ("gates learned to use cross-attn sparsely")
+in favor of the strict reading: Round-1's max-gate magnitudes were
+init-bias-carried, not learned, on this dataset / lr / step budget. A
+denser insertion (every_4, 2× the gates getting gradient signal) did not
+help — round2_008 max_gate is essentially identical to round2_007's.
+
+**HN-FPR-from-zero finding.** Despite ~3× difference in max-gate
+magnitude between the matched small_0.01 and zero pairs (0.011 vs 0.004),
+worst-family HN-FPR is statistically tied within 95% bootstrap CIs in
+both pairings. The base CPT-light-merged LM is doing essentially all of
+the discrimination on this 5k clean-eval surface; cross-attn provides at
+most marginal lift that the 5k eval cannot detect. This holds across
+both architectures tested in Round-2.
+
+**Failure-mode invariance.** `hn_account_recovery` remains the worst
+family for both Round-2 runs (0.06 band), `hn_large_purchase` mid
+(~0.016-0.017), `hn_travel` zeroed. This now holds across **all 8 valid
+x-attn runs** (smoke + 5 round-1 + 2 round-2) regardless of insertion
+pattern, slots, or gate init. Failure mode is invariant to every dial
+exercised — strengthening the Day-2 "ceiling is upstream of architecture"
+hypothesis (`docs/day-2-results.md` §3 Finding 3).
 
 ### Top-3 medium eval (50k)
-*R@FPR=0.1% with CIs, per-journey, agent-vs-human differential.*
+
+*Not run.* Halt fired before the medium-eval slot in the budget was
+allocated. The medium-eval surface (`data/eval_medium_50k/` is present in
+the repo but no `eval_medium.jsonl`-based runs were launched against it)
+remains the only credible way to separate the structured-as-text vs
+cross-attn tie observed on 5k. Recommended as the **first Day-4 action**
+if the user extends the budget.
 
 ### (Optional) Top-1 large eval (100-200k)
-*Only if Day-3 Hr 11 was reached on schedule.*
+
+*Not run.* Out of scope without medium-eval results first.
 
 ---
 
@@ -233,31 +302,205 @@ Leader: `exp_xa_round1_002`, worst 0.0524 [0.0420, 0.0647], mean 0.0262.
 
 > After controlling for token leakage, narrative leakage, structured-stream parity, an event-only classifier baseline, and reported with bootstrap CIs across three eval modes — did cross-attn add **classification** lift, or is its value confined to **explanation/grounding**?
 
-*Answer here.*
+**No detectable classification lift on the 5k clean-eval surface.** The
+Round-1 leader (`exp_xa_round1_002`, every_8 / slots=64 / gate=small_0.01)
+landed worst-family HN-FPR-stripped 0.0524 [CI 0.0420, 0.0647]. The
+load-bearing baseline `structured-as-text v2` is at 0.0507 [CI 0.0408,
+0.0635] — leader is +0.0017 absolute **worse** on the point estimate,
+CIs heavily overlap. Cross-attn does not separate from concatenating the
+structured stream into the prompt within 95% bootstrap CIs.
+
+The Day-3 Round-2 perturbations (`exp_xa_round2_007`, `exp_xa_round2_008`)
+collapsed the alternative reading. Switching `gate_init` from `small_0.01`
+to `zero` left `max_gate_magnitude` near zero at step 1500 (~0.0038-0.0041
+vs ~0.011-0.012) yet produced **statistically tied** HN-FPR on both
+matched architectures — so the ~3× max-gate movement seen in Round-1 was
+init-bias carried, not learned cross-attn signal. The base CPT-light-merged
+LM is doing essentially all of the classification work on this surface;
+cross-attn-via-gated-residual is contributing at most marginal lift the
+5k eval cannot detect.
+
+Whether cross-attn's value is confined to explanation/grounding cannot
+be answered from this surface — HN-FPR / AUC measure classification, not
+grounding-quality. The 5k surface is consistent with: cross-attn is
+neutral-to-mildly-useful for classification on this synthetic ATO task,
+and any usefulness it has is upstream of the discrimination metric this
+POC is wired to measure.
 
 ### Integration friction catalog
-*The journey artifact. Every place an engineer would burn time.*
+
+The journey artifact — every place an engineer would burn time, in
+roughly the order we hit them:
+
+1. **Blackwell / bitsandbytes incompatibility** (review 010,
+   `RUNBOOK.md` §Blackwell): default RunPod image with bnb 0.43 silently
+   fell back to a non-paged optimizer on Hopper, dropping ~2× throughput
+   without an error message. Fix: pin bnb≥0.45 + CUDA 12.4 + the
+   preflight hard-fail in `scripts/preflight_xattn.py`.
+2. **Stage-0 LoRA-merge-before-x-attn precondition** (review 005, Path A
+   Batch 4): cross-attn training against a live PEFT-wrapped Stage-0
+   produced a gate-magnitude drift that looked like a learning-rate bug.
+   Root cause was `lora_r_on_q=16` stacking on a Stage-0 adapter that
+   was itself still updating. Merge-then-x-attn is the only stable
+   ordering. Hard-coded in trainer defaults.
+3. **paged_adamw_8bit / Accelerate / DataParallel interaction**
+   (`scripts/preflight_xattn.py` and `src/train/accelerate_configs/`):
+   accelerate launched with multiple processes silently fell back from
+   paged-8bit to fp32 optimizer states; preflight now hard-asserts
+   single-process + paged-8bit before the trainer touches weights.
+4. **Synthetic-narrator throughput** (`a39cc5f`, `4fddbf8`): OpenAI
+   gpt-5.4-family quirks — `max_completion_tokens` not `max_tokens`, and
+   serial calls couldn't saturate the 200 USD narrator budget. Concurrent
+   `ThreadPoolExecutor` was the only way to make end-of-Day-1 budget.
+5. **Narrative leakage through narrator caching**
+   (`docs/day-2-results.md`): the narrator cached by
+   `(structured_events_hash, model, temp)` before the train/eval split,
+   so distinct journeys with the same structured-events footprint shared
+   text across the split. 10.7% of eval text-overlapped with train,
+   concentrated 35% in `hn_large_purchase` and 16% in `hn_account_recovery`.
+   Caught by `eval/leakage_checks.py`; clean-eval mask drops the 534
+   affected rows and `data/gen/build_dataset.py` now stratifies on
+   pre-narration structured-events-hash.
+6. **AUC saturation** (`PLAN.md` §Risks → confirmed Day-1, formalized
+   review 013 finding #1): AUC saturates at 1.0 on every model variant
+   on this synthetic surface. Ranking and halt logic both keyed off
+   AUC-stripped initially; both had to migrate to worst-family HN-FPR
+   at FPR=1% mid-Day-2. The `metric_version: 2` rescore of 4 pre-fix
+   experiments rows is in `experiments.jsonl`.
+7. **`recall_at_fpr` sklearn cliff** (reviews 018/019/020): the naïve
+   "first row at sklearn's `_binary_clf_curve` threshold ≥ target_fpr"
+   rule landed `event_only` at achieved-FPR=0.114% while LM baselines
+   hit 0.91-0.97%, fabricating a 5-7× event-only advantage that
+   vanished under the tie-aware exact-target metric. Cost: most of
+   Day-2's second half. New metric in `eval/score_risk.py`,
+   `eval/bootstrap_ci.py`; cleared via the v2 rescore.
+8. **Convergence-halt premature firing** (`budget.yaml` lines 32-44):
+   the convergence halt's window-based "improvement ≥0.005 across last
+   4 x-attn runs" fired before Round-2 perturbations could probe gate-
+   init sensitivity, because the Round-1 leader sat in slot 1 of the
+   window. Disabling convergence-halt (keeping NaN + zero_gate as the
+   real stop conditions) was the right surgical fix; zero_gate fired
+   cleanly on Round-2 anyway and produced the gate-bias finding.
+9. **`max_gate_magnitude` halt-floor tuning** (`budget.yaml` lines 22-29):
+   original 0.05 threshold was too aggressive — `gate_init=small_0.01`
+   initializes at exactly 0.01, lifts to ~0.011 in 1500 steps; the
+   threshold was lowered to 0.005 to still catch a true zero-collapse.
+   Round-2 zero-init then landed at ~0.004 → halt fired correctly, as
+   designed.
+10. **Launcher / agent ownership split** (review 013 finding #7,
+    `src/auto_research/AGENT_INSTRUCTIONS.md`): `experiments.jsonl` and
+    `sweep_state.yaml` are launcher-owned, agent reads only. Early
+    versions had the agent appending to `experiments.jsonl` directly,
+    producing format drift between agent rows and launcher rows. Now a
+    clean split.
 
 ### Gates story
-*Did the cross-attn gates actually open? When? On which configs?*
+
+Did the cross-attn gates actually open? **No, not meaningfully.** Across
+all 8 valid x-attn runs:
+
+- `gate_init=small_0.01` × 6 runs (smoke + 5 round-1 cells): max-gate
+  magnitude at step 1500 ranged 0.0106-0.0112, i.e. **0.0006-0.0012
+  above the 0.01 initialization**. Effective learned movement: ≤10%
+  of init magnitude.
+- `gate_init=zero` × 2 runs (round-2 perturbations): max-gate magnitude
+  at step 1500 was 0.00385 and 0.00412, both below the 0.005 "open"
+  threshold. Two consecutive sub-threshold runs tripped the
+  `zero_gate_activation` halt.
+
+Gates rode their init bias. Whatever lift cross-attn provided on this
+task came from the bias-on-init dot-product through the resampler, not
+from any meaningful gradient-driven gate opening in 1500 steps. With the
+gate near-zero in round-2 and HN-FPR statistically unchanged, the bias-
+driven contribution is also bounded above by "no detectable lift on the
+5k eval."
 
 ### Per-baseline deltas (with CIs)
-- vs CPT-light:
-- vs LoRA-text:
-- vs structured-as-text (load-bearing):
-- vs event-only classifier (load-bearing — does the LM matter at all?):
+
+All numbers stripped-mode, metric_version=2, clean-eval n=4466.
+Leader: `exp_xa_round1_002` (every_8 / slots=64 / gate=small_0.01).
+
+- **vs CPT-light-merged** (`exp_stage0_001`): not directly comparable —
+  v1-only row, no v2 rescore. Qualitatively in the same 0.05-0.07 band
+  on the leaky pre-clean eval. No claim possible.
+- **vs LoRA-text v2** (worst 0.0701 [0.0564, 0.0847] on
+  `hn_large_purchase`): leader -0.0177 absolute on worst-family,
+  CIs **overlap** (`lora_lo=0.0564 < xattn_hi=0.0647`). Different worst
+  family (LoRA-text fails on hn_large_purchase; x-attn fails on
+  hn_account_recovery), so the comparison is more apples-to-oranges
+  than the table suggests.
+- **vs structured-as-text v2** (worst 0.0507 [0.0408, 0.0635] on
+  `hn_account_recovery`) — **load-bearing**: leader +0.0017 absolute
+  **worse**, CIs heavily overlap. **No separation.** Same worst family.
+  Same magnitude. This is the headline result.
+- **vs event-only classifier v2** (worst 0.0730 [0.0667, 0.0799] on
+  `hn_account_recovery`): leader -0.0206 absolute, CIs **marginally
+  non-overlapping** (`event_lo=0.0667` vs `xattn_hi=0.0647`,
+  separation = 0.0020). The LM-based variants do outperform pure
+  event-only on worst-family. **The LM matters.** But x-attn-on-top-of-LM
+  does not separate from feeding the same structured stream as text.
 
 ### Per-journey breakdown
-- clean / cred_stuff / sim_swap / phish_takeover / malware_rat / mule_chain / hn_travel / hn_large_purchase / hn_account_recovery
+
+Across all 8 x-attn runs (and all 3 LM baselines): `clean`, `cred_stuff`,
+`malware_rat`, `mule_chain`, `phish_takeover`, `sim_swap` are all
+saturated at AUC=1.0. Discrimination is decided entirely on the three
+`hn_*` families. Per-journey AUC is uninformative on this surface —
+the only signal is in per-family HN-FPR.
 
 ### Per-actor differential
-- human vs agent-driven journeys
+
+Human vs agent-driven AUCs both 1.0 (saturated). No differential
+extractable from the 5k clean-eval surface. The original v3 question
+("does cross-attn do better on agent-driven journeys than human?") is
+not answerable on this surface; would require a recall-at-low-FPR
+analysis on the 50k medium eval, which was not run.
 
 ### Hard-negative FPR
-- hn_travel, hn_large_purchase, hn_account_recovery
+
+The headline numbers. `hn_account_recovery` is the bottleneck for
+**every variant we tested** (x-attn × 8, structured-as-text, event-only
+classifier, CPT-light qualitative) at 0.05-0.07. `hn_large_purchase`
+mid (~0.015-0.026) for x-attn / structured-as-text and zero for
+event-only. `hn_travel` zeroed for every variant. This shape held
+**invariant** under: insertion_pattern ∈ {every_4, every_8, late_only},
+resampler_slots ∈ {64, 128}, gate_init ∈ {zero, small_0.01}. Conclusion:
+the worst-family ceiling is upstream of the architectural dials this
+sweep exercised — most likely in the synthetic generator's
+`hn_account_recovery` template (`docs/day-2-results.md` §3 Finding 3).
 
 ### Day-4 recommendation: extend / pivot / stop
-*2-3 lines of rationale.*
+
+**Pivot, then stop.** More architectural sweep on this surface won't
+separate cross-attn from structured-as-text within CIs — every dial
+tested is invariant to the bottleneck family. The two unlocked next
+moves are (1) **medium eval (50k)** with the Round-1 leader + structured-
+as-text head-to-head, which can tighten CIs ~3× and either confirm the
+tie or expose a separation; (2) **data-side pivot** into the
+`hn_account_recovery` generator, since the family ceiling is what's
+capping every variant. Run (1) first; if (1) still ties, stop spending
+on x-attn architecture and move the budget to (2). The cross-attn
+gated-residual mechanism is not a classification-lift lever on this
+task at this scale.
 
 ### Concrete next-steps for a real PayPal-internal POC
-*Tied back to `.claude/tasks/cross-attn-ato/next-steps-checklist.md` — which assumptions held, which broke.*
+
+Tied back to `.claude/tasks/cross-attn-ato/next-steps-checklist.md`:
+
+- **Held**: leakage-safety scaffolding (text-hash + structured-events-hash
+  dedup), three-mode eval, bootstrap CIs, baselines-as-arms (cpt_light /
+  lora_text / structured_as_text / event_only), launcher/agent ownership
+  split. These transferred directly to the auto-research workflow with
+  no rework.
+- **Broke**: AUC-as-primary-metric (saturated; migrated to worst-family
+  HN-FPR mid-Day-2); convergence-halt-as-primary-stop (fires on first
+  leader-in-window; zero_gate is the only safe stop on this dataset);
+  narrator caching (had to add pre-narration stratification); sklearn
+  recall_at_fpr (replaced with tie-aware exact-target metric).
+- **New for an internal POC**: a *real* medium-eval (50k synthetic +
+  10k held-out replay of a real anonymized window) needs to land
+  *before* x-attn is touched — the 5k surface saturated every variant
+  except on the three HN families, and the HN families are where the
+  generator most differs from real data. Without that, the
+  architectural sweep is exercising the generator's ceiling, not the
+  model's.
