@@ -171,20 +171,45 @@ HARD RULES (any violation is a critical failure):
    agent-mediated sessions you may use "the agent" or "the tool-mediated agent". You must
    NEVER use any class label (compromised, adversarial, buying assistant, finance assistant,
    hybrid agent, etc.). Describe BEHAVIOR (cadence, tool-use trace), not CLASS.
-4. Do not invent any PII (no email addresses, IPs, phone numbers, account IDs, full names). If
-   you need to refer to a recipient or device, use phrases like "a newly-added recipient" or
-   "a previously-unseen device".
-5. Use 2-4 sentences. No bullet points, no headers, no markdown.
+4. Do not invent any PII (no email addresses, IPs, phone numbers, account IDs, full names).
+   Refer to a recipient simply as "a recipient" and a device simply as "a device". Do NOT
+   characterize either with words like "newly-added", "previously-unseen", "unfamiliar",
+   "rare", "known", "trusted" — those are quantitative judgments that belong only to the
+   structured event stream, not the narrative.
+5. Do NOT use value-laden adjectives that quantify amounts, device history, IP risk,
+   recipient relationship age, transaction velocity, or authentication strength. BANNED
+   adjectives and qualifiers (any form, including stems and synonyms):
+   - amount: high-value, low-value, large, small, sizable, sizeable, hefty, modest,
+     significant, substantial, minor, tiny, big-ticket
+   - device: previously-unseen, unfamiliar, new, rare, known, trusted, recognised,
+     recognized, primary, secondary
+   - IP / network: high-risk, low-risk, risky, suspicious-network, datacenter,
+     vpn, tor, anonymizing
+   - recipient: freshly-added, newly-added, new, unknown, just-added, recent,
+     unfamiliar (when describing a recipient)
+   - velocity: bursty, rapid, fast-paced, slow, normal-pace, extreme, very-fast,
+     compressed-cadence
+   - auth: mfa, multi-factor, no-mfa, password-only, cookie-only, strong-auth,
+     weak-auth, strong, weak (when describing authentication)
+   The narrator can mention that an event TYPE occurred (a transfer, a device change,
+   a password reset, an authentication attempt). The narrator cannot quantify it.
+6. Use 2-4 sentences. No bullet points, no headers, no markdown.
 
-Examples of compliant phrasing:
-- "Login from a previously-unseen device was followed by a credential change and a
-   high-value transfer to a freshly-added recipient."
-- "A large number of authentication attempts in a very short window, from a high-risk
-   network location. No outgoing transactions completed."
-- "Routine session. A single login was followed by typical low-amount purchases to
-   known merchants."
+Examples of compliant phrasing (v4: no value-laden adjectives):
+- "A login was followed by a credential change and an outbound transfer to a recipient."
+- "A series of authentication attempts occurred in a short window. No outgoing transactions completed."
+- "Routine session. A login was followed by purchases at merchants."
 - "The session showed a highly regular cadence with tool-mediated steps."   (agent case;
-   note: no class label used)
+   note: no class label, no value-laden adjective)
+
+Examples of NON-compliant phrasing (avoid these — they leak the structured-stream signal
+into the narrative, which is the bug v4 is designed to fix):
+- "high-value transfer to a freshly-added recipient"      (quantifies amount + recipient age)
+- "login from a previously-unseen device"                  (quantifies device age)
+- "low-amount purchases to known merchants"                (quantifies amount + merchant risk)
+- "rapid sequence of transfers"                            (quantifies velocity)
+- "from a high-risk network location"                      (quantifies IP risk)
+- "without multi-factor authentication"                    (quantifies auth strength)
 """
 
 
@@ -318,6 +343,24 @@ def _serialize_events_for_prompt(journey: Journey) -> str:
 
     Actor descriptor is NEUTRAL (behavioral, not class-named) per review
     004 finding #1.
+
+    v4 (data-v4-pivot-plan.md Change 1): we no longer pass the
+    bucketed-feature keys (amount_bucket, geo_distance, ip_risk,
+    device_age, merchant_risk, txn_velocity, recipient_age,
+    session_dwell, auth_strength) to the narrator. The narrator sees
+    only the EVENT TYPE, the TIMESTAMP, and structural flags
+    (direction, prepares_event). The narrator can describe WHAT
+    happened operationally; it cannot quantify amounts, device
+    history, IP risk, or recipient relationships.
+
+    Reason: v3 leaked the structured signal into the narrative because
+    the narrator's user-message contained every bucket value and the
+    SYSTEM_PROMPT exemplars taught it to paraphrase them ("high-value
+    transfer", "previously-unseen device", "freshly-added recipient").
+    Result: text_only baselines could read the structured signal
+    through the narrative, and cross-attention had no unique signal
+    to fetch. v4 restores the modality gap so the bucketed signal
+    lives ONLY in the structured event stream.
     """
     lines = []
     actor = journey.actor_family
@@ -327,10 +370,11 @@ def _serialize_events_for_prompt(journey: Journey) -> str:
     lines.append("Event sequence:")
     for ev in journey.events:
         bits = [f"t={ev['t']}s", f"event={ev['event']}"]
-        for key in ("amount_bucket", "geo_distance", "ip_risk", "device_age",
-                    "merchant_risk", "txn_velocity", "recipient_age",
-                    "session_dwell", "auth_strength", "direction",
-                    "prepares_event"):
+        # v4: BUCKETED feature keys are deliberately omitted here.
+        # Only structural flags (direction = in/out, prepares_event)
+        # are passed through, since those describe what kind of event
+        # occurred (qualitatively) without quantifying its features.
+        for key in ("direction", "prepares_event"):
             if key in ev:
                 bits.append(f"{key}={ev[key]}")
         lines.append("  " + " ".join(bits))
