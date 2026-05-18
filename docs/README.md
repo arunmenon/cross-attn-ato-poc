@@ -10,6 +10,23 @@ alongside `PLAN.md` and the git diff to give a grounded review.
 
 ## Index
 
+### Running references (read these for current state)
+
+| File | Covers |
+|---|---|
+| `docs/experiments-log.md` | **Running history of every experiment**, with hypothesis, dials moved, result, and what was learned. Append-only; updated as new arms land. |
+| `docs/auto-research-loop.md` | **Plain-language walkthrough of the auto-research loop**: cron → agent_tick → claude → launcher → trainer. Explains the agent-proposes-launcher-enforces design, the shared state surface, halt conditions, and the F-numbered fix lineage. |
+
+### Per-day results
+
+| File | Covers |
+|---|---|
+| `docs/day-1-results.md` | Day-1 vertical slice + Stage-0 CPT-light + scale + 3-mode eval |
+| `docs/day-2-data-diagnostic.md` | Day-2 data-side investigation (per-family generator audit) |
+| `docs/day-2-results.md` | Day-2 architecture surgery + four baselines + first sweep batch |
+
+### Implementation batches (historical, frozen at end of each batch)
+
 | File | Covers | Closes review at |
 |---|---|---|
 | `docs/batch-1-tokenizer-foundations.md` | Path A Batch 1 (custom_tokens, fencer, feature_bucketer, pii_fencer) | *(retroactive: review 001 finding 1 partial-close)* |
