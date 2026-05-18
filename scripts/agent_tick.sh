@@ -144,13 +144,15 @@ if [[ -f "$GPU_LOCK_FILE" ]]; then
     rm -f "$GPU_LOCK_FILE"
 fi
 
-# Halt check: if the launcher says the budget is exhausted or
-# convergence has been reached, exit promptly without invoking the CLI.
-# This script's exit code is informational for cron logs.
-if ! python scripts/run_next_experiment.py --halt-check; then
-    echo "[agent_tick] launcher reports halted; skipping this tick"
-    exit 0
-fi
+# Halt check (informational only): run --halt-check so cron logs see
+# the launcher's halt assessment, but do NOT short-circuit. The agent
+# itself reads sweep_state.yaml at every iteration and handles halted
+# state per AGENT_INSTRUCTIONS step 2 ("If halted: skip to Daily
+# writeup"). Short-circuiting here would prevent the writeup from
+# firing through cron — the original 2026-05-17 design wasted a manual
+# CLI invocation to write the Day-2 README section. Keep the script
+# thin and let the agent decide.
+python scripts/run_next_experiment.py --halt-check || true
 
 # ---------------------------------------------------------------------------
 # Launch the CLI (or print in dry-run mode)

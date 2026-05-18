@@ -30,7 +30,18 @@ halt:
     eval_step: 1500                # measured at this step
 
   convergence:
-    enabled: true
+    # Disabled on 2026-05-18 after Round-1 spread completed and the
+    # convergence halt fired prematurely: round1_002 (the leader) was
+    # also the first row in the window, so no later row could "improve
+    # over first by 0.005" without beating 0.0474. That blocked Round 2
+    # (gate_init=zero perturbations) and Round 3 (stress run) from
+    # ever proposing. PLAN.md describes a 3-round progression; the
+    # launcher's halt logic doesn't distinguish "Round 1 done" from
+    # "whole sweep done". Disabling convergence lets the agent continue
+    # to Round 2 / 3. Budget (max_experiments=12, max_gpu_hours=18) and
+    # the NaN / zero_gate halts remain in place as the real stop
+    # conditions.
+    enabled: false
     min_valid_runs_before_halt: 6  # cannot halt before 6 valid x-attn runs (v3 minor 5)
     window: 4                      # look at last N x-attn runs
     # Review 013 finding #1: convergence is now on worst-family HN-FPR
