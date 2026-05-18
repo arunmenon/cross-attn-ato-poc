@@ -1,12 +1,37 @@
-"""LoRA-on-Qwen3-8B text-only baseline (#2 of 4).
+"""text_only_v4 — LoRA-on-Qwen text-only baseline (Stage-1 from shared CPT-light base).
 
-Per PLAN.md "Baselines" §2: LoRA r=16 on raw Qwen3-8B (no CPT), trained
-on the SAME narrative + verdict-footer text the other LM trainers see.
-Tells us whether CPT-light is pulling its weight vs LoRA alone.
+Renamed from train_lora_text_only.py for v4. The v3 lora_text baseline
+started from RAW Qwen3-8B (no CPT-light merge), which made it not
+apples-to-apples with structured_as_text / xattn (both of which start
+from qwen3-8b-cpt-light-merged). v4 drops that ambiguity:
+
+  - In v4, this trainer starts from `qwen3-8b-cpt-light-v4-merged`
+    (the shared base used by structured_as_text_v4 and xattn_v4),
+    NOT raw Qwen.
+  - The text-input shape is the v4 text_only composition from
+    `data/gen/build_dataset.py::compose_text_only`:
+        <case>
+        <narrative>...narrative body...</narrative>
+
+        <risk_verdict>
+        label: {fraud|legit}
+        </risk_verdict>
+        </case>
+  - NO journey/actor wrapper tokens, no event lines, minimal verdict.
+  - This trainer's input is BYTE-IDENTICAL to what train_xattn.py
+    sees on the LM-text branch. The architectural difference between
+    text_only_v4 and xattn_v4 is whether the side-stream encoder is
+    consumed — nothing else.
+
+The v4 question this arm answers (paired with xattn_v4):
+    Does adding the structured event side stream improve over the
+    same model reading clean narrative only?
 
 CLI:
-    accelerate launch src/train/train_lora_text_only.py \\
+    accelerate launch src/train/train_text_only.py \\
         --config src/auto_research/runs/exp_NNN/config.yaml
+
+Per .claude/tasks/data-v4-pivot-plan.md baseline/checkpoint contract.
 """
 
 from __future__ import annotations
