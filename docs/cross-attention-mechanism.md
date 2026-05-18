@@ -42,37 +42,142 @@ That side channel is what cross-attention is.
 
 ## What is "cross-attention," intuitively?
 
-In a normal transformer language model, each layer does **self-attention**:
-every token in the input looks at every other token in the input. The
-text talks to itself.
+Think about how a language model like ChatGPT or Claude reads a prompt.
+Behind the scenes, every word in the prompt is constantly being
+cross-referenced against every other word — the model is building up
+an understanding by letting the words "talk to" each other. The
+technical name for that cross-referencing is **self-attention**: the
+input is talking to *itself*.
 
-**Cross-attention** is the same operation, but pointed at a *different*
-sequence. The text tokens (queries) look at — and pull information
-from — a separate set of vectors (keys + values). The text still
-"reads itself" via self-attention as usual; cross-attention is an
-*additional* pathway, sandwiched between self-attention layers.
+**Cross-attention** is the same kind of operation, but pointed at
+material that's *outside* the prompt.
 
-If self-attention is "the LM thinking about its prompt," cross-attention
-is "the LM glancing over at a side document while thinking." We give
-the LM a side document — the encoded event stream — and we let it
-glance whenever it wants.
+Picture yourself reading an article on your screen, with a glossary
+open in a second window. As you read, you occasionally glance at the
+glossary when a term is unfamiliar. The article is what you're
+thinking about; the glossary is **a side document you can pull from
+when it's useful**.
 
-The Flamingo paper (Alayrac et al. 2022) introduced the specific shape
-of cross-attention we use here. Two design choices from Flamingo matter:
+That second window is what cross-attention adds to a language model.
+The article you're reading is the LM's main input (here: the analyst's
+narrative). The side document is the encoded event stream. Cross-
+attention is the mechanism that lets the LM peek at the side document
+whenever extra detail helps.
 
-1. **The base LM is frozen**. We don't change its weights at all.
-   Cross-attn is added *on top* of a fixed LM. That keeps the LM's
-   language ability intact and lets us swap the side channel in and out.
+**Where this idea came from**: the Flamingo paper (Alayrac et al. 2022,
+DeepMind) introduced this exact shape of cross-attention as a way to
+let a text language model also "look at" images and videos. We're
+borrowing their recipe, with structured fraud events as our side
+document instead of images.
 
-2. **Each cross-attn block is gated** by a learnable scalar `tanh(α)`.
-   At initialization the gate is set to ~0, so the block is a
-   no-op — the LM ignores the side channel entirely. During training,
-   `α` can grow if the side channel is useful. The gate's size tells
-   us *whether the LM is actually using cross-attn*.
+Two specific design choices from Flamingo are what make this useful
+to us. They take a little unpacking.
 
-This second property is the diagnostic we cared most about. If the
-gates stay near 0, the LM is saying "I don't need the side channel."
-If they grow, the LM is saying "I'm leaning on cross-attn at this layer."
+### Design choice 1: The base language model is "frozen"
+
+When you train a neural network in the normal way, every internal
+parameter — every weight — gets nudged on every training step. Over
+millions of steps, the weights drift to whatever positions make the
+training loss lowest.
+
+When we say a model is **"frozen,"** we mean we've locked every weight
+in place. No nudges, no drift. All 8 billion parameters that make
+Qwen3-8B good at language stay *exactly* as they were the day Qwen3-8B
+was released.
+
+Why would we want that? Two reasons:
+
+1. **We don't want to risk damaging the language ability**. Qwen3-8B
+   is already good at reading and writing English. If we let its
+   weights move during fraud-detection training, we might accidentally
+   teach it that "the recipient was added 20 minutes ago" is a fraud
+   indicator but lose track of basic grammar in the process. Freezing
+   is insurance against that.
+
+2. **We can attribute results cleanly**. If we change cross-attn and
+   the score improves, we know cross-attn was responsible — not some
+   side effect of the LM having learned a new trick.
+
+Analogy: think of Qwen as a published textbook that's already good at
+explaining language. To teach it a new subject, we don't rewrite the
+book. We staple a supplement onto the back, and we let the supplement
+do all the learning. The original book stays exactly as it was.
+
+In our case, "the supplement" is the encoder + resampler + cross-attn
+blocks + LoRA-on-Q (we'll get to LoRA below). All the *learning*
+happens in those new pieces. Qwen itself just runs.
+
+### Design choice 2: Each cross-attn block has a "volume knob"
+
+Every cross-attention block in our setup has a **single number
+attached to it**. We call it `α` (alpha, a Greek letter we use as a
+variable name — there's nothing magic about it being Greek; we just
+needed a label). You can think of `α` as the position of a volume
+knob: it controls **how loudly the side channel speaks to the language
+model at that layer**.
+
+To convert `α` into something we can multiply with, we run it through
+a math function called `tanh` (tan-hyperbolic — pronounced "tanch").
+The only thing you need to know about `tanh` is: **it squeezes any
+number into the range from -1 to +1**. So no matter how big `α` gets,
+the volume can never get out of control.
+
+Some concrete values:
+
+| `α` value | `tanh(α)` | What it means |
+|---|---|---|
+| `α = 0` | `tanh(0) = 0` | Volume knob at zero. The block does **nothing** — adds zero to the LM. The LM behaves exactly as if cross-attn weren't there. |
+| `α = 0.01` | `tanh(0.01) ≈ 0.01` | Volume barely above zero. The side channel contributes a whisper. |
+| `α = 0.5` | `tanh(0.5) ≈ 0.46` | Volume around half. The side channel is contributing about half of its potential signal. |
+| `α = 2.0` | `tanh(2) ≈ 0.96` | Volume nearly maxed out. The side channel is contributing almost all of what it can. |
+
+At the **start** of training, we set `α` to either 0 or 0.01 (we
+tested both — see "gate_init" in the experiment log). Either way, the
+volume knob starts essentially **off**.
+
+Now here's the key word: `α` is **learnable**. That doesn't mean *we*
+turn the knob. It means **the training process decides whether to
+turn the knob, automatically, based on whether turning it helps**. If
+listening to the side channel reduces the training loss, the math of
+gradient descent will push `α` upward — the volume knob opens. If
+listening to the side channel doesn't help, the gradient won't push
+`α`, and the knob stays off.
+
+So `α` is the model's own answer to the question **"did you find the
+side channel useful?"**
+
+- If `α` stayed near 0 after training, the model is saying *"I tried
+  this side channel and decided I didn't need it."*
+- If `α` grew large, the model is saying *"I'm leaning on this side
+  channel heavily."*
+
+This is the **diagnostic** we care most about — a "diagnostic" is just
+a measurable signal that tells us what the model is doing internally.
+And it's the part the rest of this POC hinges on.
+
+In the literature and in the rest of this document, the volume knob is
+called the **gate**. When we say "the gates stayed closed" or "the
+gates didn't open," we mean the knob stayed near zero. When you see
+`max_gate` in the experiment tables — that's the highest volume-knob
+position across all the cross-attn blocks at the end of training.
+
+### What we found out about the gates
+
+Across all 15 cross-attn experiments we ran (different architectures,
+different starting `α` values, different learning rates), the answer
+was consistent: **the gates didn't open**. The volume knobs stayed near
+where they started — about 0.004 if they started at 0, about 0.011 if
+they started at 0.01.
+
+In plain terms: the language model **tried the side channel and
+decided it wasn't worth listening to**.
+
+That's a real piece of information, not just an empty result. It says:
+on this particular synthetic dataset, the fraud signal the LM needs
+is **already in the narrative text** (via the bucketed-feature tokens
+like `<amount_bucket=high>`). The side channel had nothing new to add.
+Whether the same conclusion holds on real-world data is a different
+question and a Day-4+ investigation.
 
 ---
 
