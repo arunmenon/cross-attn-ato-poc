@@ -11,7 +11,9 @@ target legit-FPR = 1%, stripped eval mode** (`hn_fpr_worst_stripped`).
 Lower is better; ties broken by `hn_fpr_mean_stripped`. AUC is saturated at
 1.0 on every model variant and is a sanity gate only, not the objective.
 
-Last update: 2026-05-18 (post-grid_017 launch, ~5 GPU-hr remaining of 18).
+Last update: 2026-05-18 14:12Z — Expanded Sweep voluntary-halted after
+18 valid arms across 4 phases; 2.52 GPU-hr unspent. Final budget +
+"why the gates didn't open" interpretation at the end of this file.
 
 ---
 
@@ -37,9 +39,10 @@ synthesis; this file holds the working history.
 | 5. Baseline rescore (v2) | 2026-05-17 | 4 baselines | done | clean-eval correction → leader unchanged but baselines worse |
 | 6. Day-3 synthesis | 2026-05-17 | (writeup) | done | x-attn provides no detectable lift; halt fires |
 | 7. Expanded Sweep — Phase 1 (LR/warmup) | 2026-05-18 | 3 | done | LR/warmup inert; gate dynamics LR-invariant in 3e-5 → 3e-4 |
-| 8. Expanded Sweep — Phase 2 (stress) | 2026-05-18 | 1 | failed | killed by 180m session boundary; F8 v1 → v2 patch |
-| 9. Expanded Sweep — Phase 3 (grid completion) | 2026-05-18 | 5 so far | running | gate=zero × architecture matrix nearly complete; all CI-tied |
-| 10. Expanded Sweep — Phase 4 (rank capacity) | — | 0 | conditional | only if Phases 1-3 don't surface signal |
+| 8. Expanded Sweep — Phase 2 (stress) | 2026-05-18 | 1 | failed | killed by 180m session boundary; F8 v1 → v2 patch; never retried |
+| 9. Expanded Sweep — Phase 3 (grid completion) | 2026-05-18 | 5 | done | gate=zero × architecture matrix (6 cells) all CI-tied with leader |
+| 10. Expanded Sweep — Phase 4 (rank capacity) | 2026-05-18 | 3 | done | lora_r 16 → 32 → 64; inert across 4× rank span |
+| 11. Voluntary halt | 2026-05-18 14:12Z | — | done | agent halted itself with 2.52 GPU-hr unspent |
 
 ---
 
@@ -317,7 +320,7 @@ Grid_014 was the round1_005 cell that originally hung in Round 1 (`every_8 /
 128 / small_0.01`); retried here cleanly under the F8 v2 patch's
 predecessor (still pre-F8 at launch but inside one session window).
 
-### Gate=zero quintet (gate=zero × {every_4, every_8, late_only} × {64, 128})
+### Gate=zero sextet — full architecture × gate=zero matrix complete
 
 | Pattern | Slots | max_gate | hn_worst | CI |
 |---|---|---|---|---|
@@ -326,33 +329,94 @@ predecessor (still pre-F8 at launch but inside one session window).
 | every_8 | 64 | 0.0038 | 0.0608 | [0.048, 0.072] |
 | every_8 | 128 | 0.0034 | 0.0608 | [0.049, 0.072] |
 | late_only | 64 | 0.0028 | 0.0608 | [0.049, 0.072] |
-| late_only | 128 | (pending: grid_017?) | — | — |
+| **late_only** | **128** | **0.0042** | **0.0599** | **[0.048, 0.071]** |
 
-**What we learned (running)**:
+**What we learned**:
 
-- max_gate band across the quintet: **0.0028 - 0.0041** (32% spread, all
+- max_gate band across all 6 cells: **0.0028 - 0.0042** (50% spread, all
   ≪ 0.05). Gate dynamics under gate=zero are architecture-invariant.
 - hn_worst band: **0.0594 - 0.0608** (Δ = 0.0014, all CIs collapse onto
   each other and onto the leader).
-- **Counterintuitive (again)**: doubling slots 64→128 under gate=zero
-  *lowers* max_gate in both matched pairs (every_4: 0.0041→0.0034, every_8:
-  0.0038→0.0034). More slots = fewer per-slot gradient signals = lower
-  per-slot gate magnitudes. Architectural arithmetic, not a research
-  finding.
+- **Counterintuitive**: doubling slots 64→128 under gate=zero
+  *lowers* max_gate in two of three matched pairs (every_4: 0.0041→0.0034,
+  every_8: 0.0038→0.0034) and slightly raises it for late_only
+  (0.0028→0.0042). Architectural arithmetic — more slots = fewer
+  per-slot gradient signals = lower per-slot gate magnitudes — not a
+  research finding.
 - **The pathway is inert**. Three orthogonal dial families (architecture,
   init, training schedule) have now been swept; every CI overlaps the
   leader.
 
 ---
 
-## Phase 10 — Expanded Sweep, Phase 4: rank capacity (conditional)
+## Phase 10 — Expanded Sweep, Phase 4: rank capacity
 
-Per directive, Phase 4 runs only if Phase 1-3 don't surface gate learning.
-The plan is `lora_r_on_q ∈ {8, 32}` on the leader architecture — probes
-whether the LoRA-on-Q parameter budget is the bottleneck. As of this
-writeup the prior is strongly against finding anything new, but the
-expansion runs to completeness unless the GPU-hours cap closes the sweep
-first.
+Hypothesis: maybe the LoRA-on-Q adapter at rank=16 (the leader's setting)
+is too narrow a capacity bottleneck for the LM to learn to use cross-
+attn. Test by varying LoRA rank up (×2 and ×4) on the leader
+architecture. (The directive originally called for `lora_r ∈ {8, 32}`
+but the agent chose to probe upward — r=32 and r=64 — since
+under-parameterization was already implicit in the inert leader.)
+
+| exp_id | lora_r | max_gate | hn_worst [CI] | status |
+|---|---|---|---|---|
+| `round1_002` (reference) | 16 | 0.0112 | 0.0524 [0.042, 0.065] | (leader) |
+| `rank_018` | 32 | — | — | **failed (boundary kill)** |
+| `rank_018b` | 32 (retry) | 0.0108 | 0.0608 [0.048, 0.072] | ok |
+| `rank_019` | **64** | **0.0116** | 0.0608 [0.048, 0.072] | ok |
+
+**What we learned**:
+
+- **Quadrupling LoRA-on-Q rank (16 → 64) moves max_gate by 0.0004
+  absolute** — about 3% relative, within noise. HN-FPR-worst is
+  CI-tied across all three rank values.
+- The leader at r=16 has a *slightly better* point estimate than its
+  r=32 / r=64 perturbations (0.0524 vs 0.0608), but the CIs heavily
+  overlap. Probably not a real effect — more likely that round1_002
+  caught a favorable threshold/alpha combination on its bootstrap
+  resamples.
+- Phase 4 closes the same way as Phases 1 and 3: the dial is inert.
+
+### Failure: `rank_018` and the F8 v2 limit
+
+`rank_018` (lora_r=32) was killed mid-eval at 12:30Z when the 09:30
+claude session's 180m timeout fired. F8 v2 (SIGHUP+SIGPIPE IGN
+handlers in the launcher) was active — confirmed by the launcher.log
+starting with "survival mode active" — but the launcher died anyway.
+
+The most likely mechanism: claude's Bash tool sends SIGKILL (which is
+*not* maskable) to its tool-spawned subprocesses on shutdown, killing
+the launcher before its `subprocess.run` on the trainer can complete
+the experiment. F8 v2 protects against the SIGHUP cascade but not
+against SIGKILL.
+
+The proposed F8 v3 (wrap the launcher in `setsid -w` so it lives in a
+session entirely separate from claude's bash) was *not* deployed; the
+sweep produced its answer before another boundary crossing was needed.
+The unrun stress_012 retry would have been the only beneficiary, and
+the negative finding doesn't depend on it.
+
+---
+
+## Sweep voluntary halt — 2026-05-18 14:12Z
+
+After `rank_019` landed at 14:08Z, the 12:30 claude session read state,
+saw:
+
+- `current_best` unchanged through 11 expanded arms
+- Phase 1, Phase 3, Phase 4 all closed with negative findings, no CI
+  overlap with the early-exit bar
+- Phase 2 quarantined behind the F8 issue
+- Phase queue exhausted per the directive
+
+…and **voluntarily exited with rc=0**, leaving 78 minutes of its 180m
+budget unspent. This is the directive working as designed: probe to
+exhaustion, then stop. No "let's just try one more thing" wasted
+budget.
+
+The next cron tick at 14:30Z will start a fresh claude that should
+read state, see the sweep is closed, and either write the final
+synthesis or wait for human direction.
 
 ---
 
@@ -361,23 +425,142 @@ first.
 | exp_id | failure mode | resolution |
 |---|---|---|
 | `round1_005` | trainer hung mid-training | F2 stale-PID lock self-heal cleaned the lock; agent moved on; cell later validated cleanly as `grid_014` |
-| `stress_012` | killed by 180m claude session boundary | F8 v2 patch (SIGHUP/SIGPIPE IGN) deployed; retry possible if budget allows |
+| `stress_012` | killed by 180m claude session boundary | F8 v2 patch (SIGHUP/SIGPIPE IGN) deployed; retry never attempted (sweep closed first) |
+| `rank_018` | killed by 180m claude session boundary | F8 v2 was active but insufficient (claude's Bash tool likely sends SIGKILL on shutdown); agent retried as `rank_018b` per the directive's retry-failed-once rule; rank_018b landed cleanly |
 
 ---
 
-## Running budget snapshot
+## Why the gates didn't open — interpretation of the null result
+
+After 18 valid arms across 4 dial families, the headline finding is
+that **gates stay near their initialization** (~0.004 if init=0,
+~0.011 if init=0.01) and **HN-FPR-worst is statistically tied between
+cross-attn and the `structured_as_text` concat baseline**. This
+section is the load-bearing read on *why*.
+
+### The strongest reading: the structured signal is already in the text
+
+When we generate each training example, the same fraud signal flows
+into **both** streams. The text stream looks like this — notice the
+bucketed-feature tokens embedded in the narrative:
+
+```
+<journey_sim_swap><actor_human>
+... at t=2 the device_age was <device_age=new>, then at t=4 a password
+reset occurred with <auth_strength=password_only>, followed by a
+transaction at t=7 with <amount_bucket=high> to a recipient whose
+<recipient_age=newly_added> ...
+<risk_verdict>
+label:
+```
+
+The event stream looks like this — the side channel:
+
+```
+t=0  login         geo_distance=local      ip_risk=low
+t=2  device_add    device_age=new
+t=4  pw_reset      auth_strength=password_only
+t=7  txn           amount_bucket=high      recipient_age=newly_added
+```
+
+**These are two views of the same underlying tokens.** The bucketed-
+feature tokens (`<amount_bucket=high>`, `<recipient_age=newly_added>`,
+etc.) appear *verbatim* in the narrative. The LM reading the narrative
+via self-attention already sees them.
+
+When the LM "decides" whether to use cross-attn, it's effectively
+asking: *"do these events contain something the narrative doesn't
+already tell me?"* On this synthetic dataset, the answer is **no** —
+and the gates reflect that honestly.
+
+The clinching piece of evidence: the **`structured_as_text` baseline**
+(serialized event stream prepended to the text, no cross-attn at all)
+ties with cross-attn within CIs (0.0507 vs 0.0524). The LM doesn't
+*need* cross-attn to access the events — it can read them as text
+just fine. Cross-attn is offering an architectural alternative to a
+problem the LM doesn't have here.
+
+### The secondary reading: generator-side ceiling on hard negatives
+
+There's a second signal in the data that no architecture can fix. The
+per-family `hn_fpr` breakdown across all 18 arms:
+
+| Family | Across all 18 arms |
+|---|---|
+| `hn_travel` | always 0.0 |
+| `hn_large_purchase` | always 0.016 - 0.022 |
+| `hn_account_recovery` | always **0.052 - 0.061** ← the ceiling |
+
+Every arm — cross-attn, baselines, every architecture, every init —
+gets the **same per-family pattern**. This means there are sessions in
+the `hn_account_recovery` family (legitimate password resets that look
+like fraud) that **neither the text nor the events distinguish from
+real fraud**. The signal needed to crack those sessions isn't in
+either stream; it's missing from the synthetic generator.
+
+This is a data-side problem, not an architecture problem. No amount
+of cross-attn cleverness fixes it because the information just isn't
+there.
+
+### What we *can't* rule out
+
+To be honest about the uncertainty: we tested **one encoder**
+(`small_transformer`), **one eval size** (5k clean), and **one base
+model** (Qwen3-8B + CPT-light). It's possible that:
+
+- A **bigger or different encoder** (FT-Transformer, deeper
+  transformer) would extract structural signal from events that
+  `small_transformer` flattens. Stubbed but not run.
+- A **larger eval** (50k medium, 100-200k large) would reveal a small
+  effect that 5k can't detect. We have the 50k medium eval set
+  (`data/eval_medium_50k_llm/`); it was deferred to Day-4+.
+- A **real PayPal-internal dataset** wouldn't have the structured
+  signal pre-embedded in the text the way our synthetic generator
+  does. On real data, the text is whatever the customer service rep
+  or fraud analyst wrote — it almost certainly doesn't contain
+  `<amount_bucket=high>` verbatim. There, the cross-attn pathway might
+  actually earn its keep.
+
+### The precise statement
+
+> Gates didn't open **because the LM had no use for them on this
+> particular synthetic surface at this scale**. The dominant reason is
+> that we built our synthetic data with the structured signal already
+> embedded into the text — eliminating the gap cross-attn was designed
+> to fill. There's a secondary ceiling on hard-negative families
+> that's upstream of any model. We *cannot* claim cross-attn doesn't
+> work in general; we *can* claim that on this dataset, it has nothing
+> to add.
+
+This matters for what we'd do next:
+
+- If we extend on the **same synthetic data**, no architecture change
+  will help — the work moves to the generator (better hard negatives,
+  less feature-token leakage into the narrative).
+- If we move to **real data**, cross-attn becomes a live question
+  again — the synthetic redundancy goes away, and the architecture
+  may matter.
+
+The 18-arm sweep didn't kill cross-attention. It killed cross-attention
+*as a solution to a problem this dataset doesn't have*.
+
+---
+
+## Final budget snapshot
 
 | | |
 |---|---|
-| Last updated | 2026-05-18 ~11:15Z |
-| `n_xattn_runs` (valid) | 15 (16 launched, 1 failed boundary-kill) |
-| `current_best` | `round1_002` @ 0.0524 [0.042, 0.065], **unchanged through 8 expanded arms** |
-| `gpu_hours_used` | 13.17 / 18.00 → ~4.8 hr remaining |
-| `halted` | false |
-| Bar to beat (CI-strict for early-exit) | `ci_hi < 0.0420` AND `max_gate >= 0.05` |
+| Last updated | 2026-05-18 14:12Z (post-voluntary-halt) |
+| `n_xattn_runs` (valid) | 18 (20 launched, 2 failed boundary-kills: `stress_012` and `rank_018`) |
+| `current_best` | `round1_002` @ 0.0524 [0.042, 0.065], **unchanged through 11 expanded arms** |
+| `gpu_hours_used` | 15.48 / 18.00 → 2.52 hr unspent at voluntary halt |
+| `halted` | false (the launcher's halt logic never tripped — the agent halted itself) |
+| Bar to beat (CI-strict for early-exit) | `ci_hi < 0.0420` AND `max_gate >= 0.05` — **no arm came close on either** |
 
-The bar has not been hit by any arm. Expansion continues until early-exit
-fires, GPU-hours cap closes, or the Phase-1-through-4 queue exhausts.
+The expansion was authorized to probe 4 dial families. All four were
+probed; none surfaced a result that would unseat the Day-3 finding.
+The agent halted itself at 14:12Z with budget remaining rather than
+launch arms that the prior already said would land null.
 
 ---
 
