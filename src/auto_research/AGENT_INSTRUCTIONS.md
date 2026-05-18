@@ -106,6 +106,99 @@ When halted, **do not propose new experiments**. Write the daily section of the 
 
 ---
 
+## Expanded Sweep directive (post-Day-3, 2026-05-18)
+
+**This section SUPERSEDES the Round 1/2/3 proposer heuristic above for the current phase.** Both the smoke sweep (Round 1) and the gate_init=zero perturbation pass (Round 2) are complete; the canonical plan for what runs next lives in `.claude/tasks/xattn-expanded-sweep-plan.md`. The phase queue below is the agent-facing summary — work through it in order, applying the duplicate guard and early-exit rule.
+
+### Phase queue (proceed in order; skip exact-tuple duplicates)
+
+**Phase 1 — Training-dial sweep around current best** (`every_8 / small_0.01 / 64 / encoder=small_transformer / lora_r=16`):
+
+```text
+exp_xa_lr_009    lr=3e-4   warmup=100   steps=1500   seq_len=2048
+exp_xa_lr_010    lr=3e-4   warmup=500   steps=1500   seq_len=2048
+exp_xa_lr_011    lr=3e-5   warmup=500   steps=1500   seq_len=2048
+```
+
+**Phase 2 — One stress run on best config so far:**
+
+```text
+exp_xa_stress_012   stress_run=true   steps=3000   seq_len=4096
+                    base = best config from Phase 1 (or round1_002 if Phase 1 didn't beat it)
+```
+
+**Phase 3 — Finish non-duplicate original-grid cells:**
+
+```text
+exp_xa_grid_013    late_only / zero       / 64
+exp_xa_grid_014    every_8   / small_0.01 / 128   (retry of failed round1_005; one retry allowed)
+exp_xa_grid_015    every_4   / zero       / 128
+exp_xa_grid_016    every_8   / zero       / 128
+exp_xa_grid_017    late_only / zero       / 128
+```
+
+**Phase 4 — Rank capacity (CONDITIONAL — only if `max_gpu_hours - gpu_hours_used >= 1.5`):**
+
+```text
+exp_xa_rank_018    lora_r_on_q=32
+exp_xa_rank_019    lora_r_on_q=64
+```
+
+Use the best completed config at time of dispatch as the base for Phase 4. Vary only `lora_r_on_q`.
+
+### Dedup tuple (mandatory pre-write check)
+
+Before writing each `config.yaml`, read `experiments.jsonl` and compare against ALL prior rows by this exact tuple:
+
+```text
+(insertion_pattern, gate_init, resampler_slots, encoder, lora_r_on_q,
+ lr, warmup_steps, steps, seq_len)
+```
+
+Rules:
+
+- **No-redo:** if any `status: ok` row matches the tuple exactly → SKIP that queue item and advance to the next. Do not propose a duplicate.
+- **Retry-failed-once:** if a `status: failed | nan | timeout` row matches the tuple, the agent MAY retry it ONCE with a new exp_id. If there are already two-or-more failed rows for the tuple OR any successful row exists → SKIP.
+- **Phase 3's `exp_xa_grid_014`** is the explicit retry-once-allowed cell (round1_005 is its failed prior).
+
+The launcher's `canonical_hash` catches exact-hash duplicates as a safety net (exit code 2 = DUPLICATE), but the agent should pass the tuple check up front to avoid wasted config-writing work.
+
+### Early-exit-on-success rule
+
+If any run records BOTH:
+
+1. `max_gate_magnitude >= 0.05` (the original PLAN.md "gates open" threshold; current sweep has never satisfied it), AND
+2. `hn_fpr_worst_stripped` beats `current_best.hn_fpr_worst_stripped` with **non-overlapping** 95% CIs. Concretely: `new_row.hn_fpr_ci_stripped.worst_family.ci_hi < current_best.hn_fpr_ci_stripped.worst_family.ci_lo`.
+
+→ **STOP the mechanical queue.** Skip the rest of Phase 1-4.
+
+→ **Pivot to local perturbations** of the early-exit cell. Vary ONE dial at a time:
+- `insertion_pattern` ±1 step in {every_4, every_8, late_only}
+- `resampler_slots` toggle between 64 and 128
+- `gate_init` toggle between small_0.01 and zero
+- `lora_r_on_q` ∈ {16, 32, 64}
+
+Run local perturbations until budget exhausts, another early-exit fires, OR 3 consecutive perturbations show no further improvement vs the early-exit cell.
+
+Record the early-exit in `runs/exp_NNN/notes.md`: which trigger fired (gate or HN-FPR or both), and the local-perturbation queue you intend to follow.
+
+### Stopping condition
+
+Stop and write final synthesis when ANY of:
+
+1. `max_gpu_hours >= 18` (the cost cap; budget.yaml).
+2. All Phase 1-3 queue items completed-or-failed (Phase 4 optional per its conditional gate).
+3. Early-exit rule fired AND local-perturbation queue exhausts or 3 perturbations show no further improvement.
+
+When you stop, append (or rewrite) the README "Final synthesis" section answering:
+
+1. Did any non-duplicate x-attn config beat structured_as_text_v2 (HN-FPR-worst = 0.0507 [0.0408, 0.0635]) with non-overlapping CIs?
+2. Did LR/warmup/rank/longer training change the gate story (did max_gate ever reach 0.05+)?
+3. Was the Day-3 "ceiling is upstream of architecture" finding confirmed or refuted?
+4. Day-4 recommendation: more x-attn variants, harder synthetic data, or pivot to structured-as-text concat?
+
+---
+
 ## Notes template (one markdown file per run at `runs/exp_NNN/notes.md`)
 
 After the launcher completes, write a one-paragraph natural-language summary to `runs/exp_NNN/notes.md`. The launcher has already recorded the structured fields (AUC, CI, gates, wall-clock) in `experiments.jsonl` — your job is the *interpretation*.

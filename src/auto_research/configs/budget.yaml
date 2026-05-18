@@ -5,7 +5,11 @@
 # Baselines (cpt_light, lora_text, structured_as_text, event_only) are
 # recorded for Day-3 comparison but excluded from this budget AND from
 # convergence-halt counts.
-max_experiments: 12
+max_experiments: 999        # effectively disabled for expanded sweep (post-Day-3, 2026-05-18);
+                            # GPU-hours cap + early-exit + nan_cascade are the real stops now.
+                            # Original 12-cap was for the smoke + Round-1 grid; expanded sweep
+                            # (.claude/tasks/xattn-expanded-sweep-plan.md) intentionally probes
+                            # 9-11 more cells around training dials + stress.
 max_gpu_hours: 18           # across Day 2 PM + Day 3 AM/midday — TOTAL spend, includes baselines
 max_llm_narrator_usd: 200
 
@@ -17,7 +21,15 @@ halt:
     consecutive_threshold: 2
 
   zero_gate_activation:
-    enabled: true
+    # Disabled on 2026-05-18 after Round-2 (gate_init=zero perturbations)
+    # confirmed that gates legitimately don't move past 0.005 in either
+    # init regime on this surface. Halt was firing on a real signal that
+    # the expanded sweep (.claude/tasks/xattn-expanded-sweep-plan.md)
+    # specifically wants to probe further — Phase 1 tests whether LR /
+    # warmup variations unlock gate learning. Re-enable for production
+    # cron once the sweep is closed (or set magnitude_threshold to 0.001
+    # if you want a much weaker safety net).
+    enabled: false
     consecutive_threshold: 2
     # Lowered from 0.05 → 0.005 on 2026-05-18 after exp_xa_round1_001
     # produced max_gate_magnitude=0.0106 (and the smoke exp_xa_smoke_001_v2
