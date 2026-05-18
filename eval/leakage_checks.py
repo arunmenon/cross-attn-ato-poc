@@ -115,37 +115,53 @@ _ALLOW_RE = re.compile("|".join(_ALLOW_PHRASES), re.IGNORECASE) if _ALLOW_PHRASE
 # avoid false positives on common English ("a large number of attempts"
 # doesn't match because "number" isn't an amount-bearing noun).
 
+# v4 paraphrase patterns. Two design choices baked in:
+#
+# 1. Each adjective→noun bigram allows up to 2 neutral modifier words
+#    between the adjective and the target noun. Without this, an LLM
+#    that emits "large outbound transfer" or "previously unseen mobile
+#    device" or "new payment recipient" would pass the scanner.
+#    `_GAP` below is the inserted-modifier slot.
+#
+# 2. The risk adjectives can use either hyphen or space variants
+#    (e.g., "previously-unseen" vs "previously unseen", "high-risk"
+#    vs "high risk"). The `[-\s]` class handles both.
+
+# Up to 2 intermediate words between adjective and target noun.
+# Matches: "" (no modifier), " mobile", " mobile authentication".
+_GAP = r"\s+(?:\w+\s+){0,2}"
+
 _BUCKET_PARAPHRASE_STEMS = [
     # Amount paraphrases — bigrams of (value-adjective, amount-bearing noun)
     r"\bhigh[-\s]value\b",
     r"\blow[-\s]value\b",
     r"\bbig[-\s]ticket\b",
-    r"\b(large|small|sizable|sizeable|hefty|modest|substantial|significant|minor|tiny)\s+(transfer|transaction|payment|purchase|amount|sum|deposit|withdrawal)s?\b",
+    rf"\b(large|small|sizable|sizeable|hefty|modest|substantial|significant|minor|tiny){_GAP}(transfer|transaction|payment|purchase|amount|sum|deposit|withdrawal|wire|remittance)s?\b",
     # Device paraphrases
-    r"\b(previously[-\s]unseen|unfamiliar|new|rare|known|trusted|recognised|recognized|primary|secondary)\s+(device|browser|phone|laptop|machine|hardware|computer)\b",
+    rf"\b(previously[-\s]unseen|unfamiliar|new|rare|known|trusted|recognised|recognized|primary|secondary){_GAP}(device|browser|phone|laptop|machine|hardware|computer|handset|terminal|endpoint)\b",
     # IP / network paraphrases
-    r"\b(high|low|elevated)[-\s]risk\s+(network|location|ip|address|connection|origin)\b",
-    r"\bsuspicious\s+(network|location|ip|address|connection|origin)\b",
-    r"\bdatacenter\s+(ip|network|connection|origin)\b",
-    r"\b(vpn|tor|anonymizing)\s+(network|connection|service|exit|node|relay|address|ip)\b",
+    rf"\b(high|low|elevated)[-\s]risk{_GAP}(network|location|ip|address|connection|origin|asn|exit|node)\b",
+    rf"\bsuspicious{_GAP}(network|location|ip|address|connection|origin|asn)\b",
+    rf"\bdatacenter{_GAP}(ip|network|connection|origin|asn|address)\b",
+    rf"\b(vpn|tor|anonymizing|anonymising){_GAP}(network|connection|service|exit|node|relay|address|ip|asn)\b",
     # Recipient paraphrases
-    r"\b(freshly|newly|just)[-\s]added\s+(recipient|payee|contact|beneficiary)\b",
-    r"\bnew\s+(recipient|payee|contact|beneficiary)\b",
-    r"\brecent\s+(recipient|payee|contact|beneficiary)\b",
-    r"\bunfamiliar\s+(recipient|payee|contact|beneficiary)\b",
-    r"\bunknown\s+(recipient|payee|contact|beneficiary)\b",
+    rf"\b(freshly|newly|just)[-\s]added{_GAP}(recipient|payee|contact|beneficiary|account)\b",
+    rf"\bnew{_GAP}(recipient|payee|contact|beneficiary)\b",
+    rf"\brecent{_GAP}(recipient|payee|contact|beneficiary)\b",
+    rf"\bunfamiliar{_GAP}(recipient|payee|contact|beneficiary)\b",
+    rf"\bunknown{_GAP}(recipient|payee|contact|beneficiary)\b",
     # Velocity paraphrases
-    r"\b(bursty|rapid|extreme|very[-\s]fast|fast[-\s]paced|compressed|quick)\s+(cadence|sequence|succession|frequency|pace|velocity)\b",
-    r"\b(rapid|extreme|fast|quick)\s+(succession|sequence)\s+of\b",
+    rf"\b(bursty|rapid|extreme|very[-\s]fast|fast[-\s]paced|compressed|quick){_GAP}(cadence|sequence|succession|frequency|pace|velocity)\b",
+    rf"\b(rapid|extreme|fast|quick){_GAP}(succession|sequence|series)\s+of\b",
     # Auth paraphrases — partially standalone since auth-tokens are stronger signals
     r"\b(multi[-\s]factor|MFA)\b",
-    r"\b(strong|weak)\s+(authentication|auth)\b",
-    r"\b(no|without)\s+(multi[-\s]factor|MFA)\b",
+    rf"\b(strong|weak){_GAP}(authentication|auth)\b",
+    rf"\b(no|without){_GAP}(multi[-\s]factor|MFA)\b",
     r"\bpassword[-\s]only\b",
     r"\bcookie[-\s]only\b",
     # Session-dwell paraphrases
-    r"\b(short|brief|extended|long|prolonged)\s+session\b",
-    r"\b(brief|extended)\s+dwell\b",
+    rf"\b(short|brief|extended|long|prolonged){_GAP}session\b",
+    rf"\b(brief|extended){_GAP}dwell\b",
 ]
 
 _BUCKET_PARAPHRASE_RE = re.compile("|".join(_BUCKET_PARAPHRASE_STEMS), re.IGNORECASE)
@@ -445,6 +461,110 @@ def _print_overlap_diagnostic(train_path: Path, eval_path: Path) -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
+def _self_test() -> int:
+    """Pure-Python self-test for the leakage scanners.
+
+    Runs three fixture sets without requiring data or models:
+      A. v3 class/actor leakage — catches "fraud", "phishing", "SIM-swap", etc.
+      B. v4 paraphrase leakage — catches "high-value", "freshly-added", "MFA",
+         AND the inserted-modifier variants ("large outbound transfer",
+         "previously unseen mobile device", "new payment recipient",
+         "high-risk residential network", "strong customer authentication",
+         "rapid outbound succession").
+      C. v4-compliant exemplars — must pass cleanly. Regression-protection
+         against tightening the scanner so much that the v4 narrator's own
+         output gets rejected.
+
+    Returns 0 if every fixture behaves as expected, 1 otherwise. Used by
+    CI gates and by the build_dataset.py smoke step before any LLM spend.
+    """
+    failures: list[str] = []
+
+    # --- Fixture A: v3 class/actor leakage (must be caught) ---
+    bad_v3 = [
+        "this is fraudulent SIM-swap activity",
+        "credential stuffing attempt",
+        "the compromised account",
+        "phishing was attempted",
+    ]
+    for text in bad_v3:
+        if narrative_leakage_scan(text)["clean"]:
+            failures.append(f"v3 MISS: {text!r} should be caught by class scan")
+
+    # --- Fixture B1: direct v4 paraphrase bigrams (must be caught) ---
+    bad_v4_direct = [
+        "high-value transfer",
+        "freshly-added recipient",
+        "previously-unseen device",
+        "rapid succession of transfers",
+        "strong authentication",
+        "without multi-factor",
+        "high-risk network",
+        "large transfer",
+        "new recipient",
+        "extended session",
+        "MFA was used",
+        "password-only login",
+    ]
+    for text in bad_v4_direct:
+        if paraphrase_leakage_scan(text)["clean"]:
+            failures.append(f"v4 MISS (direct): {text!r}")
+
+    # --- Fixture B2: v4 paraphrases with inserted neutral modifiers (the
+    #     hard case — code review caught these as gaps in the original
+    #     regex set). All MUST be caught. ---
+    bad_v4_with_gap = [
+        "large outbound transfer",                # large + (outbound) + transfer
+        "large outbound wire transfer",           # 2 inserted modifiers
+        "previously unseen mobile device",         # previously-unseen + (mobile) + device
+        "previously-unseen primary mobile device", # 2 modifiers + hyphen variant
+        "new payment recipient",                   # new + (payment) + recipient
+        "newly-added external recipient",          # newly-added + (external) + recipient
+        "high-risk residential network",           # high-risk + (residential) + network
+        "elevated-risk datacenter network",        # elevated-risk + (datacenter) + network
+        "strong customer authentication",          # strong + (customer) + authentication
+        "weak password authentication",            # weak + (password) + authentication
+        "rapid outbound succession",               # rapid + (outbound) + succession
+        "rapid outbound transfer succession",      # 2 modifiers
+        "extreme withdrawal sequence",             # extreme + (withdrawal) + sequence
+        "without strong multi-factor",             # without + (strong) + multi-factor
+    ]
+    for text in bad_v4_with_gap:
+        if paraphrase_leakage_scan(text)["clean"]:
+            failures.append(f"v4 MISS (gap): {text!r}")
+
+    # --- Fixture C: v4-compliant exemplars (must pass cleanly) ---
+    good_v4 = [
+        "A login was followed by a credential change and an outbound transfer to a recipient.",
+        "A series of authentication attempts occurred in a short window. No outgoing transactions completed.",
+        "Routine session. A login was followed by purchases at merchants.",
+        "The session showed a highly regular cadence with tool-mediated steps.",
+        "An incoming transfer arrived and was redistributed across multiple recipients in a short window.",
+        "Funds were received and then sent to several payees, each receiving a partial sum, within minutes.",
+        # Generic English that shares words with paraphrases — must not false-positive
+        "a large number of attempts",
+        "a small group of users",
+        "the user took a long break between events",
+        "the customer reported no unusual activity",
+    ]
+    for text in good_v4:
+        scan = narrative_leakage_scan(text)
+        if not scan["clean"]:
+            failures.append(f"v4 FALSE POSITIVE: {text!r} hits={[h[0] for h in scan['hits']]}")
+
+    if failures:
+        print(f"leakage_checks self-test FAILED ({len(failures)} issues):")
+        for f in failures:
+            print(f"  - {f}")
+        return 1
+
+    n_fixtures = len(bad_v3) + len(bad_v4_direct) + len(bad_v4_with_gap) + len(good_v4)
+    print(f"leakage_checks self-test OK ({n_fixtures} fixtures: "
+          f"{len(bad_v3)} v3, {len(bad_v4_direct)} v4-direct, "
+          f"{len(bad_v4_with_gap)} v4-gap, {len(good_v4)} compliant)")
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--dataset", type=Path, help="dataset directory of jsonl files (for --narrative-scan audit)")
@@ -453,6 +573,12 @@ def main() -> int:
     p.add_argument("--sample-n", type=int, default=None, help="cap examples scanned (for fast smoke tests)")
     p.add_argument("--strict", action="store_true", help="exit non-zero on any failure")
     p.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run pure-Python regression fixtures for the v3 + v4 scanners; "
+             "exits non-zero on any miss or false positive",
+    )
+    p.add_argument(
         "--train-eval-overlap",
         type=Path,
         help="path to dataset dir with train.jsonl + eval.jsonl; "
@@ -460,13 +586,16 @@ def main() -> int:
     )
     args = p.parse_args()
 
+    if args.self_test:
+        return _self_test()
+
     if args.train_eval_overlap is not None:
         d = args.train_eval_overlap
         _print_overlap_diagnostic(d / "train.jsonl", d / "eval.jsonl")
         return 0
 
     if args.dataset is None:
-        p.error("--dataset is required (or pass --train-eval-overlap DIR)")
+        p.error("--dataset is required (or pass --train-eval-overlap DIR or --self-test)")
 
     modes = [m.strip() for m in args.modes.split(",")]
     summary = audit_dataset(args.dataset, modes, narrative_scan=args.narrative_scan, sample_n=args.sample_n)
