@@ -38,6 +38,16 @@ side channel to peek at the events whenever it wants?
 
 That side channel is what cross-attention is.
 
+> ⚠️ One important caveat before you read on: when this document says
+> "the language model," it means **Qwen3-8B after we've already done a
+> small additional training pass to teach it our custom tokens and the
+> narrative style** — a step called **CPT-light** (Continued
+> Pre-Training, light dose). The cross-attention work in this POC sits
+> on top of that CPT-light base, not on raw Qwen straight off the
+> shelf. **Every baseline we compare against also starts from the same
+> CPT-light base**, so all comparisons are apples-to-apples. The
+> "Piece 1" section below unpacks this.
+
 ---
 
 ## What is "cross-attention," intuitively?
@@ -284,24 +294,112 @@ The next sections unpack each piece.
 
 ---
 
-## Piece 1 — The frozen LM (Qwen3-8B)
+## Piece 1 — The frozen language model (Qwen3-8B, **after CPT-light**)
 
-| | |
-|---|---|
-| Model | Qwen3-8B (36 layers, hidden 4096, 32 attention heads) |
-| Stage 0 (before this matters) | Light continued pretraining ("CPT-light") on the synthetic narratives, merged back into the base weights |
-| Stage 1 (the cross-attn work) | The merged base is **frozen entirely** — no gradients flow through Qwen's original weights |
+This piece needs unpacking, because **"the base LM" in this document is
+not raw Qwen3-8B straight off Hugging Face**. It's Qwen3-8B *after a
+small amount of additional training on the narratives we use here*.
+That additional training is called **CPT-light**. Both this section
+and the rest of the doc assume the base model has been through
+CPT-light already.
+
+### What CPT-light is
+
+**CPT** stands for **Continued Pre-Training** — running the LM through
+another round of standard pre-training (next-token prediction on raw
+text), but on a *new* corpus. Standard pre-training teaches the LM
+general English; CPT teaches it the vocabulary, register, and patterns
+of a *specific domain*.
+
+CPT-**light** is just our shorthand for "a small dose of CPT" — short
+(a few hours on one H100), narrow (only the LLM-narrated fraud
+narratives in our training set), and parameter-efficient (we don't
+update all 8B weights; we update a small adapter — a LoRA — and the
+new token embeddings, then merge the adapter back into the base
+weights at the end).
+
+### Why we do CPT-light
+
+Qwen3-8B straight off Hugging Face has never seen the strings
+`<journey_sim_swap>`, `<amount_bucket=high>`, `<event_pw_reset>`, etc.
+These are the **custom tokens** we use to fence PII and to encode
+bucketed features (see `data/cards/dataset_card.md`). Without CPT,
+Qwen treats them as gibberish — its embedding for `<amount_bucket=high>`
+is whatever random initialization we gave it, with no meaningful
+direction in the embedding space.
+
+CPT-light fixes that. By the time CPT-light is done, the embedding
+for `<amount_bucket=high>` has settled into a position in Qwen's
+embedding space that's near "large transaction" and far from "small
+purchase." The token now means something to the LM.
+
+It also gives the LM exposure to the narrative *style* — the analyst-
+note register, the way our narratives mention events ("a password
+reset was followed by a high-value transaction to a newly added
+recipient"). The LM doesn't learn fraud detection during CPT; it
+learns to *read* the kind of text fraud narratives are written in.
+
+### Why we merge the CPT-light adapter back into the base
+
+CPT-light produced a small adapter (LoRA — see glossary) on top of
+Qwen3-8B. After CPT-light is done, we **merge** the adapter back into
+the base weights — meaning we mathematically combine the LoRA's
+weights with Qwen's weights so the adapter is gone but its effect is
+baked in. The resulting model, `qwen3-8b-cpt-light-merged`, is a
+single set of weights with no adapter attached.
+
+Why merge? Two reasons:
+
+1. Stage-1 (the cross-attn work) is going to *add its own* fresh LoRA
+   (the "LoRA-on-Q" we describe later). If we left CPT-light's LoRA
+   in place, we'd have two LoRAs stacked on Qwen — and gradients
+   flowing through them during Stage-1 would be ambiguous (which
+   adapter learned what?). Merging Stage-0's LoRA before Stage-1
+   starts gives Stage-1 a clean, single-adapter foundation.
+
+2. **Apples-to-apples baselines**. The structured_as_text and
+   lora_text baselines we compare cross-attn against are *also*
+   trained starting from `qwen3-8b-cpt-light-merged`. Every arm in
+   the bake-off — the cross-attn arms and the baselines — sees the
+   same CPT-light base. So when we compare cross-attn to
+   structured_as_text, we're comparing *the conditioning mechanism*,
+   not "x-attn vs. text-only with different starting points."
+
+### What "frozen" means here
+
+After CPT-light is done and merged, we **freeze** the merged base:
+during Stage-1, no gradient updates touch any of those 8 billion
+parameters. The frozen base is just a fixed function from "tokenize
+the text" to "produce hidden states at every layer."
 
 The point of freezing: we want to test **the conditioning mechanism**
-(cross-attn) without confounding it with "the LM learned to do fraud
-detection." If we let the LM update, we couldn't tell whether
-improvements came from cross-attn or from the LM picking up patterns.
+(cross-attn) without confounding it with "the LM learned more about
+fraud during Stage-1." If we let Qwen's weights update during Stage-1,
+we couldn't tell whether a score improvement came from cross-attn or
+from the LM picking up new patterns. Freezing isolates the cross-attn
+contribution.
 
-**Why merge Stage-0 first?** Stage-0 used a small adapter
-(a "LoRA" — see glossary). If we stacked Stage-1's new adapter on top
-of an unmerged Stage-0 adapter, gradients flowing back through the
-old adapter would be confusing. Merging Stage-0 into the base before
-Stage-1 starts gives Stage-1 a clean, frozen foundation.
+### Recap, end-to-end
+
+```
+   Stage 0  →  Stage 0 merge          →  Stage 1 (this POC)
+   ──────────────────────────────────────────────────────────────
+   Qwen3-8B  →  qwen3-8b-cpt-light-     →  Frozen merged base
+   (raw)        merged (new tokens         + small_transformer encoder
+                + narrative style          + Perceiver-Resampler
+                + LoRA merged in)          + gated x-attn blocks
+                                          + LoRA-on-Q (fresh)
+   ───────────────────────────────────────────────────────────────
+   The same `qwen3-8b-cpt-light-merged` base is used by:
+     - every x-attn arm
+     - the structured_as_text baseline
+     - the lora_text baseline
+   So all bake-off arms start from the same place. The only
+   variable is *how* event information reaches the LM.
+```
+
+When the rest of this doc says "the frozen LM" or "Qwen3-8B," it
+means **the post-CPT-light merged base**, not raw Qwen.
 
 ---
 
@@ -601,6 +699,16 @@ comparison, and the answer (so far) is "the two mechanisms tie."
 
 Terms used above, with one-line definitions and links to where they
 appear in the code.
+
+**CPT (Continued Pre-Training)** — Running an already-pretrained
+language model through another round of standard next-token-prediction
+training, but on a *new* corpus. Teaches the LM domain-specific
+vocabulary, register, and patterns. CPT-**light** is our shorthand for
+a small dose of CPT (a few hours, narrow corpus, parameter-efficient).
+In this POC, CPT-light teaches Qwen3-8B our custom tokens
+(`<journey_*>`, `<amount_bucket=*>`, etc.) and the analyst-note
+narrative style. The resulting model is `qwen3-8b-cpt-light-merged`,
+and every downstream arm (cross-attn AND baselines) starts from it.
 
 **Cross-attention** — The transformer attention operation where queries
 come from one sequence and keys+values come from a different one. In
