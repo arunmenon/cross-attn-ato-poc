@@ -5,6 +5,24 @@
 Plan: `PLAN.md` (v3).
 Runbook: `RUNBOOK.md`.
 
+> **Status — 2026-05-18: Expanded Sweep in progress; the Day-4 "Pivot, then stop"
+> recommendation below is superseded.** After the Day-3 synthesis closed
+> with 8 valid x-attn runs and the `zero_gate_activation` halt, the user
+> authorized a four-phase Expanded Sweep (LR/warmup → seq4096 stress →
+> grid completion → conditional rank capacity) to probe whether
+> training-dial perturbations unlock gate learning before declaring
+> architecture invariance on this surface. `configs/budget.yaml` lifted
+> `max_experiments` 12 → 999 and disabled both `zero_gate_activation`
+> and `convergence` halts for the duration; `nan_cascade` and the GPU-
+> hours cap remain the real stops. Source of truth:
+> `.claude/tasks/xattn-expanded-sweep-plan.md`. First arm
+> (`exp_xa_lr_009`: every_8 / slots=64 / gate=small_0.01, lr=3e-4,
+> warmup=100) is training on the pod as of this writing. The Final
+> Synthesis and Day-4 recommendation below will be re-written by the
+> auto-loop agent when the expansion closes (early-exit success,
+> Phase-3 completion, `nan_cascade`, or GPU-hours cap — whichever fires
+> first).
+
 ---
 
 ## Day 0 — Pre-flight (this directory, before GPU)
