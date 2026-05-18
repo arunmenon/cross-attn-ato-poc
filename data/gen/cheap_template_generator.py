@@ -27,84 +27,82 @@ import sys
 from data.gen.types import Journey
 
 # Per-family narrative phrases. Each list has multiple variants so the
-# templater can pick one for variety. NONE of these phrases name the
-# journey family (no "SIM-swap", "phishing", etc.).
+# templater can pick one for variety.
+#
+# v4 (2026-05-18, data-v4-pivot-plan.md Change 1): templates rewritten
+# to strip ALL value-laden adjectives that paraphrase the bucketed
+# event features. The narrator (LLM or template) describes WHAT EVENT
+# TYPES happened and in what ORDER — never how big, how risky, how
+# new, how rapid, or how strongly authenticated. Quantification lives
+# only in the structured event stream.
+#
+# Each template variant below has been audited against
+# eval/leakage_checks.paraphrase_leakage_scan(). NONE of these phrases
+# names the journey family (no "SIM-swap", "phishing", etc., per
+# review 004 #1), AND none uses banned bucket paraphrases like
+# "high-value", "previously-unseen device", "newly-added recipient",
+# "high-risk network", "multi-factor", "rapid succession", etc.
 _TEMPLATES: dict[str, list[str]] = {
     "clean": [
-        "Routine session. The account holder logged in from a familiar device "
-        "and made a small number of low-value transactions to known recipients. "
-        "No unusual signals.",
-        "Standard activity. A single login was followed by typical, low-amount "
-        "purchases to previously-seen merchants. Session length was within the "
-        "user's normal range.",
+        "Routine session. The account holder logged in and made a series of "
+        "transactions to recipients. No unusual signals.",
+        "Standard activity. A login was followed by purchases at merchants. "
+        "The session ended without further events.",
     ],
     "cred_stuff": [
-        "The session shows an unusually large number of login attempts in a "
-        "very short window, from a high-risk network location. No transactions "
-        "completed.",
-        "A rapid series of failed login attempts originating from a network "
-        "category associated with elevated risk. The pattern is incompatible "
-        "with typical human authentication.",
+        "The session shows a series of login attempts in a short window. No "
+        "transactions completed.",
+        "A series of failed login attempts. The pattern is incompatible with "
+        "typical human authentication.",
     ],
     "sim_swap": [
-        "A login from a previously-unseen device was followed by a new device "
-        "registration, a password change, and the addition of a new payee. "
-        "Shortly thereafter, an unusually large transfer occurred to that "
-        "newly-registered payee.",
-        "The account holder authenticated, registered a new hardware "
-        "fingerprint, changed credentials, and within minutes initiated a "
-        "high-value transfer to a freshly-added recipient on the account.",
+        "A login was followed by a device registration, a password change, "
+        "and the addition of a recipient. A transfer to that recipient "
+        "occurred shortly after.",
+        "The account holder authenticated, registered a device, changed "
+        "credentials, and initiated a transfer to a recipient added during "
+        "the session.",
     ],
     "phish_takeover": [
-        "The session began with authentication from a high-risk network and "
-        "an unfamiliar device. The actor proceeded directly to several "
-        "high-velocity transfers to newly-added recipients at elevated-risk "
-        "merchants.",
-        "Login originated from a network and device combination not previously "
-        "associated with this account. The session immediately progressed to "
-        "outgoing transactions in quick succession.",
+        "The session began with authentication and proceeded directly to "
+        "several outbound transfers to recipients at merchants.",
+        "A login was followed immediately by a series of outgoing "
+        "transactions.",
     ],
     "malware_rat": [
-        "Login from a familiar device with strong authentication, but the "
-        "subsequent activity diverges from the account's historical pattern: "
-        "a freshly-added recipient receives a high-value transfer that does "
-        "not match prior spending behavior.",
-        "Although the device and authentication signals are clean, the "
-        "session's transactional behavior is anomalous: an addition of a new "
-        "payee followed by a transfer well above the account's normal range.",
+        "A login was followed by activity that diverges from the account's "
+        "historical pattern: a recipient was added and a transfer was sent "
+        "to that recipient.",
+        "The session shows transactional behavior that does not match the "
+        "account's prior history: the addition of a payee followed by a "
+        "transfer.",
     ],
     "mule_chain": [
-        "An incoming transfer arrived and was rapidly redistributed across "
-        "multiple newly-added recipients in a short window. The outgoing "
-        "transfers show an extreme cadence inconsistent with deliberate "
-        "human-paced activity.",
-        "Funds were received and then immediately fanned out to several fresh "
-        "payees, each receiving a partial sum, all within minutes.",
+        "An incoming transfer arrived and was redistributed across multiple "
+        "recipients in a short window. The outgoing transfers are "
+        "inconsistent with deliberate human-paced activity.",
+        "Funds were received and then sent to several payees, each receiving "
+        "a partial sum, within minutes.",
     ],
     "hn_travel": [
-        "Login from an international location, but the device and "
-        "authentication signals are consistent with the account holder. "
-        "Subsequent transactions are routine: low to moderate amounts to "
-        "known merchants.",
-        "Session originated from a geographic location outside the account's "
-        "usual range, but device, authentication, and transaction behavior "
-        "are otherwise typical for this user.",
+        "A login occurred from an international location. Subsequent "
+        "transactions proceeded routinely with merchants.",
+        "The session originated from a geographic location outside the "
+        "account's usual range. Subsequent transaction behavior was "
+        "otherwise typical.",
     ],
     "hn_large_purchase": [
-        "Routine login from a familiar device with strong authentication. "
-        "Followed by a single high-value purchase at a known merchant after "
-        "a long deliberation period within the session.",
-        "Standard authentication and device signals. The session culminates "
-        "in a single large-amount transaction to a previously-seen merchant, "
-        "preceded by an extended dwell consistent with deliberation.",
+        "A login was followed by a single purchase at a merchant after "
+        "a deliberation period within the session.",
+        "The session culminates in a single transaction to a merchant, "
+        "preceded by a dwell period consistent with deliberation.",
     ],
     "hn_account_recovery": [
-        "Login from a known device with multi-factor verification was "
-        "followed by a password change. The session is short and contains no "
-        "high-value activity.",
-        "Standard recovery flow: authentication with strong factors, "
-        "credential update, optional device registration. No notable "
-        "transactional activity in the session.",
+        "A login was followed by a password change. The session ended "
+        "without further activity.",
+        "Standard recovery flow: authentication, credential update, "
+        "optional device registration. No notable transactional activity "
+        "in the session.",
     ],
 }
 

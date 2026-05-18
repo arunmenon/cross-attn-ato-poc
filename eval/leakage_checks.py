@@ -101,7 +101,89 @@ _BANNED_RE = re.compile("|".join(_BANNED_STEMS), re.IGNORECASE)
 _ALLOW_RE = re.compile("|".join(_ALLOW_PHRASES), re.IGNORECASE) if _ALLOW_PHRASES else None
 
 
-def narrative_leakage_scan(text: str) -> dict:
+# ---------------------------------------------------------------------------
+# Bucket-paraphrase detection (v4)
+# ---------------------------------------------------------------------------
+# v3 catches class labels and journey-family names. v4 adds a second
+# layer: catch value-laden adjectives that paraphrase the BUCKETED
+# FEATURE TOKENS (amount_bucket, device_age, recipient_age, ip_risk,
+# txn_velocity, auth_strength, session_dwell). These paraphrases are
+# the bug v4 is fixing — they leak the structured-stream signal into
+# the narrative.
+#
+# Patterns are mostly bigrams (`<value-adjective> <target-noun>`) to
+# avoid false positives on common English ("a large number of attempts"
+# doesn't match because "number" isn't an amount-bearing noun).
+
+_BUCKET_PARAPHRASE_STEMS = [
+    # Amount paraphrases — bigrams of (value-adjective, amount-bearing noun)
+    r"\bhigh[-\s]value\b",
+    r"\blow[-\s]value\b",
+    r"\bbig[-\s]ticket\b",
+    r"\b(large|small|sizable|sizeable|hefty|modest|substantial|significant|minor|tiny)\s+(transfer|transaction|payment|purchase|amount|sum|deposit|withdrawal)s?\b",
+    # Device paraphrases
+    r"\b(previously[-\s]unseen|unfamiliar|new|rare|known|trusted|recognised|recognized|primary|secondary)\s+(device|browser|phone|laptop|machine|hardware|computer)\b",
+    # IP / network paraphrases
+    r"\b(high|low|elevated)[-\s]risk\s+(network|location|ip|address|connection|origin)\b",
+    r"\bsuspicious\s+(network|location|ip|address|connection|origin)\b",
+    r"\bdatacenter\s+(ip|network|connection|origin)\b",
+    r"\b(vpn|tor|anonymizing)\s+(network|connection|service|exit|node|relay|address|ip)\b",
+    # Recipient paraphrases
+    r"\b(freshly|newly|just)[-\s]added\s+(recipient|payee|contact|beneficiary)\b",
+    r"\bnew\s+(recipient|payee|contact|beneficiary)\b",
+    r"\brecent\s+(recipient|payee|contact|beneficiary)\b",
+    r"\bunfamiliar\s+(recipient|payee|contact|beneficiary)\b",
+    r"\bunknown\s+(recipient|payee|contact|beneficiary)\b",
+    # Velocity paraphrases
+    r"\b(bursty|rapid|extreme|very[-\s]fast|fast[-\s]paced|compressed|quick)\s+(cadence|sequence|succession|frequency|pace|velocity)\b",
+    r"\b(rapid|extreme|fast|quick)\s+(succession|sequence)\s+of\b",
+    # Auth paraphrases — partially standalone since auth-tokens are stronger signals
+    r"\b(multi[-\s]factor|MFA)\b",
+    r"\b(strong|weak)\s+(authentication|auth)\b",
+    r"\b(no|without)\s+(multi[-\s]factor|MFA)\b",
+    r"\bpassword[-\s]only\b",
+    r"\bcookie[-\s]only\b",
+    # Session-dwell paraphrases
+    r"\b(short|brief|extended|long|prolonged)\s+session\b",
+    r"\b(brief|extended)\s+dwell\b",
+]
+
+_BUCKET_PARAPHRASE_RE = re.compile("|".join(_BUCKET_PARAPHRASE_STEMS), re.IGNORECASE)
+
+
+def paraphrase_leakage_scan(text: str) -> dict:
+    """Detect bucket-paraphrase phrases in narrative body (v4).
+
+    Returns dict with 'clean' boolean and 'hits' list of (phrase, span)
+    tuples — same shape as `narrative_leakage_scan` so the build_dataset
+    retry loop can treat both scanners uniformly.
+
+    These paraphrases are banned in v4 because they leak the
+    structured-stream signal into the narrative — the very bug v4 is
+    designed to fix. If the LLM narrator emits "large transfer" or
+    "newly-added recipient" or "MFA" in the narrative body, the
+    text-only baseline can read fraud signal that should live only in
+    the side stream.
+
+    See data/gen/narrative_generator.py SYSTEM_PROMPT rule 5 for the
+    full list of banned adjective families and target nouns. This
+    scanner is the enforcement layer for that rule.
+    """
+    body = re.sub(r"<risk_verdict>.*?</risk_verdict>", "", text, flags=re.DOTALL)
+
+    hits: list[tuple[str, tuple[int, int]]] = []
+    for m in _BUCKET_PARAPHRASE_RE.finditer(body):
+        phrase = m.group(0)
+        hits.append((phrase, (m.start(), m.end())))
+
+    return {
+        "clean": len(hits) == 0,
+        "hits": hits,
+        "n_hits": len(hits),
+    }
+
+
+def narrative_leakage_scan(text: str, include_paraphrase: bool = True) -> dict:
     """Detect banned phrases in narrative body.
 
     Returns dict with 'clean' boolean and 'hits' list of (phrase, span) tuples.
@@ -109,6 +191,12 @@ def narrative_leakage_scan(text: str) -> dict:
     The verdict footer is allowed to contain `label: fraud` / `label: legit` —
     those are scoring targets, not narrative leakage. So strip the verdict
     footer before scanning.
+
+    v4 (2026-05-18): by default this scanner ALSO checks for
+    bucket-paraphrase leakage (see `paraphrase_leakage_scan`). Callers
+    that want only the v3 class/actor scan (e.g., for analyzing legacy
+    v3 datasets) can pass `include_paraphrase=False`. Hits from both
+    scanners are merged into the returned `hits` list.
     """
     # Strip the verdict footer (between <risk_verdict> and </risk_verdict>).
     body = re.sub(r"<risk_verdict>.*?</risk_verdict>", "", text, flags=re.DOTALL)
@@ -124,6 +212,10 @@ def narrative_leakage_scan(text: str) -> dict:
             if _ALLOW_RE.search(ctx):
                 continue
         hits.append((phrase, (m.start(), m.end())))
+
+    if include_paraphrase:
+        para = paraphrase_leakage_scan(text)
+        hits.extend(para["hits"])
 
     return {
         "clean": len(hits) == 0,

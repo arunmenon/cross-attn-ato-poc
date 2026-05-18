@@ -273,20 +273,43 @@ class CostTracker:
 
 _DEFAULT_NARRATOR_TEMP_FOR_CACHE = 0.3
 
+# v4 finding (cache-versioning blocker): the cache key must include the
+# narrator prompt schema version. v3 narratives in data/cache/narratives/
+# were generated under the v3 SYSTEM_PROMPT which TAUGHT the LLM to emit
+# "high-value transfer", "freshly-added recipient", etc. The v4 prompt
+# explicitly bans those paraphrases AND removes the bucketed-feature
+# tokens from the narrator's view. Without versioning, calling the
+# narrator on a journey that was previously narrated under v3 would
+# return the OLD narrative from cache, completely bypassing v4's
+# prompt — and the bucketed signal would silently leak back into v4
+# training data.
+#
+# Bump this version every time the narrator's prompt OR its input
+# schema changes. The cache key namespaces by this version so v3 and
+# v4 cache entries co-exist safely; v4 generation will only hit
+# entries written by v4.
+NARRATOR_PROMPT_VERSION = 2  # v4 (2026-05-18): strip bucketed tokens + paraphrase ban
+
 
 def _journey_cache_key(journey: Journey, model: str,
                        narrator_temp: float = _DEFAULT_NARRATOR_TEMP_FOR_CACHE) -> str:
     """SHA-256 over the structured stream + model name (+ narrator_temp if
-    non-default). Stable across runs; cache is safe to share between
-    regenerations of the same data.
+    non-default) + prompt_version (v4+). Stable across runs; cache is
+    safe to share between regenerations of the same data, AND safe
+    across prompt-version changes (v3 and v4 entries don't collide).
 
     Review 011 finding #3: the cache key now namespaces by
     `narrator_temp` so eval-time `--narrator-temp 0.5` actually
     generates fresh narratives instead of returning the cached
-    train-time (temp 0.3) text. Backward-compatible: when temp equals
-    the default 0.3, the key uses the OLD format (no temp field) so
-    existing 30k+ cache entries from the 25k train run still hit
-    without regeneration.
+    train-time (temp 0.3) text.
+
+    v4 (post-Change-1 review): the cache key also namespaces by
+    NARRATOR_PROMPT_VERSION. v3 keys (prompt_version=1, implicit
+    via omission) and v4 keys (prompt_version=2, explicit) hash
+    to different values even for the same journey + model + temp,
+    so v4 generation cannot silently inherit v3 narratives that
+    contain banned paraphrases. Bump NARRATOR_PROMPT_VERSION every
+    time the narrator's prompt OR input schema changes.
     """
     canonical = {
         "model": model,
@@ -296,6 +319,12 @@ def _journey_cache_key(journey: Journey, model: str,
     }
     if narrator_temp != _DEFAULT_NARRATOR_TEMP_FOR_CACHE:
         canonical["narrator_temp"] = round(narrator_temp, 4)
+    # v4: namespace by prompt version. Version 1 is the v3 implicit
+    # default (no field present), so existing v3 cache hits still
+    # work for v3 regeneration. Version >=2 is v4 and onward —
+    # explicit field ensures the hash differs.
+    if NARRATOR_PROMPT_VERSION != 1:
+        canonical["prompt_version"] = NARRATOR_PROMPT_VERSION
     blob = json.dumps(canonical, sort_keys=True, default=str).encode()
     return hashlib.sha256(blob).hexdigest()[:24]
 
