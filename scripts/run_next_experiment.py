@@ -951,6 +951,41 @@ def _do_run(config_path: Path) -> int:
     run_dir = config_path.parent
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    # F8 (2026-05-18): detach launcher from claude's session so claude's
+    # 180m timeout SIGTERM doesn't cascade to launcher → trainer via the
+    # pipe chain. exp_xa_stress_012 was killed mid-run at 07:30Z when
+    # the 04:30 claude session timed out — F6 (start_new_session=True
+    # for the trainer subprocess) only isolated the trainer's session,
+    # but the launcher itself was a bash-tool child of claude and died
+    # with claude, which broke the trainer's stdout pipe (SIGPIPE) and
+    # killed the trainer too.
+    #
+    # Two complementary moves, both applied AFTER the cheap checks (so
+    # config/dedup/halt/lock errors still surface to claude's stdout):
+    #   1. os.setsid()  — launcher leaves claude's session, becomes
+    #      its own session leader. No SIGHUP cascade.
+    #   2. dup stdout/stderr to launcher.log — claude's stdout pipe
+    #      breaks when claude dies; if the launcher writes to that
+    #      pipe after that point, SIGPIPE kills it. Redirecting to a
+    #      file removes the risk.
+    #
+    # Idempotent and benign: if setsid() raises EPERM (already a
+    # session leader, e.g., when invoked via setsid(1) directly) we
+    # log and proceed.
+    try:
+        os.setsid()
+    except OSError as _setsid_err:
+        print(f"[launcher] os.setsid() skipped: {_setsid_err}", file=sys.stderr)
+
+    _launcher_log = run_dir / "launcher.log"
+    _flog = _launcher_log.open("a", buffering=1)
+    os.dup2(_flog.fileno(), 1)
+    os.dup2(_flog.fileno(), 2)
+    sys.stdout = _flog
+    sys.stderr = _flog
+    print(f"[launcher] detached from parent session (pid={os.getpid()}, sid={os.getsid(0)}); "
+          f"logs to {_launcher_log}", flush=True)
+
     try:
         # 5. Launch trainer with per-experiment wall-clock cap (review 008 #4)
         t_start = time.time()
