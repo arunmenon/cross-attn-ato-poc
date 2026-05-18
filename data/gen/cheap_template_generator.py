@@ -104,6 +104,25 @@ _TEMPLATES: dict[str, list[str]] = {
         "optional device registration. No notable transactional activity "
         "in the session.",
     ],
+    # v4 adversarial subtypes (Change 3): event-sequence-wise they read
+    # the same as their adversarial counterpart (sim_swap and clean
+    # respectively), so the narrative templates use the same prose
+    # patterns. The disambiguating signal lives only in the structured
+    # event features.
+    "hn_recovery_high_amount": [
+        "A login was followed by a device registration, a password change, "
+        "and the addition of a recipient. A transfer to that recipient "
+        "occurred shortly after.",
+        "The account holder authenticated, registered a device, changed "
+        "credentials, and initiated a transfer to a recipient added during "
+        "the session.",
+    ],
+    "phish_takeover_mfa_phished": [
+        "Routine session. The account holder logged in and made a series of "
+        "transactions to recipients.",
+        "Standard activity. A login was followed by transactions at "
+        "merchants and to recipients.",
+    ],
 }
 
 

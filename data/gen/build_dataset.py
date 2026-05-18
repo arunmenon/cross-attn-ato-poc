@@ -52,17 +52,27 @@ from eval.leakage_checks import narrative_leakage_scan
 # Distributions
 # ---------------------------------------------------------------------------
 
-# Journey-family sampling weights (relative). Total fraud ~30%, hn ~30%, clean ~40%.
+# Journey-family sampling weights (relative).
+#
+# v3 split: fraud ~30%, hn ~30%, clean ~40% across 9 families.
+# v4 (Change 3) adds two adversarial subtypes at ~5% each, drawing
+# weight proportionally from their conventional counterparts so the
+# overall fraud / hn / clean split stays roughly fraud ~30%, hn ~30%,
+# clean ~40%.
 JOURNEY_WEIGHTS: dict[str, float] = {
     "clean":                40.0,   # 40%
+    # Fraud families
     "cred_stuff":            6.0,
     "sim_swap":              6.0,
-    "phish_takeover":        6.0,
+    "phish_takeover":        4.5,   # gave 1.5 to phish_takeover_mfa_phished
     "malware_rat":           6.0,
-    "mule_chain":            6.0,   # total fraud = 30%
+    "mule_chain":            6.0,
+    "phish_takeover_mfa_phished": 1.5,  # v4 adversarial (Change 3) — ~1.5%
+    # Hard negatives
     "hn_travel":            10.0,
     "hn_large_purchase":    10.0,
-    "hn_account_recovery":  10.0,   # total hn = 30%
+    "hn_account_recovery":   8.5,   # gave 1.5 to hn_recovery_high_amount
+    "hn_recovery_high_amount": 1.5, # v4 adversarial (Change 3) — ~1.5%
 }
 
 # Per-journey-family actor distributions. Each list sums to 1.0.
@@ -94,11 +104,26 @@ ACTOR_BY_JOURNEY: dict[str, dict[str, float]] = {
     "hn_account_recovery": {
         "human": 0.95, "hybrid": 0.05,
     },
+    # v4 adversarial subtypes (Change 3) — inherit actor distributions
+    # from their behavioral counterparts so the actor signal doesn't
+    # accidentally help disambiguate.
+    "hn_recovery_high_amount": {
+        "human": 0.95, "hybrid": 0.05,
+    },
+    "phish_takeover_mfa_phished": {
+        "human": 0.70, "agent_buying": 0.15, "agent_finance": 0.10, "hybrid": 0.05,
+    },
 }
 
 # Verdict-footer evidence strings, per journey family. Deterministic (not
 # LLM-generated) so they cannot leak — and so we can use them as a
 # scoring target without ambiguity.
+#
+# Note: v4 (Change 4) tightens the prompt contract — the verdict footer
+# in the trained-on text is `label: {fraud|legit}` ONLY, no evidence /
+# confidence / journey_family fields visible to the LM. These two
+# tables remain for diagnostic logging in the per-row metadata, but
+# are not consumed by the trainers.
 EVIDENCE_BY_FAMILY: dict[str, str] = {
     "clean":               "no_anomalies",
     "cred_stuff":          "high_velocity_logins, rotating_ips, mostly_failed",
@@ -109,6 +134,8 @@ EVIDENCE_BY_FAMILY: dict[str, str] = {
     "hn_travel":           "international_geo, otherwise_routine",
     "hn_large_purchase":   "high_amount, known_merchant, long_dwell",
     "hn_account_recovery": "pw_reset, mfa_present, no_high_value_txns",
+    "hn_recovery_high_amount":   "pw_reset, mfa_present, device_change, large_txn_to_known_account",
+    "phish_takeover_mfa_phished":"phished_mfa, subtle_device_anomaly, newly_added_recipient",
 }
 
 CONFIDENCE_BY_FAMILY: dict[str, str] = {
@@ -116,6 +143,8 @@ CONFIDENCE_BY_FAMILY: dict[str, str] = {
     "phish_takeover": "high", "malware_rat": "medium",
     "mule_chain": "high", "hn_travel": "medium",
     "hn_large_purchase": "medium", "hn_account_recovery": "high",
+    "hn_recovery_high_amount": "medium",   # adversarial — analyst genuinely needs both streams
+    "phish_takeover_mfa_phished": "medium",
 }
 
 

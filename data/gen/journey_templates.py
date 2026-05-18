@@ -124,7 +124,193 @@ def _attach_session_dwell(events: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Journey generators (9 families)
+# v4 feature-distribution table (data-v4-pivot-plan.md Change 2)
+# ---------------------------------------------------------------------------
+#
+# v3 generators used DETERMINISTIC feature values per family (every
+# hn_account_recovery had auth=mfa_strong, device_age=known, ip_risk=low,
+# geo_distance=local). That made hn vs fraud families perfectly
+# separable at the event-feature level — and is the second-cause
+# explanation for the v3 sweep's null result.
+#
+# v4 samples each feature from a per-family distribution. Families
+# still BIAS toward their characteristic signature (hn families lean
+# legitimate, fraud families lean suspicious), but there's now
+# meaningful overlap. Some hn_account_recovery samples have
+# password_only auth and rare devices; some phish_takeover samples
+# have mfa_strong auth (the attacker phished MFA) or known devices
+# (compromised primary device).
+#
+# Schema: _FEATURE_DIST[family][phase][feature] = {value: weight}
+# Values are normalized by random.choices().
+_FEATURE_DIST: dict[str, dict[str, dict[str, dict[str, float]]]] = {
+    "clean": {
+        "login": {
+            "ip_risk":     {"low": 0.85, "medium": 0.12, "high": 0.03},
+            "geo_distance":{"local": 0.75, "domestic_far": 0.22, "international": 0.03},
+            "auth":        {"mfa_strong": 0.75, "password_only": 0.22, "cookie_only": 0.03},
+            "device_age":  {"known": 0.88, "new": 0.10, "rare": 0.02},
+        },
+        "txn": {
+            "rcpt_age":    {"known": 0.95, "newly_added": 0.05},
+            "merch_risk":  {"normal": 0.98, "elevated": 0.02},
+        },
+    },
+    "cred_stuff": {
+        "login": {
+            "ip_risk":     {"high": 0.70, "medium": 0.25, "low": 0.05},
+            "geo_distance":{"international": 0.60, "domestic_far": 0.30, "local": 0.10},
+            "auth":        {"password_only": 0.85, "cookie_only": 0.10, "mfa_strong": 0.05},
+            "device_age":  {"rare": 0.55, "new": 0.30, "known": 0.15},
+        },
+    },
+    "sim_swap": {
+        "login": {
+            "ip_risk":     {"medium": 0.45, "high": 0.35, "low": 0.20},
+            "geo_distance":{"domestic_far": 0.45, "international": 0.30, "local": 0.25},
+            "auth":        {"password_only": 0.65, "mfa_strong": 0.20, "cookie_only": 0.15},
+            "device_age":  {"new": 0.50, "rare": 0.30, "known": 0.20},
+        },
+        "device_add": {"device_age": {"new": 0.70, "rare": 0.30}},
+        "txn":        {"rcpt_age": {"newly_added": 0.75, "known": 0.25},
+                       "merch_risk":  {"normal": 0.80, "elevated": 0.20},
+                       "velocity":    {"bursty": 0.50, "extreme": 0.40, "normal": 0.10}},
+    },
+    "phish_takeover": {
+        "login": {
+            "ip_risk":     {"high": 0.55, "medium": 0.30, "low": 0.15},
+            "geo_distance":{"international": 0.50, "domestic_far": 0.30, "local": 0.20},
+            "auth":        {"password_only": 0.55, "mfa_strong": 0.25, "cookie_only": 0.20},
+            "device_age":  {"rare": 0.45, "new": 0.30, "known": 0.25},
+        },
+        "txn":        {"rcpt_age":    {"newly_added": 0.65, "known": 0.35},
+                       "merch_risk":  {"elevated": 0.55, "normal": 0.45},
+                       "velocity":    {"bursty": 0.50, "extreme": 0.40, "normal": 0.10}},
+    },
+    "malware_rat": {
+        "login": {
+            "ip_risk":     {"low": 0.65, "medium": 0.25, "high": 0.10},
+            "geo_distance":{"local": 0.60, "domestic_far": 0.30, "international": 0.10},
+            "auth":        {"mfa_strong": 0.65, "password_only": 0.25, "cookie_only": 0.10},
+            "device_age":  {"known": 0.70, "new": 0.20, "rare": 0.10},
+        },
+        "txn":        {"rcpt_age":    {"newly_added": 0.55, "known": 0.45},
+                       "merch_risk":  {"elevated": 0.40, "normal": 0.60},
+                       "velocity":    {"normal": 0.85, "bursty": 0.15}},
+    },
+    "mule_chain": {
+        "login": {
+            "ip_risk":     {"low": 0.50, "medium": 0.30, "high": 0.20},
+            "geo_distance":{"local": 0.50, "domestic_far": 0.30, "international": 0.20},
+            "auth":        {"password_only": 0.45, "mfa_strong": 0.35, "cookie_only": 0.20},
+            "device_age":  {"known": 0.55, "new": 0.30, "rare": 0.15},
+        },
+        "txn":        {"rcpt_age":    {"newly_added": 0.70, "known": 0.30},
+                       "merch_risk":  {"normal": 0.85, "elevated": 0.15},
+                       "velocity":    {"extreme": 0.55, "bursty": 0.40, "normal": 0.05}},
+    },
+    "hn_travel": {
+        "login": {
+            "ip_risk":     {"low": 0.80, "medium": 0.15, "high": 0.05},
+            "geo_distance":{"international": 1.0},  # by definition
+            "auth":        {"mfa_strong": 0.85, "password_only": 0.10, "cookie_only": 0.05},
+            "device_age":  {"known": 0.85, "new": 0.10, "rare": 0.05},
+        },
+        "txn":        {"rcpt_age":    {"known": 0.90, "newly_added": 0.10},
+                       "merch_risk":  {"normal": 0.95, "elevated": 0.05}},
+    },
+    "hn_large_purchase": {
+        "login": {
+            "ip_risk":     {"low": 0.80, "medium": 0.15, "high": 0.05},
+            "geo_distance":{"local": 0.70, "domestic_far": 0.25, "international": 0.05},
+            "auth":        {"mfa_strong": 0.80, "password_only": 0.15, "cookie_only": 0.05},
+            "device_age":  {"known": 0.85, "new": 0.10, "rare": 0.05},
+        },
+        "txn":        {"rcpt_age":    {"known": 0.90, "newly_added": 0.10},
+                       "merch_risk":  {"normal": 0.90, "elevated": 0.10}},
+    },
+    "hn_account_recovery": {
+        "login": {
+            "ip_risk":     {"low": 0.65, "medium": 0.25, "high": 0.10},
+            "geo_distance":{"local": 0.55, "domestic_far": 0.30, "international": 0.15},
+            "auth":        {"mfa_strong": 0.55, "password_only": 0.30, "cookie_only": 0.15},
+            "device_age":  {"known": 0.60, "new": 0.30, "rare": 0.10},
+        },
+        "device_add": {"device_age": {"new": 0.85, "rare": 0.15}},
+        "txn":        {"rcpt_age":    {"known": 0.85, "newly_added": 0.15},
+                       "merch_risk":  {"normal": 0.90, "elevated": 0.10}},
+    },
+    # Adversarial subtypes — Change 3
+    # hn_recovery_high_amount: looks behaviorally like sim_swap (device
+    # add + pw reset + large transfer to new recipient) but events
+    # carry legitimacy markers. Label = legit.
+    "hn_recovery_high_amount": {
+        "login": {
+            "ip_risk":     {"low": 0.70, "medium": 0.25, "high": 0.05},
+            "geo_distance":{"local": 0.60, "domestic_far": 0.30, "international": 0.10},
+            "auth":        {"mfa_strong": 0.70, "password_only": 0.20, "cookie_only": 0.10},
+            "device_age":  {"new": 0.50, "known": 0.40, "rare": 0.10},
+        },
+        "device_add": {"device_age": {"new": 0.85, "rare": 0.15}},
+        "txn":        {"rcpt_age":    {"newly_added": 0.55, "known": 0.45},  # 45% known: the "new" recipient is actually self
+                       "merch_risk":  {"normal": 0.90, "elevated": 0.10},
+                       "velocity":    {"normal": 0.70, "bursty": 0.30}},
+    },
+    # phish_takeover_mfa_phished: looks behaviorally like clean (login
+    # + a few txns) but one txn goes to a newly-added recipient AND
+    # the device fingerprint is anomalous. Label = fraud.
+    "phish_takeover_mfa_phished": {
+        "login": {
+            "ip_risk":     {"low": 0.55, "medium": 0.35, "high": 0.10},
+            "geo_distance":{"local": 0.50, "domestic_far": 0.35, "international": 0.15},
+            "auth":        {"mfa_strong": 0.70, "password_only": 0.20, "cookie_only": 0.10},
+            "device_age":  {"rare": 0.45, "known": 0.30, "new": 0.25},  # subtle device anomaly
+        },
+        "txn":        {"rcpt_age":    {"known": 0.55, "newly_added": 0.45},  # one txn slipped to newly-added
+                       "merch_risk":  {"normal": 0.65, "elevated": 0.35},
+                       "velocity":    {"normal": 0.75, "bursty": 0.25}},
+    },
+}
+
+
+def _sample_value(rng: random.Random, family: str, phase: str, feature: str,
+                  fallback: str) -> str:
+    """Sample one value for (family, phase, feature) from _FEATURE_DIST.
+
+    Returns `fallback` if no distribution is registered (defensive — the
+    table covers all known family+phase+feature triples).
+    """
+    dist = _FEATURE_DIST.get(family, {}).get(phase, {}).get(feature)
+    if not dist:
+        return fallback
+    keys = list(dist.keys())
+    weights = list(dist.values())
+    return rng.choices(keys, weights=weights, k=1)[0]
+
+
+def _login_features(rng: random.Random, family: str) -> dict:
+    """Sample the four login-event features for a given journey family."""
+    return {
+        "ip_risk_value":      _sample_value(rng, family, "login", "ip_risk",     "low"),
+        "geo_distance_value": _sample_value(rng, family, "login", "geo_distance","local"),
+        "auth":               _sample_value(rng, family, "login", "auth",        "password_only"),
+        "device_age_value":   _sample_value(rng, family, "login", "device_age",  "known"),
+    }
+
+
+def _txn_features(rng: random.Random, family: str, default_velocity: str = "normal") -> dict:
+    """Sample txn features for a given family. `default_velocity` is
+    used when no velocity distribution is registered (e.g., hn families
+    that don't carry an explicit velocity bias)."""
+    return {
+        "rcpt_age":   _sample_value(rng, family, "txn", "rcpt_age",   "known"),
+        "merch_risk": _sample_value(rng, family, "txn", "merch_risk", "normal"),
+        "velocity":   _sample_value(rng, family, "txn", "velocity",   default_velocity),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Journey generators (9 v3 families + 2 v4 adversarial subtypes)
 # ---------------------------------------------------------------------------
 
 def gen_clean(seed: int, actor: str = "human") -> Journey:
@@ -132,21 +318,20 @@ def gen_clean(seed: int, actor: str = "human") -> Journey:
     rng = random.Random(seed)
     keeper = MetadataKeeper()
     events: list[dict] = []
+    fam = "clean"
 
     t = 0
-    events.append(_login_event(t, actor, keeper, rng=rng,
-                               ip_risk_value="low", geo_distance_value="local",
-                               auth="mfa_strong", device_age_value="known"))
+    events.append(_login_event(t, actor, keeper, rng=rng, **_login_features(rng, fam)))
 
     n_txns = rng.randint(1, 4)
     for _ in range(n_txns):
         t += rng.randint(60, 600)
         amount = rng.choice([5, 12, 25, 45, 80, 120, 200])
-        events.append(_txn_event(t, actor, keeper, rng=rng, amount_usd=amount,
-                                 velocity="normal", rcpt_age="known", merch_risk="normal"))
+        txn_feat = _txn_features(rng, fam)
+        events.append(_txn_event(t, actor, keeper, rng=rng, amount_usd=amount, **txn_feat))
 
     _attach_session_dwell(events)
-    return Journey(events=events, journey_family="clean", actor_family=actor,
+    return Journey(events=events, journey_family=fam, actor_family=actor,
                    label="legit", is_hard_negative=False, metadata=keeper, seed=seed)
 
 
@@ -157,20 +342,19 @@ def gen_cred_stuff(seed: int, actor: str = "human") -> Journey:
     rng = random.Random(seed)
     keeper = MetadataKeeper()
     events: list[dict] = []
+    fam = "cred_stuff"
 
     t = 0
     n_attempts = rng.randint(8, 25)
     for _ in range(n_attempts):
-        events.append(_login_event(t, actor, keeper, rng=rng,
-                                   ip_risk_value="high",  # VPN/datacenter
-                                   geo_distance_value="international",
-                                   auth="password_only",
-                                   device_age_value="rare"))
-        # Rapid retries — 1-15 seconds apart
-        t += rng.randint(1, 15)
+        # Each login attempt independently samples features. Most will
+        # be high-risk per the distribution; a few will look benign —
+        # reflecting that real cred-stuffing campaigns try many vectors.
+        events.append(_login_event(t, actor, keeper, rng=rng, **_login_features(rng, fam)))
+        t += rng.randint(1, 15)  # rapid retries
 
     _attach_session_dwell(events)
-    return Journey(events=events, journey_family="cred_stuff", actor_family=actor,
+    return Journey(events=events, journey_family=fam, actor_family=actor,
                    label="fraud", is_hard_negative=False, metadata=keeper, seed=seed)
 
 
@@ -181,30 +365,29 @@ def gen_sim_swap(seed: int, actor: str = "human") -> Journey:
     rng = random.Random(seed)
     keeper = MetadataKeeper()
     events: list[dict] = []
+    fam = "sim_swap"
 
     t = 0
-    events.append(_login_event(t, actor, keeper, rng=rng,
-                               ip_risk_value="medium",
-                               geo_distance_value="domestic_far",
-                               auth="password_only",
-                               device_age_value="new"))
+    events.append(_login_event(t, actor, keeper, rng=rng, **_login_features(rng, fam)))
 
     t += rng.randint(30, 180)
-    events.append(_device_add_event(t, actor, keeper, rng=rng, device_age_value="new"))
+    dev_age = _sample_value(rng, fam, "device_add", "device_age", "new")
+    events.append(_device_add_event(t, actor, keeper, rng=rng, device_age_value=dev_age))
 
     t += rng.randint(15, 90)
     events.append(_pw_reset_event(t, actor, keeper))
 
     t += rng.randint(60, 300)
-    events.append(_recipient_add_event(t, actor, keeper, rng=rng, age="newly_added"))
+    rcpt_age_for_add = _sample_value(rng, fam, "txn", "rcpt_age", "newly_added")
+    events.append(_recipient_add_event(t, actor, keeper, rng=rng, age=rcpt_age_for_add))
 
     t += rng.randint(30, 180)
-    big_amount = rng.uniform(5000, 18000)  # extreme bucket
-    events.append(_txn_event(t, actor, keeper, rng=rng, amount_usd=big_amount,
-                             velocity="bursty", rcpt_age="newly_added", merch_risk="normal"))
+    big_amount = rng.uniform(5000, 18000)
+    txn_feat = _txn_features(rng, fam, default_velocity="bursty")
+    events.append(_txn_event(t, actor, keeper, rng=rng, amount_usd=big_amount, **txn_feat))
 
     _attach_session_dwell(events)
-    return Journey(events=events, journey_family="sim_swap", actor_family=actor,
+    return Journey(events=events, journey_family=fam, actor_family=actor,
                    label="fraud", is_hard_negative=False, metadata=keeper, seed=seed)
 
 
@@ -212,30 +395,30 @@ def gen_phish_takeover(seed: int, actor: str = "human") -> Journey:
     """Phishing-collected credentials → fast monetization.
 
     Distinct from sim_swap: no device-add / pw-reset (the attacker has
-    the password already). Goes straight to high-value txns from a
-    suspicious IP.
+    the password already). Goes straight to high-value txns. Note:
+    v4 stochastic features mean that ~25% of phish_takeover samples
+    now use mfa_strong (the attacker phished the MFA too) and ~25%
+    use a known device (compromised primary device) — making this
+    family no longer perfectly separable from hn families at the
+    event-feature level.
     """
     rng = random.Random(seed)
     keeper = MetadataKeeper()
     events: list[dict] = []
+    fam = "phish_takeover"
 
     t = 0
-    events.append(_login_event(t, actor, keeper, rng=rng,
-                               ip_risk_value="high",
-                               geo_distance_value="international",
-                               auth="password_only",
-                               device_age_value="rare"))
+    events.append(_login_event(t, actor, keeper, rng=rng, **_login_features(rng, fam)))
 
     n_txns = rng.randint(2, 5)
-    velocity_seq = ["bursty"] * (n_txns - 1) + ["extreme"]
-    for vel in velocity_seq:
+    for _ in range(n_txns):
         t += rng.randint(20, 180)
         amount = rng.uniform(500, 8000)
-        events.append(_txn_event(t, actor, keeper, rng=rng, amount_usd=amount,
-                                 velocity=vel, rcpt_age="newly_added", merch_risk="elevated"))
+        txn_feat = _txn_features(rng, fam, default_velocity="bursty")
+        events.append(_txn_event(t, actor, keeper, rng=rng, amount_usd=amount, **txn_feat))
 
     _attach_session_dwell(events)
-    return Journey(events=events, journey_family="phish_takeover", actor_family=actor,
+    return Journey(events=events, journey_family=fam, actor_family=actor,
                    label="fraud", is_hard_negative=False, metadata=keeper, seed=seed)
 
 
@@ -246,25 +429,22 @@ def gen_malware_rat(seed: int, actor: str = "human") -> Journey:
     rng = random.Random(seed)
     keeper = MetadataKeeper()
     events: list[dict] = []
+    fam = "malware_rat"
 
     t = 0
-    events.append(_login_event(t, actor, keeper, rng=rng,
-                               ip_risk_value="low",         # known device, known IP
-                               geo_distance_value="local",
-                               auth="mfa_strong",
-                               device_age_value="known"))
+    events.append(_login_event(t, actor, keeper, rng=rng, **_login_features(rng, fam)))
 
-    # Then anomalous activity: large new-recipient transaction at odd hour.
     t += rng.randint(30, 120)
-    events.append(_recipient_add_event(t, actor, keeper, rng=rng, age="newly_added"))
+    rcpt_age_for_add = _sample_value(rng, fam, "txn", "rcpt_age", "newly_added")
+    events.append(_recipient_add_event(t, actor, keeper, rng=rng, age=rcpt_age_for_add))
 
     t += rng.randint(15, 90)
     amount = rng.uniform(2000, 9000)
-    events.append(_txn_event(t, actor, keeper, rng=rng, amount_usd=amount,
-                             velocity="normal", rcpt_age="newly_added", merch_risk="elevated"))
+    txn_feat = _txn_features(rng, fam)
+    events.append(_txn_event(t, actor, keeper, rng=rng, amount_usd=amount, **txn_feat))
 
     _attach_session_dwell(events)
-    return Journey(events=events, journey_family="malware_rat", actor_family=actor,
+    return Journey(events=events, journey_family=fam, actor_family=actor,
                    label="fraud", is_hard_negative=False, metadata=keeper, seed=seed)
 
 
@@ -275,15 +455,14 @@ def gen_mule_chain(seed: int, actor: str = "human") -> Journey:
     rng = random.Random(seed)
     keeper = MetadataKeeper()
     events: list[dict] = []
+    fam = "mule_chain"
 
     t = 0
-    events.append(_login_event(t, actor, keeper, rng=rng,
-                               ip_risk_value="low",
-                               geo_distance_value="local",
-                               auth="password_only",
-                               device_age_value="known"))
+    events.append(_login_event(t, actor, keeper, rng=rng, **_login_features(rng, fam)))
 
-    # Receive funds (incoming txn) — represented as a single high-amount entry
+    # Receive funds (incoming txn) — represented as a single high-amount entry.
+    # The incoming side keeps a "neutral" velocity since it's just a deposit;
+    # the outbound spree below is what carries the fraud signal.
     t += rng.randint(60, 300)
     incoming = rng.uniform(2000, 12000)
     ev = _txn_event(t, actor, keeper, rng=rng, amount_usd=incoming,
@@ -291,20 +470,21 @@ def gen_mule_chain(seed: int, actor: str = "human") -> Journey:
     ev["direction"] = "incoming"
     events.append(ev)
 
-    # Forward to N recipients rapidly
+    # Forward to N recipients rapidly — stochastic features per forward
     n_forwards = rng.randint(3, 7)
     for _ in range(n_forwards):
         t += rng.randint(5, 45)
-        events.append(_recipient_add_event(t, actor, keeper, rng=rng, age="newly_added"))
+        rcpt_age_for_add = _sample_value(rng, fam, "txn", "rcpt_age", "newly_added")
+        events.append(_recipient_add_event(t, actor, keeper, rng=rng, age=rcpt_age_for_add))
         t += rng.randint(2, 15)
         amount = incoming / n_forwards * rng.uniform(0.8, 1.0)
-        ev = _txn_event(t, actor, keeper, rng=rng, amount_usd=amount,
-                        velocity="extreme", rcpt_age="newly_added", merch_risk="normal")
+        txn_feat = _txn_features(rng, fam, default_velocity="extreme")
+        ev = _txn_event(t, actor, keeper, rng=rng, amount_usd=amount, **txn_feat)
         ev["direction"] = "outgoing"
         events.append(ev)
 
     _attach_session_dwell(events)
-    return Journey(events=events, journey_family="mule_chain", actor_family=actor,
+    return Journey(events=events, journey_family=fam, actor_family=actor,
                    label="fraud", is_hard_negative=False, metadata=keeper, seed=seed)
 
 
@@ -319,23 +499,20 @@ def gen_hn_travel(seed: int, actor: str = "human") -> Journey:
     rng = random.Random(seed)
     keeper = MetadataKeeper()
     events: list[dict] = []
+    fam = "hn_travel"
 
     t = 0
-    events.append(_login_event(t, actor, keeper, rng=rng,
-                               ip_risk_value="low",
-                               geo_distance_value="international",
-                               auth="mfa_strong",
-                               device_age_value="known"))
+    events.append(_login_event(t, actor, keeper, rng=rng, **_login_features(rng, fam)))
 
     n_txns = rng.randint(2, 5)
     for _ in range(n_txns):
         t += rng.randint(120, 1200)
         amount = rng.choice([15, 35, 80, 150, 300])
-        events.append(_txn_event(t, actor, keeper, rng=rng, amount_usd=amount,
-                                 velocity="normal", rcpt_age="known", merch_risk="normal"))
+        txn_feat = _txn_features(rng, fam)
+        events.append(_txn_event(t, actor, keeper, rng=rng, amount_usd=amount, **txn_feat))
 
     _attach_session_dwell(events)
-    return Journey(events=events, journey_family="hn_travel", actor_family=actor,
+    return Journey(events=events, journey_family=fam, actor_family=actor,
                    label="legit", is_hard_negative=True, metadata=keeper, seed=seed)
 
 
@@ -346,56 +523,139 @@ def gen_hn_large_purchase(seed: int, actor: str = "human") -> Journey:
     rng = random.Random(seed)
     keeper = MetadataKeeper()
     events: list[dict] = []
+    fam = "hn_large_purchase"
 
     t = 0
-    events.append(_login_event(t, actor, keeper, rng=rng,
-                               ip_risk_value="low",
-                               geo_distance_value="local",
-                               auth="mfa_strong",
-                               device_age_value="known"))
+    events.append(_login_event(t, actor, keeper, rng=rng, **_login_features(rng, fam)))
 
     t += rng.randint(300, 1800)  # user took time to decide
     big_amount = rng.uniform(3000, 15000)
-    events.append(_txn_event(t, actor, keeper, rng=rng, amount_usd=big_amount,
-                             velocity="normal", rcpt_age="known", merch_risk="normal"))
+    txn_feat = _txn_features(rng, fam)
+    events.append(_txn_event(t, actor, keeper, rng=rng, amount_usd=big_amount, **txn_feat))
 
     _attach_session_dwell(events)
-    return Journey(events=events, journey_family="hn_large_purchase", actor_family=actor,
+    return Journey(events=events, journey_family=fam, actor_family=actor,
                    label="legit", is_hard_negative=True, metadata=keeper, seed=seed)
 
 
 def gen_hn_account_recovery(seed: int, actor: str = "human") -> Journey:
     """Hard negative: legitimate password reset (user forgot password).
     Triggers pw_reset + maybe device_add but is a genuine recovery flow.
+
+    v4: features now stochastic — ~30% of samples have password_only
+    auth, ~10% have high ip_risk, ~30% have a new device added during
+    the session. These overlap with phish_takeover and sim_swap feature
+    distributions, so a feature-level classifier can no longer
+    perfectly separate them.
     """
     rng = random.Random(seed)
     keeper = MetadataKeeper()
     events: list[dict] = []
+    fam = "hn_account_recovery"
 
     t = 0
-    events.append(_login_event(t, actor, keeper, rng=rng,
-                               ip_risk_value="low",
-                               geo_distance_value="local",
-                               auth="mfa_strong",      # MFA used during recovery
-                               device_age_value="known"))
+    events.append(_login_event(t, actor, keeper, rng=rng, **_login_features(rng, fam)))
 
     t += rng.randint(60, 600)
     events.append(_pw_reset_event(t, actor, keeper))
 
-    # Maybe add a new device (e.g., new phone)
     if random.Random(seed + 1).random() < 0.5:
         t += rng.randint(30, 180)
-        events.append(_device_add_event(t, actor, keeper, rng=rng, device_age_value="new"))
+        dev_age = _sample_value(rng, fam, "device_add", "device_age", "new")
+        events.append(_device_add_event(t, actor, keeper, rng=rng, device_age_value=dev_age))
 
-    # No transactions (or one small one) — recovery flows usually don't end in big spends
     if random.Random(seed + 2).random() < 0.4:
         t += rng.randint(60, 600)
+        txn_feat = _txn_features(rng, fam)
         events.append(_txn_event(t, actor, keeper, rng=rng, amount_usd=rng.uniform(5, 100),
-                                 velocity="normal", rcpt_age="known", merch_risk="normal"))
+                                 **txn_feat))
 
     _attach_session_dwell(events)
-    return Journey(events=events, journey_family="hn_account_recovery", actor_family=actor,
+    return Journey(events=events, journey_family=fam, actor_family=actor,
                    label="legit", is_hard_negative=True, metadata=keeper, seed=seed)
+
+
+# ---------------------------------------------------------------------------
+# v4 adversarial subtypes (Change 3)
+# ---------------------------------------------------------------------------
+# These two families are designed so that a SINGLE-STREAM classifier
+# (text-only OR event-only) cannot reliably distinguish them from their
+# adversarial counterparts. The disambiguating signal requires looking
+# at BOTH the event sequence AND the per-event features.
+#
+# hn_recovery_high_amount: event sequence reads like sim_swap (login +
+# device_add + pw_reset + transfer to recipient) but the events carry
+# legitimacy markers (mfa_strong, low ip_risk, recipient is actually
+# a known account in disguise). Label = legit.
+#
+# phish_takeover_mfa_phished: event sequence reads like clean
+# (login + a few transfers) but one transfer goes to a newly-added
+# recipient and the device fingerprint is subtly anomalous. Label =
+# fraud.
+
+def gen_hn_recovery_high_amount(seed: int, actor: str = "human") -> Journey:
+    """Adversarial hard negative: sim_swap-style event sequence with
+    legitimacy markers. The 'newly-added' recipient is actually a known
+    account (e.g., the user transferring to their other account).
+    """
+    rng = random.Random(seed)
+    keeper = MetadataKeeper()
+    events: list[dict] = []
+    fam = "hn_recovery_high_amount"
+
+    t = 0
+    events.append(_login_event(t, actor, keeper, rng=rng, **_login_features(rng, fam)))
+
+    t += rng.randint(30, 180)
+    dev_age = _sample_value(rng, fam, "device_add", "device_age", "new")
+    events.append(_device_add_event(t, actor, keeper, rng=rng, device_age_value=dev_age))
+
+    t += rng.randint(15, 90)
+    events.append(_pw_reset_event(t, actor, keeper))
+
+    t += rng.randint(60, 300)
+    rcpt_age_for_add = _sample_value(rng, fam, "txn", "rcpt_age", "newly_added")
+    events.append(_recipient_add_event(t, actor, keeper, rng=rng, age=rcpt_age_for_add))
+
+    t += rng.randint(30, 180)
+    big_amount = rng.uniform(3000, 12000)
+    txn_feat = _txn_features(rng, fam)
+    events.append(_txn_event(t, actor, keeper, rng=rng, amount_usd=big_amount, **txn_feat))
+
+    _attach_session_dwell(events)
+    return Journey(events=events, journey_family=fam, actor_family=actor,
+                   label="legit", is_hard_negative=True, metadata=keeper, seed=seed)
+
+
+def gen_phish_takeover_mfa_phished(seed: int, actor: str = "human") -> Journey:
+    """Adversarial fraud: clean-style event sequence (login + transfers)
+    but the attacker phished the MFA AND one transfer goes to a
+    newly-added recipient. Sub-feature signal: device fingerprint shows
+    a subtle anomaly (sampled into device_age=rare more often than
+    typical clean sessions).
+    """
+    rng = random.Random(seed)
+    keeper = MetadataKeeper()
+    events: list[dict] = []
+    fam = "phish_takeover_mfa_phished"
+
+    t = 0
+    events.append(_login_event(t, actor, keeper, rng=rng, **_login_features(rng, fam)))
+
+    n_txns = rng.randint(2, 4)
+    for i in range(n_txns):
+        t += rng.randint(120, 600)
+        amount = rng.uniform(150, 4000)
+        txn_feat = _txn_features(rng, fam)
+        # Force AT LEAST ONE transfer to a newly-added recipient — that's
+        # the disambiguating feature.
+        if i == n_txns - 1 and txn_feat["rcpt_age"] == _bt("recipient_age", "known"):
+            txn_feat["rcpt_age"] = "newly_added"
+        events.append(_txn_event(t, actor, keeper, rng=rng, amount_usd=amount, **txn_feat))
+
+    _attach_session_dwell(events)
+    return Journey(events=events, journey_family=fam, actor_family=actor,
+                   label="fraud", is_hard_negative=False, metadata=keeper, seed=seed)
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +672,9 @@ JOURNEY_GENERATORS: dict[str, Callable[[int, str], Journey]] = {
     "hn_travel": gen_hn_travel,
     "hn_large_purchase": gen_hn_large_purchase,
     "hn_account_recovery": gen_hn_account_recovery,
+    # v4 adversarial subtypes (Change 3)
+    "hn_recovery_high_amount": gen_hn_recovery_high_amount,
+    "phish_takeover_mfa_phished": gen_phish_takeover_mfa_phished,
 }
 
 
