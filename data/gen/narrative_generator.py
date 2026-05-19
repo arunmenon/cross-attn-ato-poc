@@ -65,21 +65,27 @@ DEFAULT_USD_BUDGET = 200.0
 DEFAULT_MAX_RETRIES = 2
 
 # Provider switch — set LLM_PROVIDER env var to "openai" (default) or "anthropic".
-# Defaults are chosen for cost: gpt-5.4-nano is ~10x cheaper than gpt-5.4-mini
-# and ~3.4x cheaper than claude-haiku-4-5 at the 25k-narrative scale (see
-# docs/batch-2-data-generators.md cost section).
+# Defaults are chosen for cost: gpt-5-nano is the cheapest OpenAI option for
+# this scale of narrator workload (~25k 80-token outputs ≈ $2 total).
 DEFAULT_PROVIDER = "openai"
-DEFAULT_OPENAI_MODEL = "gpt-5.4-nano"
+DEFAULT_OPENAI_MODEL = "gpt-5-nano"
 DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 
-# Pricing table, USD per token. Last verified 2026-05-16 from
-# developers.openai.com/api/docs/models/* (gpt-5.4 family). Anthropic
-# pricing carried over from the prior default.
+# Pricing table, USD per token. v4 entries verified 2026-05-19 from
+# developers.openai.com/api/docs/models/gpt-5-nano (the user pasted the
+# numbers verbatim during the v4 generation kick-off). The v3 codebase
+# previously used `gpt-5.4-*` model names with hallucinated prices —
+# those entries are retained here only to keep legacy v3 cache rows
+# parseable by CostTracker. Do NOT pass `gpt-5.4-*` as a model name to
+# the OpenAI API; it will return an unknown-model error.
 #
 # Keys must match the `model` string the trainer passes to CostTracker.charge().
-# "cached_in" is the price for tokens served from OpenAI's prompt-cache (90%
-# off standard input). The tracker treats cache hits as `cached_in` priced.
+# "cached_in" is the price for tokens served from OpenAI's prompt-cache.
+# The tracker treats cache hits as `cached_in` priced.
 _PRICING: dict[str, dict[str, float]] = {
+    # v4 active models
+    "gpt-5-nano":                {"in": 0.05  / 1e6, "out": 0.40 / 1e6, "cached_in": 0.005 / 1e6},
+    # v3 legacy entries (DO NOT USE — kept only to avoid KeyError on legacy cache rows)
     "gpt-5.4-nano":              {"in": 0.20  / 1e6, "out": 1.25 / 1e6, "cached_in": 0.02  / 1e6},
     "gpt-5.4-mini":              {"in": 0.75  / 1e6, "out": 4.50 / 1e6, "cached_in": 0.075 / 1e6},
     "gpt-5.4":                   {"in": 2.50  / 1e6, "out": 15.0 / 1e6, "cached_in": 0.25  / 1e6},
