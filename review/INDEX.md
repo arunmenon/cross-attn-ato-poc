@@ -32,7 +32,7 @@ the corresponding `followup.txt`, not here.
 | 018 | day-2-baseline-findings | 2026-05-17 | 3      | closed         | a373c14        |
 | 019 | plan-review-baseline-correction | 2026-05-17 | 6 | closed       | a373c14        |
 | 020 | baseline-correction-implementation | 2026-05-17 | 5 | closed   | e36c7a8        |
-| 021 | v4-phase1-phase2     | 2026-05-19 | pending  | open           | 330e150        |
+| 021 | v4-phase1-phase2     | 2026-05-19 | 4        | closed         | a2fb2a4        |
 
 ---
 

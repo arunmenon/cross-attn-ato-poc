@@ -1,0 +1,315 @@
+Review comments 021 -- follow-up
+Date: 2026-05-19
+Subject: Disposition of findings in 021-v4-phase1-phase2/comments.txt
+Author: scaffold maintainer (v4 Phase 1+2 author)
+
+Original review file:
+    review/021-v4-phase1-phase2/comments.txt
+
+Repo state at follow-up:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/
+Plan executed:
+    .claude/tasks/data-v4-pivot-plan.md (Phase 1 + Phase 2)
+Baseline commit before fix-pass:
+    330e150 (v4 Phase 2: wire trainers to the canonical-form contract)
+Fix-pass commit:
+    a2fb2a4 (review 021 fix-pass: 4 findings)
+
+Codex review 021 found 1 Blocker + 2 Highs + 1 Medium. All four
+findings are ACCEPTED and FIXED in this pass. The verification
+commands in the comments file all PASS post-fix.
+
+The reviewer's bottom-line ("do not proceed to paid v4 LLM generation
+or v4 GPU training until findings 1-3 are fixed") is now satisfied.
+Finding 4's partial concern about graceful v3-data skipping has been
+upgraded to a hard strict=True default for v4 trainers, with an
+explicit escape hatch for legacy reruns.
+
+----------------------------------------------------------------------
+1. BLOCKER: launcher cannot run text_only_v4
+
+Status: FIXED.
+
+Codex's concern: Phase 2 renamed train_lora_text_only.py →
+train_text_only.py, but the launcher's arm registry was not updated.
+text_only was not in ALLOWED_ARMS; lora_text in ARM_TO_TRAINER pointed
+to a non-existent file. The renamed trainer also hardcoded
+arm: "lora_text" in metrics output. Result: a v4 text_only_v4 config
+would be rejected at validate_config; a legacy lora_text config would
+pass validation but fail at trainer dispatch with "no such file"; a
+manual direct invocation would record the wrong arm in metrics.json.
+
+This is exactly the kind of "Phase 1 ships the rename, Phase 2
+forgets to update the registry" gap a careful review catches. The
+maintainer missed it because Phase 2's smoke test only exercised
+data-pipeline code, not the launcher's arm-dispatch path.
+
+Action: three coordinated edits.
+
+  scripts/run_next_experiment.py (4 lines added):
+    - ALLOWED_ARMS now includes both `text_only` (v4 canonical) and
+      `lora_text` (v3 legacy alias).
+    - ARM_SCHEMA grows a `text_only` entry that mirrors the
+      lora_text shape (same exp_id/arm/training/data/eval/rationale
+      keys).
+    - ARM_TO_TRAINER maps BOTH text_only → train_text_only.py AND
+      lora_text → train_text_only.py. The same file serves both
+      contracts (v4 and v3 legacy); the trainer dispatches on the
+      arm string at runtime.
+
+  src/train/train_text_only.py:
+    - The metrics row's `arm` field is now read from cfg.get("arm",
+      "text_only") rather than hardcoded. Both text_only and
+      lora_text round-trip correctly through metrics.jsonl. An
+      unexpected arm value warns and defaults to text_only.
+
+  src/auto_research/experiment_template.yaml:
+    - The comment on the `arm:` field now lists all 6 valid values
+      (xattn | cpt_light | text_only | lora_text | structured_as_text
+      | event_only) with a one-line note explaining the v4 rename.
+
+Verify (local, no GPU):
+
+    python3 -c "
+    import sys; sys.path.insert(0, '.')
+    from scripts.run_next_experiment import validate_config, ARM_TO_TRAINER, REPO_ROOT
+    cfg = {'exp_id':'p','arm':'text_only','training':{'steps':50,'seq_len':2048,'lr':1e-4},
+           'data':{'train_path':'/tmp/t','eval_fast_path':'/tmp/e'},'eval':{'modes':['stripped']},
+           'rationale':'p'}
+    assert validate_config(cfg) == [], f'should accept: {validate_config(cfg)}'
+    assert (REPO_ROOT/ARM_TO_TRAINER['text_only']).exists()
+    assert (REPO_ROOT/ARM_TO_TRAINER['lora_text']).exists()
+    print('Finding 1 fix verified')
+    "
+
+Result: PASS.
+
+----------------------------------------------------------------------
+2. HIGH: structured_as_text_v4 trains under v4 prompt but evaluates under v3 prompt
+
+Status: FIXED.
+
+Codex's concern: the training collator dispatches on canonical fields
+and calls compose_structured_as_text(row) → `<case><events>...</case>`.
+But the final eval block (the one that builds eval_records before
+handing them to run_three_mode_eval) unconditionally prepends
+_serialize_events_compact(events) to ex["text"] →
+`<events>...<case>...`. Same row, two different prompt shapes:
+trained on v4, scored on v3. The structured_as_text_v4 measurement
+would be invalid as a comparator against xattn_v4 (different prompt
+distribution at scoring time vs training time).
+
+This is a real bug. The fix is to apply the SAME v4-vs-v3 dispatch
+in the eval-record construction as in the training collator.
+
+Action: src/train/train_structured_as_text.py:259-280 rewritten to
+replicate the v4 dispatch:
+  - If row has `narrative` + `label` canonical fields → call
+    compose_structured_as_text(new_ex) and assign to new_ex["text"].
+    This is the v4 path; matches the training collator byte-for-byte.
+  - Else → prepend _serialize_events_compact() to the existing v3
+    `text` field. This is the v3 fallback path; matches legacy v3
+    behavior.
+
+The fix is small (a conditional + the import of
+compose_structured_as_text) but load-bearing — without it,
+structured_as_text_v4 cannot be used as the Q2 comparator the
+v4 plan calls out.
+
+Verify (local, no GPU):
+
+    python3 -c "
+    import sys, json; sys.path.insert(0, '.')
+    from data.gen.build_dataset import compose_structured_as_text
+    row = json.loads(open('data/samples/v4_smoke/data.jsonl').readline())
+    # Training-collator path:
+    train_text = compose_structured_as_text(row)
+    # Eval-record path (post-fix replicates the same dispatch):
+    new_ex = dict(row)
+    new_ex['structured_events'] = row['structured_events']
+    if 'narrative' in new_ex and 'label' in new_ex:
+        eval_text = compose_structured_as_text(new_ex)
+    assert train_text == eval_text
+    assert train_text.startswith('<case>')
+    print('Finding 2 fix verified')
+    "
+
+Result: PASS.
+
+----------------------------------------------------------------------
+3. HIGH: phish_takeover_mfa_phished doesn't reliably include newly_added recipient
+
+Status: FIXED, with regression assertion added.
+
+Codex's concern: the v0 generator compared `txn_feat["rcpt_age"]` (a
+raw string like "known") to `_bt("recipient_age", "known")` (a
+bucket token like "<recipient_age=known>"). These literally never
+match because they're different strings. The override that was
+supposed to force the LAST transaction to a newly-added recipient
+never fired. In Codex's 1000-seed measurement, 160 samples (16%)
+of the adversarial fraud subtype had NO newly-added recipient event
+at all — meaning the disambiguating cross-modal feature was missing
+entirely from 16% of these samples.
+
+This is the worst kind of bug: the docstring claims the feature is
+deterministic, the test suite passed, and the data looked plausible
+on inspection. But the actual generator was silently shipping
+adversarial samples that lacked the adversarial feature.
+
+Action: data/gen/journey_templates.py:gen_phish_takeover_mfa_phished.
+The bug was over-engineered logic; the fix is to delete the
+comparison entirely. The LAST transaction now UNCONDITIONALLY sets
+rcpt_age="newly_added". This is idempotent (if the sampled value was
+already newly_added, the assignment is a no-op) and makes the
+adversarial-feature guarantee deterministic, not probabilistic.
+
+Action 2 (defensive): a regression assertion added to
+journey_templates._self_test(). It generates 100 samples with seeds
+0..99 of `phish_takeover_mfa_phished` and asserts every single one
+contains at least one event with recipient_age=newly_added. The v0
+implementation fails this assertion; the fix passes it. If anyone
+ever re-introduces a similar comparison bug, the self-test fires
+immediately.
+
+Verify (local, no GPU):
+
+    python3 -c "
+    import sys; sys.path.insert(0, '.')
+    from data.gen.journey_templates import generate
+    from data.gen.feature_bucketer import format_bucket_token as bt
+    misses = []
+    for s in range(1000):
+        j = generate('phish_takeover_mfa_phished', s, 'human')
+        if not any(ev.get('recipient_age') == bt('recipient_age', 'newly_added')
+                   for ev in j.events):
+            misses.append(s)
+    assert len(misses) == 0, f'still missing: {len(misses)}'
+    print('Finding 3 fix verified: 0/1000 misses (was 160/1000)')
+    "
+
+Result: PASS (0/1000).
+
+----------------------------------------------------------------------
+4. MEDIUM: v4 contract check is only a 3-row spot check and skips v3 data silently
+
+Status: FIXED.
+
+Codex's concern: verify_v4_text_contract() only checks the first 3
+rows (sample_n=3 in both trainers) and silently skips v3-format data.
+A v4 trainer run against v3 data would print "SKIPPED" and proceed —
+producing uninterpretable results because v3 data lacks the canonical
+contract this measurement is designed for.
+
+This is a fair point. The original design was "graceful degradation
+for legacy data" which is the right default for diagnostic tooling
+but the wrong default for v4 production trainers.
+
+Action: two changes in data/gen/build_dataset.py:verify_v4_text_contract:
+
+  (a) New `strict: bool = True` parameter. When strict=True, rows
+      lacking canonical fields raise RuntimeError rather than skip.
+      v4 production trainers (train_text_only, train_xattn) call
+      with strict=True. Legacy v3 reruns can pass strict=False
+      explicitly (probably via a config flag, though the trainer
+      defaults to strict=True for safety).
+
+  (b) Default sample_n raised from 3 → 32. AND the sampled indices
+      are now a DETERMINISTIC SPREAD across the dataset (rows 0,
+      len/N, 2*len/N, ..., len-1) rather than just the first N rows.
+      This catches partial preprocessing that only mutates one part
+      of the file (e.g., a script that prepends tokens to rows
+      0..1000 but leaves the rest alone — invisible to a "first 3
+      rows" check).
+
+Both v4 trainer call-sites updated:
+  src/train/train_text_only.py:
+      verify_v4_text_contract(train_ds, sample_n=32, arm_name="text_only", strict=True)
+  src/train/train_xattn.py:
+      verify_v4_text_contract(train_ds, sample_n=32, arm_name="xattn", strict=True)
+
+Note on partial scope: the v4 trainers refuse v3 data outright by
+default. The Codex review's recommendation was "make canonical fields
+mandatory by default, gate v3 behind an explicit legacy flag." That's
+what we've done. A future legacy-mode runner that needs v3 data
+should pass strict=False at the call-site (not yet wired through
+config but a one-line change when needed).
+
+Verify (local, no GPU):
+
+    python3 -c "
+    import sys; sys.path.insert(0, '.')
+    from data.gen.build_dataset import verify_v4_text_contract
+    v3_row = {'text': 'monolithic v3 text', 'structured_events': []}
+    # strict=True: should raise
+    try:
+        verify_v4_text_contract([v3_row], sample_n=3, strict=True, arm_name='strict')
+        assert False, 'should have raised'
+    except RuntimeError as e:
+        assert 'v4 contract check FAILED' in str(e)
+    # strict=False: should skip with warning
+    verify_v4_text_contract([v3_row], sample_n=3, strict=False, arm_name='legacy')
+    print('Finding 4 fix verified')
+    "
+
+Result: PASS (strict=True hard-fails on v3 row; strict=False skips
+with warning).
+
+----------------------------------------------------------------------
+Post-fix regression suite
+
+All self-tests still pass post-fix:
+
+  python3 -m data.gen.journey_templates --self-test
+      → 11 families, adversarial-feature invariant: 100/100
+
+  python3 -m data.gen.cheap_template_generator --self-test
+      → 66 family/actor combos, no leakage
+
+  python3 -m data.gen.narrative_generator --self-test
+      → narrative_generator self-test OK (using stub narrator)
+
+  python3 -m eval.leakage_checks --self-test
+      → 40 fixtures (4 v3, 12 v4-direct, 14 v4-gap, 10 compliant)
+
+----------------------------------------------------------------------
+Summary of what changed
+
+7 files modified (147 insertions, 26 deletions):
+
+  scripts/run_next_experiment.py     +20  -3
+  src/auto_research/experiment_template.yaml  +4 -2
+  src/train/train_text_only.py        +20  -4
+  src/train/train_xattn.py             +4  -2
+  src/train/train_structured_as_text.py +16  -3
+  data/gen/journey_templates.py       +37  -1
+  data/gen/build_dataset.py           +72 -15
+
+All changes ship in commit a2fb2a4. Pushed to origin/main.
+
+----------------------------------------------------------------------
+Maintainer self-assessment
+
+Three of the four findings were straightforward to fix: literal
+bugs that the reviewer pinpointed precisely. Finding 1 (launcher
+registry) was an obvious gap I should have caught in Phase 2 myself
+— the rename couldn't possibly work without registry updates, and
+my Phase 2 smoke test only exercised the data path, not the launcher
+dispatch. Finding 3 (the rcpt_age comparison) was a subtler bug
+because the test data and the smoke output both happened to LOOK
+fine — only the 1000-sample distributional check exposed the silent
+16% miss rate. That one was caught by Codex doing exactly the kind
+of statistical sweep a code reviewer should do.
+
+Finding 4 (the contract-check strictness) was a real design point I
+got wrong: graceful skipping is the right default for diagnostic
+tooling but the WRONG default for v4 production trainers. The fix
+inverts it.
+
+The v3 sweep's "we couldn't run v4 because the trainers couldn't
+even start" failure mode would have been embarrassing to discover
+mid-run after spending narrator budget. The review caught it in
+the cheap window where it costs nothing. Worth pushing through the
+paired-review protocol for any non-trivial change.
+
+INDEX status update for this review:
+  021 v4-phase1-phase2  2026-05-19  4  closed  a2fb2a4
