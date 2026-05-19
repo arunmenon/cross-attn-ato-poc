@@ -1,0 +1,337 @@
+Review comments 009
+Date: 2026-05-16
+Subject: Narrator-provider switch and pre-pod local-prep review
+
+Reviewed file(s):
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/README.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/CODEX_PROMPT.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/PLAN.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/INDEX.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/008-pod-readiness/followup.txt
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/.gitignore
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/RUNBOOK.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/requirements.txt
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/gen/narrative_generator.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/gen/build_dataset.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/preflight_check.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/common.py
+
+Repo root used for comparison:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+Summary:
+The OpenAI default itself is plausible: the official OpenAI model page lists
+gpt-5.4-nano, Chat Completions support, and the same $0.20/$0.02/$1.25
+input/cached-input/output pricing used by the code. The remaining problems are
+integration problems around the switch and the pre-pod preparation instructions.
+The documented Anthropic fallback is broken, and two local-prep steps overstate
+what the commands actually do.
+
+Verification run:
+
+1. Diff base and changed files
+
+Command:
+    CLOSING_COMMIT=$(awk -F'|' '/^\| *0[0-9]{2,} *\|/ { gsub(/[ \t]/, "", $7); print $7 }' review/INDEX.md | tail -1); printf 'diffing against: %s\n' "$CLOSING_COMMIT"; git log --oneline "${CLOSING_COMMIT}..HEAD"; git diff --stat "${CLOSING_COMMIT}..HEAD"; git diff --name-only "${CLOSING_COMMIT}..HEAD"
+
+Actual output:
+    diffing against: 8852a59
+    c895120 RUNBOOK: pre-pod local-prep section + 4 corrections
+    f5c4ce7 Switch narrator default to OpenAI gpt-5.4-nano
+    f86e93c INDEX: record closing commit for review 008
+     .gitignore                      |   4 +
+     RUNBOOK.md                      |  85 ++++++++++++++++++--
+     data/gen/narrative_generator.py | 170 +++++++++++++++++++++++++++++++++++-----
+     requirements.txt                |   7 +-
+     review/INDEX.md                 |   1 +
+     5 files changed, 236 insertions(+), 31 deletions(-)
+    .gitignore
+    RUNBOOK.md
+    data/gen/narrative_generator.py
+    requirements.txt
+    review/INDEX.md
+
+Disposition:
+    PASS. Review focused on the narrator switch, local-prep additions, and
+    adjacent dataset/tokenizer/preflight paths.
+
+2. Official OpenAI model/pricing check
+
+Command:
+    Official documentation checked: https://developers.openai.com/api/docs/models/gpt-5.4-nano
+
+Actual output:
+    Relevant source facts:
+    - Model page lists "GPT-5.4 nano".
+    - Pricing section lists Input $0.20, Cached input $0.02, Output $1.25 per 1M text tokens.
+    - Endpoints section lists Chat Completions v1/chat/completions.
+    - Snapshots section lists gpt-5.4-nano and gpt-5.4-nano-2026-03-17.
+
+Disposition:
+    PASS. I am not flagging the new default model name, endpoint, or pricing
+    table as invalid.
+
+3. Local torch-free smoke checks
+
+Command:
+    md5 PLAN.md
+    python3 -m data.gen.narrative_generator --self-test
+    python3 -m src.tokenizer.custom_tokens --check
+    python3 -m data.gen.feature_bucketer --self-test
+    python3 -m data.gen.cheap_template_generator --self-test
+    python3 -m src.tokenizer.fencer
+    python3 -m data.gen.pii_fencer
+    python3 scripts/parse_metrics.py --self-test
+    python3 -m src.train.common
+
+Actual output:
+    MD5 (PLAN.md) = 64515f2986ac4ea153e0b7b670d57c3e
+
+    narrative_generator self-test OK (using stub narrator)
+      tracker summary: {'spent_usd': 0.0004, 'budget_usd': 10.0, 'n_calls': 1, 'n_cache_hits': 1, 'by_model': {'gpt-5.4-nano': 0.0004}}
+
+    custom-token registry OK:
+      n_total                        = 65
+      n_journey                      = 18
+      n_actor                        = 6
+      n_event                        = 7
+      n_pii                          = 8
+      n_bucket                       = 26
+      n_journey_families             = 9
+      n_actor_families               = 6
+      n_bucket_families              = 9
+      n_hard_negative_families       = 3
+      n_fraud_families               = 5
+      n_agent_actor_families         = 5
+
+    feature_bucketer self-test OK
+    cheap_template_generator self-test OK (54 family/actor combos, no leakage)
+    fencer self-test OK: {'<email>': 1, '<device_id>': 1, '<ip>': 1, '<amount>': 1, '<phone>': 1, '<browser>': 1, '<acct_id>': 1}
+    pii_fencer self-test OK (incl. review-004 #2 negative cases)
+    parse_metrics merge contract OK (trainer metrics survive)
+    load_config OK
+    find_label_score_position OK
+    write_predictions_jsonl OK
+    torch/transformers not installed; tokenizer / dataset / optimizer self-tests skipped (run on the pod)
+
+Disposition:
+    PASS for local no-GPU checks.
+
+4. Changed Python AST parse
+
+Command:
+    python3 -c "import ast, pathlib; paths=['data/gen/narrative_generator.py','data/gen/build_dataset.py','scripts/preflight_check.py']; [ast.parse(pathlib.Path(p).read_text()) for p in paths]; print('AST OK:', ', '.join(paths))"
+
+Actual output:
+    AST OK: data/gen/narrative_generator.py, data/gen/build_dataset.py, scripts/preflight_check.py
+
+Disposition:
+    PASS.
+
+5. Split-output dataset smoke
+
+Command:
+    python3 -m data.gen.build_dataset --n 20 --out /private/tmp/cross_attn_review009_split --mode template --eval-frac 0.2 --leakage-audit-n 20 --seed 9
+    find /private/tmp/cross_attn_review009_split -maxdepth 1 -type f -print | sort
+    wc -l /private/tmp/cross_attn_review009_split/train.jsonl /private/tmp/cross_attn_review009_split/eval.jsonl
+
+Actual output:
+      [     1/20] rate=2880.7/s cost=$0.000
+      [     2/20] rate=4673.3/s cost=$0.000
+      [     3/20] rate=6011.9/s cost=$0.000
+      [     4/20] rate=7272.3/s cost=$0.000
+      [     5/20] rate=7872.2/s cost=$0.000
+      [     6/20] rate=8536.6/s cost=$0.000
+      [     7/20] rate=9235.6/s cost=$0.000
+      [     8/20] rate=9802.6/s cost=$0.000
+      [     9/20] rate=10249.5/s cost=$0.000
+      [    10/20] rate=10559.7/s cost=$0.000
+      [    11/20] rate=10956.4/s cost=$0.000
+      [    12/20] rate=11384.7/s cost=$0.000
+      [    13/20] rate=11680.8/s cost=$0.000
+      [    14/20] rate=11390.9/s cost=$0.000
+      [    15/20] rate=10909.4/s cost=$0.000
+      [    16/20] rate=11103.4/s cost=$0.000
+      [    17/20] rate=11372.1/s cost=$0.000
+      [    18/20] rate=11688.7/s cost=$0.000
+      [    19/20] rate=11987.3/s cost=$0.000
+      [    20/20] rate=12231.9/s cost=$0.000
+    {
+      "n_records": 20,
+      "mode": "template",
+      "family_counts": {
+        "sim_swap": 2,
+        "clean": 10,
+        "hn_large_purchase": 2,
+        "phish_takeover": 1,
+        "hn_travel": 2,
+        "malware_rat": 1,
+        "mule_chain": 1,
+        "cred_stuff": 1
+      },
+      "actor_counts": {
+        "human": 12,
+        "agent_finance": 2,
+        "agent_adversarial": 2,
+        "agent_compromised": 2,
+        "agent_buying": 2
+      },
+      "eval_frac": 0.2,
+      "leakage_audit_n": 20,
+      "leakage_audit_failures": 0,
+      "duration_seconds": 0.0
+    }
+
+    /private/tmp/cross_attn_review009_split/build_summary.json
+    /private/tmp/cross_attn_review009_split/eval.jsonl
+    /private/tmp/cross_attn_review009_split/train.jsonl
+
+          11 /private/tmp/cross_attn_review009_split/train.jsonl
+           9 /private/tmp/cross_attn_review009_split/eval.jsonl
+          20 total
+
+Disposition:
+    PASS for generation, FAIL for RUNBOOK.md's stated output filename.
+
+6. Provider-dispatch probe for LLM_PROVIDER=anthropic
+
+Command:
+    python3 -c "import os, tempfile; from pathlib import Path; import data.gen.narrative_generator as ng; from data.gen.journey_templates import generate; calls=[]; exec('def fake_factory(model, max_tokens, timeout):\n    calls.append(model)\n    def call(journey, attempt, prev_hits):\n        return (\"The account holder logged in from a familiar device and completed a routine purchase.\", 1, 1)\n    return call', globals()); ng._real_anthropic_call = fake_factory; os.environ['LLM_PROVIDER']='anthropic'; ng.generate_narrative(generate('clean', 1, 'human'), tracker=ng.CostTracker(), cache_dir=Path(tempfile.mkdtemp())); print(calls)"
+
+Actual output:
+    ['gpt-5.4-nano']
+
+Disposition:
+    FAIL. The documented Anthropic override keeps the OpenAI default model
+    string.
+
+Review findings:
+
+1. High: LLM_PROVIDER=anthropic dispatches to Anthropic with the OpenAI default model.
+
+Status: OPEN, should be fixed before relying on the documented provider fallback.
+
+Details:
+`data/gen/narrative_generator.py` documents two provider choices:
+`LLM_PROVIDER=openai` with `OPENAI_API_KEY` maps to gpt-5.4-nano, and
+`LLM_PROVIDER=anthropic` with `ANTHROPIC_API_KEY` maps to
+claude-haiku-4-5 (`data/gen/narrative_generator.py:27-30`). The constants
+also define `DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"`
+(`data/gen/narrative_generator.py:69-71`). The actual dispatch does not use
+that default. `generate_narrative()` defaults `model` to `DEFAULT_MODEL`, which
+is always `DEFAULT_OPENAI_MODEL` (`data/gen/narrative_generator.py:87-89` and
+`data/gen/narrative_generator.py:426`). When `LLM_PROVIDER=anthropic` is set,
+the code switches only the client factory, not the model string
+(`data/gen/narrative_generator.py:466-471`).
+
+The provider-dispatch probe monkeypatched the Anthropic factory to avoid a real
+network call and printed the model it would receive. It printed
+`['gpt-5.4-nano']`. In a real run, Anthropic will be asked to serve an OpenAI
+model name. `build_dataset.py` also exposes no `--model` flag, so users cannot
+repair this from the documented CLI (`data/gen/build_dataset.py:346-355`).
+
+Recommendation:
+Make provider selection and model selection a single coherent contract. The
+simplest fix is: if `model` was not explicitly supplied and
+`LLM_PROVIDER=anthropic`, set `model = DEFAULT_ANTHROPIC_MODEL`; if
+`LLM_PROVIDER=openai`, set `model = DEFAULT_OPENAI_MODEL`. Also add a
+`--llm-model` flag to `build_dataset.py` or explicitly document that Anthropic
+fallback requires a Python-level call with `model=DEFAULT_ANTHROPIC_MODEL`.
+Add a no-network unit probe that asserts the Anthropic factory receives
+`claude-haiku-4-5-20251001` under `LLM_PROVIDER=anthropic`.
+
+2. Medium: RUNBOOK.md gives the wrong training filename for eval-frac builds.
+
+Status: OPEN, doc/code drift in the pod data-prep instructions.
+
+Details:
+RUNBOOK.md says the 25k LLM command with `--eval-frac 0.2` writes
+`train_llm_narrated/data.jsonl` plus `train_llm_narrated/eval.jsonl`
+(`RUNBOOK.md:128-134`). That is not what `build_dataset.py` does. When
+`eval_frac > 0`, it writes `train.jsonl` and `eval.jsonl`
+(`data/gen/build_dataset.py:285-297`). The verification run confirms the actual
+file list: `train.jsonl`, `eval.jsonl`, and `build_summary.json`, with no
+`data.jsonl`.
+
+The code-side loader is correct: `src/train/common.py` explicitly treats
+`train.jsonl` plus `eval.jsonl` as the split-output layout and `data.jsonl` as
+the single-file layout (`src/train/common.py:78-113`). This is a runbook defect,
+not a dataset-builder defect. It still matters because the pre-pod upload and
+sanity-check workflow is supposed to be copy-pasteable before moving data to
+RunPod.
+
+Recommendation:
+Change the data-tree diagram and §0.3 prose to say
+`train_llm_narrated/train.jsonl + train_llm_narrated/eval.jsonl` when
+`--eval-frac` is nonzero. Keep the existing `eval_fast_5k` symlink target
+pointing at `../train_llm_narrated/eval.jsonl`; that part is consistent with
+the code.
+
+3. High: The tokenizer/preflight section claims checks that preflight_check.py does not perform.
+
+Status: OPEN, should be fixed before treating pod preflight as the Qwen3 tokenizer gate.
+
+Details:
+RUNBOOK.md says Part B of tokenizer sanity runs `scripts/preflight_check.py`
+for "AutoTokenizer roundtrip + resize" and then states that it exercises
+`AutoTokenizer.from_pretrained(...)`, embedding-average initialization, and
+`model.resize_token_embeddings(...)` (`RUNBOOK.md:112-116`). The script does
+not load a model, does not call `src.tokenizer.custom_tokens.install()`, does
+not install all 65 custom tokens, does not initialize new rows, and does not
+call `model.resize_token_embeddings(...)`. Its tokenizer check adds only six
+literal tokens to the tokenizer object and checks decode roundtrip
+(`scripts/preflight_check.py:88-107`).
+
+This also misses the label-token contract that review 007 made load-bearing.
+`src/train/common.get_label_token_ids()` fails fast if " fraud" or " legit" is
+empty, multi-token, or the same ID (`src/train/common.py:122-164`), but
+preflight never calls that helper. A pod can pass preflight and still fail only
+when the first trainer/eval path reaches label scoring.
+
+Recommendation:
+Either narrow the RUNBOOK wording to what preflight actually checks, or upgrade
+`scripts/preflight_check.py` into the gate the runbook describes. For pod
+readiness, the better fix is to add a tokenizer/model-resize check that:
+loads the Qwen3 tokenizer, calls `src.tokenizer.custom_tokens.install(tok)`,
+asserts all 65 custom tokens are present without collisions, calls
+`get_label_token_ids(tok)`, loads the base model when GPU memory is available,
+calls `model.resize_token_embeddings(len(tok))`, and verifies the embedding
+row count equals `len(tok)`. If the full model load is intentionally deferred,
+split this into `check_tokenizer_contract()` and `check_model_resize_contract()`
+so the runbook stops implying both happen in today’s preflight.
+
+4. Medium: The "pure-Python local smoke" asks a laptop to install the full pod requirements.
+
+Status: OPEN, local-prep ergonomics/documentation issue.
+
+Details:
+RUNBOOK.md labels §0.1 "Pure-Python scaffold smoke (no torch needed)" and says
+`pip install -r requirements.txt` "installs openai + light deps"
+(`RUNBOOK.md:93-103`). `requirements.txt` is not a light local-prep file. It
+pins the full HF/training stack: `transformers`, `accelerate`, `peft`,
+`datasets`, `tokenizers`, `safetensors`, and `bitsandbytes`
+(`requirements.txt:4-13`), plus W&B and both narrator SDKs
+(`requirements.txt:25-34`). On this review host none of `openai`, `anthropic`,
+`transformers`, or `bitsandbytes` were installed before the smoke; the actual
+torch-free self-tests passed without installing the pod stack because they did
+not need those imports.
+
+This is not a model-training bug, but it weakens the pre-pod workflow. A user
+trying to do only the cheap local prep on macOS can get dragged into installing
+GPU-oriented packages before any API or template-data generation step. That is
+the opposite of the "H100 clock starts on training, not setup" goal in
+RUNBOOK.md:91.
+
+Recommendation:
+Split dependencies by use. Add a small local data-prep requirements file
+covering the narrator SDK(s), `faker`, `tqdm`, and the pure-Python package
+needs, or change §0.1 to install only the specific package(s) needed for the
+chosen local step. Keep `requirements.txt` as the pod/training requirements if
+that is the intended contract. Also remove or soften the claim that the
+narrative self-test verifies the full pricing-table math; it only exercises the
+stub path and prints the current charge.
+
+Bottom line:
+Do not block the OpenAI default on model availability; that part checks out.
+Fix the provider fallback and the misleading runbook steps before handing this
+to RunPod as a copy-paste local-prep path.

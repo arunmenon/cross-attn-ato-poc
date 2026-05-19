@@ -1,0 +1,456 @@
+Review comments 011
+Date: 2026-05-17
+Subject: Vertical-slice debug fixes and x-attn preflight review
+
+Reviewed file(s):
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/README.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/CODEX_PROMPT.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/PLAN.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/INDEX.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/010-blackwell-compat-patch/followup.txt
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/requirements.txt
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/RUNBOOK.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/gen/build_dataset.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/gen/narrative_generator.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/preflight_xattn.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/common.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/train_xattn.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/train_structured_as_text.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/train_event_only_classifier.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/model/encoders/small_transformer.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/eval_runner.py
+
+Repo root used for comparison:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+Summary:
+The vertical-slice debug commits fixed real pod blockers, and the no-GPU
+scaffold checks are still green. The next forward step is not clean, though:
+the new dataset loader serializes structured_events to JSON strings, but none
+of the event-consuming collators parse them back before tokenization. That
+breaks x-attn, structured-as-text, and event-only immediately after the
+CPT-only path. There are also two operational doc/preflight gaps around the
+CUDA-13 bitsandbytes range and the new x-attn architecture smoke.
+
+Verification run:
+
+1. Diff base and changed files
+
+Command:
+    CLOSING_COMMIT=$(awk -F'|' '/^\| *0[0-9]{2,} *\|/ { gsub(/[ \t]/, "", $7); print $7 }' review/INDEX.md | tail -1); echo "diffing against: ${CLOSING_COMMIT}"; git log --oneline "${CLOSING_COMMIT}..HEAD"; git diff --stat "${CLOSING_COMMIT}..HEAD"; git diff --name-only "${CLOSING_COMMIT}..HEAD"
+
+Actual output:
+    diffing against: a95eb79
+    110f0d1 Add scripts/preflight_xattn.py — Stage-1 architecture smoke
+    37fceb0 Narrator temperature is now configurable via --narrator-temp
+    43e3c6c load_config: coerce scientific-notation strings to floats (PyYAML quirk)
+    2043d78 load_paired_dataset: accept eval-only directory layout
+    3218f56 load_paired_dataset: serialize structured_events as JSON string
+    4bf30f3 Day-0 pod-boot fixes: transformers >=4.51 for Qwen3, bnb <=0.49 for cuda130
+    07ced34 INDEX: record closing commit for review 010
+     data/gen/build_dataset.py       |   9 +++
+     data/gen/narrative_generator.py |  40 ++++++++---
+     requirements.txt                |  27 +++++---
+     review/INDEX.md                 |   1 +
+     scripts/preflight_xattn.py      | 148 ++++++++++++++++++++++++++++++++++++++++
+     src/train/common.py             | 104 ++++++++++++++++++++++++++--
+     6 files changed, 307 insertions(+), 22 deletions(-)
+    data/gen/build_dataset.py
+    data/gen/narrative_generator.py
+    requirements.txt
+    review/INDEX.md
+    scripts/preflight_xattn.py
+    src/train/common.py
+
+Disposition:
+    PASS. Review scope is the committed diff since a95eb79. Untracked local
+    artifacts were not modified or used as source of truth.
+
+2. Local torch-free smoke
+
+Command:
+    md5 PLAN.md
+    python3 - <<'PY'
+    import sys, random
+    sys.path.insert(0, '.')
+    from eval import eval_modes
+    from eval.leakage_checks import narrative_leakage_scan
+    text = '<journey_sim_swap><actor_human><event_login> <amount_bucket=high></journey_sim_swap>'
+    assert 'journey_sim_swap' not in eval_modes.apply(text, 'stripped')[0]
+    assert '<amount_bucket=high>' in eval_modes.apply(text, 'stripped')[0]
+    a = eval_modes.apply(text, 'opaque', rng=random.Random(0))[0]
+    b = eval_modes.apply(text, 'opaque', rng=random.Random(1))[0]
+    assert a != b
+    assert not narrative_leakage_scan('This is fraudulent SIM-swap')['clean']
+    assert narrative_leakage_scan('Device change followed by password reset')['clean']
+    print('layer A smoke OK')
+    PY
+    python3 -m src.tokenizer.custom_tokens --check
+    python3 -m data.gen.feature_bucketer --self-test
+    python3 -m src.tokenizer.fencer
+    python3 -m data.gen.pii_fencer
+    python3 -m data.gen.cheap_template_generator --self-test
+    python3 -m data.gen.narrative_generator --self-test
+    python3 -m src.train.common
+
+Actual output:
+    MD5 (PLAN.md) = 64515f2986ac4ea153e0b7b670d57c3e
+
+    layer A smoke OK
+
+    custom-token registry OK:
+      n_total                        = 65
+      n_journey                      = 18
+      n_actor                        = 6
+      n_event                        = 7
+      n_pii                          = 8
+      n_bucket                       = 26
+      n_journey_families             = 9
+      n_actor_families               = 6
+      n_bucket_families              = 9
+      n_hard_negative_families       = 3
+      n_fraud_families               = 5
+      n_agent_actor_families         = 5
+
+    feature_bucketer self-test OK
+
+    fencer self-test OK: {'<email>': 1, '<device_id>': 1, '<ip>': 1, '<amount>': 1, '<phone>': 1, '<browser>': 1, '<acct_id>': 1}
+
+    pii_fencer self-test OK (incl. review-004 #2 negative cases)
+
+    cheap_template_generator self-test OK (54 family/actor combos, no leakage)
+
+      provider/model resolution OK (review 009 finding #1)
+      Anthropic-default dispatch OK (review 009 finding #1)
+      concurrent batch path OK (32 journeys, 4 workers, cache replay clean)
+    narrative_generator self-test OK (using stub narrator)
+      tracker summary: {'spent_usd': 0.0004, 'budget_usd': 10.0, 'n_calls': 1, 'n_cache_hits': 1, 'by_model': {'gpt-5.4-nano': 0.0004}}
+
+    load_config OK
+    find_label_score_position OK
+    write_predictions_jsonl OK
+    torch/transformers not installed; tokenizer / dataset / optimizer self-tests skipped (run on the pod)
+
+Disposition:
+    PASS for no-GPU checks.
+
+3. Changed Python AST parse
+
+Command:
+    python3 - <<'PY'
+    import ast
+    from pathlib import Path
+    paths = ['data/gen/build_dataset.py','data/gen/narrative_generator.py','scripts/preflight_xattn.py','src/train/common.py']
+    for p in paths:
+        ast.parse(Path(p).read_text(), filename=p)
+    print('AST OK:', ', '.join(paths))
+    PY
+
+Actual output:
+    AST OK: data/gen/build_dataset.py, data/gen/narrative_generator.py, scripts/preflight_xattn.py, src/train/common.py
+
+Disposition:
+    PASS.
+
+4. structured_events JSON-string behavior
+
+Command:
+    python3 - <<'PY'
+    import json
+    from src.model.encoders.small_transformer import EventVocab, tokenize_events
+    row = {"structured_events": json.dumps([{"event":"login", "t":0, "geo_distance":"<geo_distance=local>"}])}
+    try:
+        tokenize_events(row["structured_events"], EventVocab(), max_events=4)
+    except Exception as e:
+        print(type(e).__name__ + ':', e)
+    PY
+
+    python3 - <<'PY'
+    import json
+    from src.train.common import parse_structured_events
+    from src.model.encoders.small_transformer import EventVocab, tokenize_events
+    row = {"structured_events": json.dumps([{"event":"login", "t":0, "geo_distance":"<geo_distance=local>"}])}
+    events = parse_structured_events(row)
+    out = tokenize_events(events, EventVocab(), max_events=4)
+    print(out['event_type_ids'][:2], out['attention_mask'][:2])
+    PY
+
+    rg -n "parse_structured_events" src/train scripts data eval
+
+Actual output:
+    AttributeError: 'str' object has no attribute 'get'
+
+    [3, 0] [1, 0]
+
+    src/train/common.py:134:    `parse_structured_events(row)` on the per-row JSON string.
+    src/train/common.py:155:                # that need it call parse_structured_events() on demand.
+    src/train/common.py:193:def parse_structured_events(row: dict) -> list[dict]:
+
+Disposition:
+    FAIL. The parser exists and fixes the shape, but no trainer calls it.
+
+5. Scientific-notation coercion spot check
+
+Command:
+    python3 - <<'PY'
+    from src.train.common import _coerce_scientific_floats
+    cases = {
+        '5e-5': 5e-5,
+        '1e-4': 1e-4,
+        '-3.2e+10': -3.2e10,
+        'exp_vslice_001': 'exp_vslice_001',
+        'gpt-5.4-nano': 'gpt-5.4-nano',
+        '1.2.3': '1.2.3',
+        '5': '5',
+    }
+    out = _coerce_scientific_floats({'x': dict(cases)})['x']
+    for k in cases:
+        print(k, repr(out[k]), type(out[k]).__name__)
+    PY
+
+Actual output:
+    5e-5 5e-05 float
+    1e-4 0.0001 float
+    -3.2e+10 -32000000000.0 float
+    exp_vslice_001 'exp_vslice_001' str
+    gpt-5.4-nano 'gpt-5.4-nano' str
+    1.2.3 '1.2.3' str
+    5 '5' str
+
+Disposition:
+    PASS. The regex handles the obvious trainer LR cases and does not coerce
+    representative IDs/model/version strings.
+
+6. Eval-only layout branch probe
+
+Command:
+    python3 - <<'PY'
+    import json, sys, types, tempfile
+    from pathlib import Path
+    class FakeDataset(list):
+        @classmethod
+        def from_list(cls, rows):
+            obj = cls(rows)
+            return obj
+    mod = types.ModuleType('datasets')
+    mod.Dataset = FakeDataset
+    sys.modules['datasets'] = mod
+    from src.train.common import load_paired_dataset
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td)
+        (p/'eval.jsonl').write_text(json.dumps({'text':'x','structured_events':[{'event':'login','t':0}], 'label':'legit'})+'\n')
+        splits = load_paired_dataset(p)
+        print('keys:', sorted(splits.keys()))
+        print('train:', splits['train'])
+        print('eval_len:', len(splits['eval']))
+        print('event_type:', type(splits['eval'][0]['structured_events']).__name__)
+    PY
+
+Actual output:
+    keys: ['eval', 'train']
+    train: None
+    eval_len: 1
+    event_type: str
+
+Disposition:
+    PASS for the intended eval_fast_path access pattern. It also confirms
+    structured_events is a string after loading.
+
+7. bitsandbytes version docs probe
+
+Command:
+    python3 - <<'PY'
+    from pathlib import Path
+    import re
+    runbook = Path('RUNBOOK.md').read_text()
+    req = Path('requirements.txt').read_text()
+    print('requirements bnb:', re.search(r'^bitsandbytes.*$', req, re.M).group(0))
+    print('runbook mentions <0.46:', '<0.46' in runbook)
+    print('runbook mentions <0.50:', '<0.50' in runbook)
+    for i, line in enumerate(runbook.splitlines(), 1):
+        if 'bitsandbytes' in line and ('<0.46' in line or '<0.50' in line):
+            print(f'{i}: {line}')
+    PY
+
+Actual output:
+    requirements bnb: bitsandbytes>=0.45.0,<0.50
+    runbook mentions <0.46: True
+    runbook mentions <0.50: False
+    336: - **`paged_adamw_8bit`** requires `bitsandbytes>=0.45.0` (Blackwell paged-kernel floor — review 010). `preflight_check.py:check_bitsandbytes` validates this, and `requirements.txt` pins `>=0.45.0,<0.46` so the three contracts agree. Below 0.45 on Blackwell GPUs the paged path silently falls back to non-paged, ~2x'ing optimizer memory.
+    365:   1. `pip install --upgrade "bitsandbytes>=0.45.0,<0.46"` — pip may have selected a pre-built wheel without SM_120 kernels.
+
+Disposition:
+    FAIL. The committed requirement moved to <0.50 for cuda130, but RUNBOOK
+    still tells the operator to install the old <0.46 range.
+
+8. narrator_temp cache behavior
+
+Command:
+    python3 - <<'PY'
+    from pathlib import Path
+    import tempfile
+    from data.gen.journey_templates import generate
+    from data.gen.narrative_generator import CostTracker, generate_narrative
+    j = generate('clean', seed=99, actor='human')
+    with tempfile.TemporaryDirectory() as td:
+        cache = Path(td)
+        def first(journey, attempt, prev_hits):
+            return 'The account holder logged in from a familiar device.', 1, 1
+        def second(journey, attempt, prev_hits):
+            return 'A different account-holder sentence for a hotter run.', 1, 1
+        a = generate_narrative(j, tracker=CostTracker(), cache_dir=cache, narrator_fn=first, narrator_temp=0.3)
+        b_tracker = CostTracker()
+        b = generate_narrative(j, tracker=b_tracker, cache_dir=cache, narrator_fn=second, narrator_temp=0.5)
+        print('first:', a)
+        print('second:', b)
+        print('second_calls:', b_tracker.n_calls, 'second_cache_hits:', b_tracker.n_cache_hits)
+    PY
+
+Actual output:
+    first: The account holder logged in from a familiar device.
+    second: The account holder logged in from a familiar device.
+    second_calls: 0 second_cache_hits: 1
+
+Disposition:
+    FAIL for the new "temperature changes style" control on already-cached
+    journeys. The default 0.3 behavior is preserved.
+
+Review findings:
+
+1. Blocker: Event-consuming trainers never parse structured_events after load_paired_dataset turns it into JSON text.
+
+Status: OPEN, blocks Task #36/#37 x-attn and event-side baselines.
+
+Details:
+`load_paired_dataset()` now serializes `structured_events` lists to JSON
+strings before building the HF dataset (`src/train/common.py:145-160`). This
+solves the pyarrow heterogeneous-list failure, but it changes the row shape.
+`src/train/common.py` adds `parse_structured_events(row)` and its comments say
+event-consuming arms should call it (`src/train/common.py:193-210`).
+
+The callers do not. The only `rg parse_structured_events` hits are the comment
+and the function definition. `train_xattn.py` still passes
+`ex.get("structured_events", [])` directly into `tokenize_events`
+(`src/train/train_xattn.py:43-45`). `train_event_only_classifier.py` does the
+same with `ex["structured_events"]` (`src/train/train_event_only_classifier.py:50-52`).
+`train_structured_as_text.py` slices the JSON string as though it were a list
+of event dicts and then passes it to `event_to_line` (`src/train/train_structured_as_text.py:80-82`).
+
+The command probe shows the concrete failure mode: `tokenize_events()` on the
+new JSON-string shape raises `AttributeError: 'str' object has no attribute
+'get'`. Parsing with `parse_structured_events(row)` first produces valid event
+IDs. The CPT-only and LoRA-text arms can still run because they do not consume
+events, which matches the reported live vertical-slice success; the next
+event-side arms will fail.
+
+Recommendation:
+Wire `parse_structured_events()` into every event-consuming path:
+`train_xattn._build_structured_collate`, `train_structured_as_text`'s collator
+and eval pre-transform loop, `train_event_only_classifier.collate_classifier_batch`,
+and any `structured_input_fn` used by `eval_runner`. Add a no-torch unit probe
+that constructs a row with JSON-string `structured_events` and verifies
+`tokenize_events(parse_structured_events(row), EventVocab())` succeeds. Add a
+torch-side collator smoke on the pod if possible.
+
+2. High: RUNBOOK still tells CUDA-13 Blackwell users to reinstall the old bitsandbytes <0.46 range.
+
+Status: OPEN, pod recovery instructions contradict the new dependency fix.
+
+Details:
+Commit 4bf30f3 updates `requirements.txt` to `bitsandbytes>=0.45.0,<0.50`
+because the RunPod Blackwell image has a CUDA 13 runtime and the old 0.45.x
+range falls back to CPU-only on that image (`requirements.txt:20-30`). RUNBOOK
+did not receive the same update. It still says `requirements.txt` pins
+`>=0.45.0,<0.46` (`RUNBOOK.md:336`) and its first recovery command is:
+
+    pip install --upgrade "bitsandbytes>=0.45.0,<0.46"
+
+(`RUNBOOK.md:365`). That command is exactly the pre-4bf range the requirements
+comment says lacks `libbitsandbytes_cuda130.so`. If the Blackwell bnb sanity
+check fails and the operator follows the runbook, they can reinstall the broken
+family and stay on the same failure path.
+
+Recommendation:
+Update RUNBOOK §10 to match `requirements.txt`: `bitsandbytes>=0.45.0,<0.50`,
+and change the explanation from "may have selected a wheel without SM_120" to
+the actual current target: CUDA-13-capable bitsandbytes, with 0.49+ expected on
+the RunPod CUDA 13 image. The requirements line, runbook gotcha, and recovery
+command should all be textually consistent.
+
+3. Medium: narrator_temp does not participate in the cache key.
+
+Status: OPEN, should be fixed before relying on temperature to make eval narration different from train narration.
+
+Details:
+The new CLI flag says `--narrator-temp` can be bumped to about 0.5 when
+generating eval data to reduce narrator-style correlation with train
+(`data/gen/build_dataset.py:406-414`). The factories now receive
+`base_temperature`, so new API calls will honor it. The cache does not.
+`_journey_cache_key()` hashes only model, journey family, actor family, and
+events (`data/gen/narrative_generator.py:249-260`). Both sequential and
+concurrent paths look up the cache before using `narrator_temp`
+(`data/gen/narrative_generator.py:561-564` and `data/gen/narrative_generator.py:669-673`).
+
+The verification probe generated the same journey once at temp 0.3, then
+requested it again at temp 0.5 with a different narrator function. The second
+call made zero narrator calls and returned the cached 0.3 text. That is fine
+for cost-saving reruns, but it makes the new "hotter eval narration" control a
+silent no-op whenever the structured journey already exists in
+`data/cache/narratives/`.
+
+Recommendation:
+Either include `narrator_temp` in `_journey_cache_key()` or add a deliberate
+cache-bypass/cache-namespace option for eval generation. If you intentionally
+want cache reuse across temperatures, document that `--narrator-temp` only
+affects cache misses and that operators must clear or namespace
+`data/cache/narratives/` when regenerating the same structured journeys at a
+new temperature.
+
+4. Medium: preflight_xattn proceeds on CPU instead of failing closed when CUDA is unavailable.
+
+Status: OPEN, operational guardrail gap in the new Stage-1 smoke.
+
+Details:
+`scripts/preflight_xattn.py` describes a GPU architecture smoke and says it
+runs one batch "on GPU" in the header. The script chooses
+`device = "cuda" if torch.cuda.is_available() else "cpu"` and continues
+(`scripts/preflight_xattn.py:83-89`). On a broken pod where CUDA is invisible,
+this will try to move a Qwen3 8B wrapper to CPU and run a 512-token forward,
+which is not a useful preflight. The general `scripts/preflight_check.py`
+should catch CUDA first, but this new script is explicitly a preflight and
+should fail closed on its own.
+
+Recommendation:
+Add an explicit `if not torch.cuda.is_available(): FAIL/return nonzero` before
+loading or moving the full model, and print a clear message directing the
+operator back to `scripts/preflight_check.py`. Also consider printing
+`torch.version.cuda`, device name, and capability here so the x-attn smoke
+captures the same substrate context as the bnb smoke.
+
+5. Minor: preflight_xattn exists but the runbook never tells the operator to run it.
+
+Status: OPEN, doc wiring issue.
+
+Details:
+The new script is clearly intended to be the Task #35/Stage-1 architecture
+gate. Its header says it catches wrapper, merged-checkpoint, event-tensor, and
+LoRA-on-Q issues before spending Stage-1 GPU time. RUNBOOK Day 2 still says
+only "X-attn architecture surgery (Task #35)" and then "First x-attn smoke run
+(Task #37)" (`RUNBOOK.md:192-197`). There is no command for:
+
+    python3 scripts/preflight_xattn.py --merged-checkpoint /workspace/checkpoints/qwen3-8b-cpt-light-merged
+
+or guidance on where it sits relative to merge, baselines, and the first
+x-attn trainer launch. That makes the new safety check easy to skip under the
+time pressure it was created for.
+
+Recommendation:
+Add the exact `preflight_xattn.py` command to RUNBOOK Day 2 immediately after
+the Stage-0 merge / CPT eval and before launching any Stage-1 x-attn training.
+State the expected success line and the exit-code behavior, and point failures
+at the wrapper/checkpoint/debug loop rather than the auto-research loop.
+
+Bottom line:
+Fix finding 1 before Task #36/#37; it is the event-side runtime break. Then
+align the bitsandbytes recovery command with the CUDA-13 requirement and make
+the new x-attn preflight fail closed and visible in the runbook.

@@ -1,0 +1,286 @@
+Review comments 010
+Date: 2026-05-16
+Subject: Blackwell compatibility patch review for commit 925b997
+
+Reviewed file(s):
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/README.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/CODEX_PROMPT.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/PLAN.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/INDEX.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/009-narrator-switch-and-prep/followup.txt
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/RUNBOOK.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/requirements.txt
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/scripts/preflight_check.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/train/common.py
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/configs/sweep_space.yaml
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/src/auto_research/experiment_template.yaml
+
+Repo root used for comparison:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+Summary:
+Reviewed with the requested Step 3 override: baseline a39cc5f..HEAD, and only
+commit 925b997 considered. The architecture-dependent image guidance is the
+right direction for Blackwell, and the requirements pin was updated, but the
+actual guardrails still have holes. The Blackwell sanity command is not
+copy-paste runnable, preflight still accepts the old bitsandbytes floor, and
+the documented last-resort optimizer fallback is not implemented by the trainer
+factory.
+
+Verification run:
+
+1. Override diff scope
+
+Command:
+    git log --oneline a39cc5f..HEAD
+    git show --stat --oneline 925b997
+    git diff --name-only 925b997^..925b997
+
+Actual output:
+    925b997 Blackwell compat: bnb 0.45+ + arch-dependent image pin
+
+    925b997 Blackwell compat: bnb 0.45+ + arch-dependent image pin
+     RUNBOOK.md       | 22 ++++++++++++++++++++--
+     requirements.txt |  8 +++++++-
+     2 files changed, 27 insertions(+), 3 deletions(-)
+
+    RUNBOOK.md
+    requirements.txt
+
+Disposition:
+    PASS. The requested override resolves to exactly commit 925b997, and the
+    reviewed surface is RUNBOOK.md + requirements.txt plus adjacent preflight
+    and optimizer code.
+
+2. No-GPU scaffold smoke
+
+Command:
+    md5 PLAN.md
+    python3 - <<'PY'
+    import sys, random
+    sys.path.insert(0, '.')
+    from eval import eval_modes
+    from eval.leakage_checks import narrative_leakage_scan
+    text = '<journey_sim_swap><actor_human><event_login> <amount_bucket=high></journey_sim_swap>'
+    assert 'journey_sim_swap' not in eval_modes.apply(text, 'stripped')[0]
+    assert '<amount_bucket=high>' in eval_modes.apply(text, 'stripped')[0]
+    a = eval_modes.apply(text, 'opaque', rng=random.Random(0))[0]
+    b = eval_modes.apply(text, 'opaque', rng=random.Random(1))[0]
+    assert a != b
+    assert not narrative_leakage_scan('This is fraudulent SIM-swap')['clean']
+    assert narrative_leakage_scan('Device change followed by password reset')['clean']
+    print('layer A smoke OK')
+    PY
+    python3 -m src.tokenizer.custom_tokens --check
+    python3 -m data.gen.feature_bucketer --self-test
+    python3 -m src.tokenizer.fencer
+    python3 -m data.gen.pii_fencer
+    python3 -m data.gen.cheap_template_generator --self-test
+    python3 -m data.gen.narrative_generator --self-test
+    python3 -m src.train.common
+
+Actual output:
+    MD5 (PLAN.md) = 64515f2986ac4ea153e0b7b670d57c3e
+
+    layer A smoke OK
+
+    custom-token registry OK:
+      n_total                        = 65
+      n_journey                      = 18
+      n_actor                        = 6
+      n_event                        = 7
+      n_pii                          = 8
+      n_bucket                       = 26
+      n_journey_families             = 9
+      n_actor_families               = 6
+      n_bucket_families              = 9
+      n_hard_negative_families       = 3
+      n_fraud_families               = 5
+      n_agent_actor_families         = 5
+
+    feature_bucketer self-test OK
+
+    fencer self-test OK: {'<email>': 1, '<device_id>': 1, '<ip>': 1, '<amount>': 1, '<phone>': 1, '<browser>': 1, '<acct_id>': 1}
+
+    pii_fencer self-test OK (incl. review-004 #2 negative cases)
+
+    cheap_template_generator self-test OK (54 family/actor combos, no leakage)
+
+      provider/model resolution OK (review 009 finding #1)
+      Anthropic-default dispatch OK (review 009 finding #1)
+      concurrent batch path OK (32 journeys, 4 workers, cache replay clean)
+    narrative_generator self-test OK (using stub narrator)
+      tracker summary: {'spent_usd': 0.0004, 'budget_usd': 10.0, 'n_calls': 1, 'n_cache_hits': 1, 'by_model': {'gpt-5.4-nano': 0.0004}}
+
+    load_config OK
+    find_label_score_position OK
+    write_predictions_jsonl OK
+    torch/transformers not installed; tokenizer / dataset / optimizer self-tests skipped (run on the pod)
+
+Disposition:
+    PASS for local checks. GPU, CUDA, Qwen3, and real bitsandbytes kernel
+    checks still have to run on the pod.
+
+3. Blackwell support source check
+
+Command:
+    Checked current public docs:
+        https://huggingface.co/docs/bitsandbytes/main/en/installation
+        https://developer.nvidia.com/blog/cuda-toolkit-12-8-delivers-nvidia-blackwell-support
+
+Actual output:
+    Relevant source facts:
+    - Current bitsandbytes docs list Linux x86-64 CUDA 12.8-12.9 wheels with
+      targets including sm100 and sm120.
+    - NVIDIA's CUDA 12.8 Blackwell announcement says CUDA 12.8 delivers
+      Blackwell support across the toolkit.
+
+Disposition:
+    PASS. The Blackwell direction is valid: a CUDA 12.8+ PyTorch image and a
+    bitsandbytes build with sm120 targets are the right compatibility surface.
+
+4. Blackwell bitsandbytes one-liner probe
+
+Command:
+    python3 - <<'PY'
+    import sys
+    import types
+    bnb = types.ModuleType('bitsandbytes')
+    bnb.__version__ = '0.45.4'
+    optim = types.ModuleType('bitsandbytes.optim')
+    class PagedAdamW8bit:
+        def __init__(self, params):
+            pass
+    optim.PagedAdamW8bit = PagedAdamW8bit
+    bnb.optim = optim
+    sys.modules['bitsandbytes'] = bnb
+    sys.modules['bitsandbytes.optim'] = optim
+    code = "import bitsandbytes as bnb; print('bnb', bnb.__version__); import bitsandbytes.optim as o; opt = o.PagedAdamW8bit([torch.nn.Parameter(torch.randn(8, device='cuda'))]); print('paged_adamw_8bit instantiates OK')"
+    try:
+        exec(code, {})
+    except Exception as e:
+        print(type(e).__name__ + ':', e)
+    PY
+
+Actual output:
+    bnb 0.45.4
+    NameError: name 'torch' is not defined
+
+Disposition:
+    FAIL. The command added in RUNBOOK.md cannot run as written because it
+    references torch without importing torch.
+
+5. bitsandbytes version-contract probe
+
+Command:
+    python3 - <<'PY'
+    from pathlib import Path
+    import re
+    runbook = Path('RUNBOOK.md').read_text()
+    preflight = Path('scripts/preflight_check.py').read_text()
+    req = Path('requirements.txt').read_text()
+    print('requirements bitsandbytes:', re.search(r'^bitsandbytes.*$', req, re.M).group(0))
+    print('preflight min_version:', re.search(r'def check_bitsandbytes\(min_version: str = "([^"]+)"\)', preflight).group(1))
+    print('runbook gotcha mentions >=0.43:', 'bitsandbytes>=0.43' in runbook)
+    print('runbook gotcha mentions >=0.45:', 'bitsandbytes>=0.45' in runbook)
+    PY
+
+Actual output:
+    requirements bitsandbytes: bitsandbytes>=0.45.0,<0.46
+    preflight min_version: 0.43.0
+    runbook gotcha mentions >=0.43: True
+    runbook gotcha mentions >=0.45: True
+
+Disposition:
+    FAIL. The new requirements floor is 0.45.0, but preflight and one gotcha
+    still treat 0.43.0 as sufficient.
+
+Review findings:
+
+1. High: The Blackwell bitsandbytes sanity command fails before it checks anything.
+
+Status: OPEN, blocker for using the new Blackwell pod-side check literally.
+
+Details:
+RUNBOOK.md adds a "bitsandbytes Blackwell kernel check" at `RUNBOOK.md:345-346`:
+
+    python3 -c "import bitsandbytes as bnb; print('bnb', bnb.__version__); import bitsandbytes.optim as o; opt = o.PagedAdamW8bit([torch.nn.Parameter(torch.randn(8, device='cuda'))]); print('paged_adamw_8bit instantiates OK')"
+
+That command references `torch.nn.Parameter` and `torch.randn` without importing
+torch. The synthetic execution in the verification run stubs bitsandbytes so
+the command reaches the relevant name lookup, and it fails with
+`NameError: name 'torch' is not defined`. On the pod this will fail the same
+way after importing real bitsandbytes. It also only constructs the optimizer;
+it does not run an optimizer step, which is the point where CUDA kernel
+compatibility errors often surface.
+
+Recommendation:
+Replace the one-liner with a small multi-line Python block that imports torch,
+constructs a CUDA parameter, assigns a gradient, instantiates
+`bnb.optim.PagedAdamW8bit`, calls `opt.step()`, then prints success. For
+example, the check should prove at least: torch sees CUDA 12.8+, the device
+capability is (10, 0) or (12, 0), bitsandbytes imports, PagedAdamW8bit can
+execute a CUDA optimizer step, and no "no kernel image is available" error is
+raised.
+
+2. High: Preflight still allows bitsandbytes 0.43 even though Blackwell now requires 0.45+.
+
+Status: OPEN, should be fixed before relying on preflight for a Blackwell pod.
+
+Details:
+The patch changes `requirements.txt` to `bitsandbytes>=0.45.0,<0.46` and says
+0.45+ is required for Blackwell SM_100 / SM_120 paged optimizer kernels
+(`requirements.txt:13-19`). The runtime gate did not change. `check_bitsandbytes`
+still defaults to `min_version="0.43.0"` (`scripts/preflight_check.py:110`), and
+RUNBOOK.md still says "`paged_adamw_8bit` requires `bitsandbytes>=0.43`" at
+`RUNBOOK.md:336`.
+
+That leaves the new Blackwell compatibility claim split across three contracts:
+requirements says 0.45+, preflight accepts 0.43+, and the runbook says both
+0.43+ and 0.45+ in the same gotcha block. If the pod image already contains an
+older bitsandbytes, if someone runs preflight before the requirements install,
+or if a failed install leaves the old package importable, the gatekeeper can
+pass the exact version the Blackwell patch says is unsafe.
+
+Recommendation:
+Raise the preflight minimum to 0.45.0 for all pods, or make it
+architecture-aware by reading `torch.cuda.get_device_capability(0)` and
+requiring 0.45.0 on Blackwell while preserving a lower Hopper floor only if
+there is a reason to do so. Update RUNBOOK.md line 336 to match the executable
+check. The version line and preflight must say the same thing.
+
+3. High: The documented non-paged 8-bit fallback is not wired into the trainer factory.
+
+Status: OPEN, recovery recipe is not executable from configs.
+
+Details:
+RUNBOOK.md says the last-resort Blackwell fallback is to use "non-paged 8-bit
+optimizer (`AdamW8bit` instead of `PagedAdamW8bit`) in the trainer configs"
+(`RUNBOOK.md:351`). The trainers do not support that config value. All five
+trainers call `build_optimizer(... optimizer_name=train_cfg.get("optimizer",
+"paged_adamw_8bit"))`, and `src/train/common.py:227-236` accepts exactly two
+values:
+
+    paged_adamw_8bit -> bnb.optim.PagedAdamW8bit(...)
+    adamw            -> torch.optim.AdamW(...)
+
+There is no `adamw_8bit`, `AdamW8bit`, or `non_paged_adamw_8bit` path. If
+PagedAdamW8bit fails on Blackwell and the maintainer follows the new fallback,
+the next trainer launch will fail with `ValueError: unknown optimizer`. The
+alternative supported fallback, `adamw`, is full torch AdamW, not the 8-bit
+non-paged optimizer the runbook describes.
+
+Recommendation:
+Either implement the documented fallback in `build_optimizer` (for example,
+`optimizer_name == "adamw_8bit"` mapping to `bnb.optim.AdamW8bit`) and add it
+to the allowed trainer-config vocabulary, or change RUNBOOK.md to say the
+actual supported fallback is `optimizer: adamw` with full-size optimizer state.
+If keeping the 8-bit fallback, add a pod-side smoke check for both
+`paged_adamw_8bit` and `adamw_8bit` so the recovery path is tested before it is
+needed.
+
+Bottom line:
+The Blackwell patch points the runbook in the right direction, but the
+guardrails are not yet dependable. Fix the runnable bnb check, align preflight
+with the 0.45+ requirement, and either implement or remove the documented
+AdamW8bit fallback before using this as the RunPod boot checklist.

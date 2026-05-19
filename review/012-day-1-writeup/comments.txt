@@ -1,0 +1,262 @@
+Review comments 012
+Date: 2026-05-17
+Subject: Day-1 README writeup correctness review
+
+Reviewed file(s):
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/README.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/PLAN.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/INDEX.md
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/review/011-vslice-debug-and-xattn-preflight/followup.txt
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/.gitignore
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/train_llm_narrated/build_summary.json
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/eval_medium_15k_llm/build_summary.json
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc/data/eval_medium_50k/build_summary.json
+
+Repo root used for comparison:
+    /Users/arunmenon/projects/Foundation-Science/cross_attn_ato_poc
+
+Summary:
+The README commit is the right kind of Day-1 journey artifact, and the five vertical-slice bug citations match the named commits.
+The main problem is evidence durability: the writeup presents the metrics and Day-2 readiness state as repo-verifiable, but the named experiment artifacts are ignored and absent in this checkout, with experiments.jsonl at zero bytes.
+That makes the hard-negative-FPR pivot hard to audit from the repository even though the prose may be correct for the pod state.
+
+Verification run:
+
+1. Requested diff scope
+
+Command:
+    git log --oneline 3ae3f56..HEAD
+    git diff --stat 3ae3f56..HEAD
+
+Actual output:
+    e0f610f Day-1 writeup (Task #34) - saturation finding + pivot to hard-neg FPR
+
+     README.md | 117 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++------
+     1 file changed, 107 insertions(+), 10 deletions(-)
+
+Disposition:
+    PASS - review was scoped to the requested README-only commit.
+
+2. Required smoke checks that apply to a README-only diff
+
+Command:
+    md5 -q PLAN.md ../.claude/tasks/cross-attn-ato-poc/PLAN.md ~/.claude/plans/i-want-to-do-compressed-bee.md
+
+Actual output:
+    64515f2986ac4ea153e0b7b670d57c3e
+    64515f2986ac4ea153e0b7b670d57c3e
+    64515f2986ac4ea153e0b7b670d57c3e
+
+Disposition:
+    PASS - PLAN copies match.
+
+Command:
+    python3 - <<'PY'
+    import sys, random
+    sys.path.insert(0, '.')
+    from eval import eval_modes
+    from eval.leakage_checks import narrative_leakage_scan
+    text = '<journey_sim_swap><actor_human><event_login> <amount_bucket=high></journey_sim_swap>'
+    assert 'journey_sim_swap' not in eval_modes.apply(text, 'stripped')[0]
+    assert '<amount_bucket=high>' in eval_modes.apply(text, 'stripped')[0]
+    a = eval_modes.apply(text, 'opaque', rng=random.Random(0))[0]
+    b = eval_modes.apply(text, 'opaque', rng=random.Random(1))[0]
+    assert a != b
+    assert not narrative_leakage_scan('This is fraudulent SIM-swap')['clean']
+    assert narrative_leakage_scan('Device change followed by password reset')['clean']
+    print('layer A smoke OK')
+    PY
+
+Actual output:
+    layer A smoke OK
+
+Disposition:
+    PASS.
+
+Command:
+    PY_FILES=$(git diff --name-only 3ae3f56..HEAD | grep -E '\.py$' || true)
+    if [ -n "$PY_FILES" ]; then
+        echo "$PY_FILES" | xargs python3 -m py_compile
+    else
+        echo "no Python files changed; py_compile skipped"
+    fi
+
+Actual output:
+    no Python files changed; py_compile skipped
+
+Disposition:
+    PASS - README-only diff.
+
+3. README bug table commit citations
+
+Command:
+    git show --stat --oneline --no-renames 4bf30f3 3218f56 2043d78 43e3c6c db723c1
+
+Actual output:
+    4bf30f3 Day-0 pod-boot fixes: transformers >=4.51 for Qwen3, bnb <=0.49 for cuda130
+     requirements.txt | 27 +++++++++++++++++++--------
+     1 file changed, 19 insertions(+), 8 deletions(-)
+    3218f56 load_paired_dataset: serialize structured_events as JSON string
+     src/train/common.py | 56 ++++++++++++++++++++++++++++++++++++++++++++++++++---
+     1 file changed, 53 insertions(+), 3 deletions(-)
+    2043d78 load_paired_dataset: accept eval-only directory layout
+     src/train/common.py | 9 +++++++++
+     1 file changed, 9 insertions(+)
+    43e3c6c load_config: coerce scientific-notation strings to floats (PyYAML quirk)
+     src/train/common.py | 39 ++++++++++++++++++++++++++++++++++++++-
+     1 file changed, 38 insertions(+), 1 deletion(-)
+    db723c1 Address review 011: wire parse_structured_events + 4 alignments
+     RUNBOOK.md                                         |  13 +-
+     data/gen/narrative_generator.py                    |  25 ++-
+     .../followup.txt                                   | 249 +++++++++++++++++++++
+     scripts/preflight_xattn.py                         |  16 +-
+     src/train/train_event_only_classifier.py           |   5 +-
+     src/train/train_structured_as_text.py              |  10 +-
+     src/train/train_xattn.py                           |   5 +-
+     7 files changed, 311 insertions(+), 12 deletions(-)
+
+Disposition:
+    PASS - the five writeup bug citations line up with the commit subjects and files changed. db723c1 also matches the review-011 narrator-temp and event-parser followup cited by the README.
+
+4. Metrics artifact presence check
+
+Command:
+    python3 - <<'PY'
+    from pathlib import Path
+    paths = [
+        'src/auto_research/experiments.jsonl',
+        'src/auto_research/runs/exp_vslice_001/score_stripped.json',
+        'src/auto_research/runs/exp_stage0_001/score_stripped.json',
+        'src/auto_research/runs/exp_stage0_001/metrics.json',
+        'src/auto_research/runs/exp_vslice_001/diagnostic_templated_score_stripped.json',
+        'src/auto_research/runs/exp_stage0_001/diagnostic_llm15k_score_stripped.json',
+    ]
+    for name in paths:
+        p = Path(name)
+        if p.exists():
+            print(f'{name}: exists size={p.stat().st_size}')
+        else:
+            print(f'{name}: MISSING')
+    PY
+
+Actual output:
+    src/auto_research/experiments.jsonl: exists size=0
+    src/auto_research/runs/exp_vslice_001/score_stripped.json: MISSING
+    src/auto_research/runs/exp_stage0_001/score_stripped.json: MISSING
+    src/auto_research/runs/exp_stage0_001/metrics.json: MISSING
+    src/auto_research/runs/exp_vslice_001/diagnostic_templated_score_stripped.json: MISSING
+    src/auto_research/runs/exp_stage0_001/diagnostic_llm15k_score_stripped.json: MISSING
+
+Disposition:
+    FAIL - the writeup's named verification artifacts are not present in this repo snapshot.
+
+5. Runtime ignore rules for the missing artifacts
+
+Command:
+    git check-ignore -v src/auto_research/experiments.jsonl src/auto_research/runs/exp_vslice_001/score_stripped.json src/auto_research/runs/exp_stage0_001/metrics.json
+
+Actual output:
+    .gitignore:26:src/auto_research/experiments.jsonl    src/auto_research/experiments.jsonl
+    .gitignore:25:src/auto_research/runs/    src/auto_research/runs/exp_vslice_001/score_stripped.json
+    .gitignore:25:src/auto_research/runs/    src/auto_research/runs/exp_stage0_001/metrics.json
+
+Disposition:
+    PASS as an ignore-rule check, FAIL as durable evidence for the README claims.
+
+6. Dataset summary checks available locally
+
+Command:
+    python3 - <<'PY'
+    import json
+    from pathlib import Path
+    for name in ['data/train_llm_narrated/build_summary.json','data/eval_medium_15k_llm/build_summary.json','data/eval_medium_50k/build_summary.json']:
+        p=Path(name)
+        print(f'== {name} ==')
+        data=json.load(p.open())
+        for k in ['n_records','mode','eval_frac','leakage_audit_n','leakage_audit_failures','duration_seconds','llm_cost']:
+            print(f'{k}: {data.get(k)}')
+    PY
+
+Actual output:
+    == data/train_llm_narrated/build_summary.json ==
+    n_records: 25000
+    mode: llm
+    eval_frac: 0.2
+    leakage_audit_n: 500
+    leakage_audit_failures: 0
+    duration_seconds: 3798.47
+    llm_cost: {'spent_usd': 5.6715, 'budget_usd': 10.0, 'n_calls': 21687, 'n_cache_hits': 3313, 'by_model': {'gpt-5.4-nano': 5.6715}}
+    == data/eval_medium_15k_llm/build_summary.json ==
+    n_records: 15000
+    mode: llm
+    eval_frac: 0.0
+    leakage_audit_n: 500
+    leakage_audit_failures: 0
+    duration_seconds: 2.59
+    llm_cost: {'spent_usd': 0.0, 'budget_usd': 5.0, 'n_calls': 0, 'n_cache_hits': 15000, 'by_model': {}}
+    == data/eval_medium_50k/build_summary.json ==
+    n_records: 50000
+    mode: template
+    eval_frac: 0.0
+    leakage_audit_n: 1000
+    leakage_audit_failures: 0
+    duration_seconds: 3.49
+    llm_cost: None
+
+Disposition:
+    PARTIAL PASS - dataset counts and leakage-audit summaries support some README claims, but they do not verify the AUC, FPR, wall-time, loss, checkpoint, or preflight claims.
+
+Review findings:
+
+1. High: The README's headline metric and readiness claims are not auditable from the repo snapshot.
+
+Status: OPEN, evidence blocker for the writeup
+
+Details:
+README.md:40-44, README.md:48, README.md:54, README.md:60-82, README.md:99-120, and README.md:122-129 all present Day-1 metrics or pod readiness as completed and verified. The writeup explicitly says, at README.md:120, "Both entries persisted in src/auto_research/experiments.jsonl." In this checkout that file exists but is zero bytes, and the named score/metrics/diagnostic JSON files are missing. The ignore rules explain why: .gitignore:25 ignores src/auto_research/runs/ and .gitignore:26 ignores src/auto_research/experiments.jsonl. Ignoring runtime artifacts is fine, but then the README cannot rely on those paths as the durable evidence for the hard-negative-FPR pivot. A fresh clone of the repo cannot reproduce the writeup verification the prompt asked for.
+
+Recommendation:
+Make the Day-1 evidence durable in source control or make the README precise about where the evidence lives. The cleanest fix is a small checked-in evidence file, for example docs/day-1-results.md or review/012-day-1-writeup/day1-evidence.txt, containing exact excerpts from experiments.jsonl, metrics.json, score_stripped.json, the two diagnostic score files, and the preflight_xattn terminal output. Alternatively, change README.md to state that these are pod-local ignored artifacts and include the external storage path plus enough raw JSON snippets to audit the AUC/FPR/loss/wall-time claims without needing the pod.
+
+2. Medium: "PLAN.md assumption falsified" overstates what the PLAN actually got wrong.
+
+Status: OPEN, doc wording
+
+Details:
+README.md:58 says "PLAN.md assumption falsified" and README.md:72 says the 50k templated eval "Falsified PLAN.md's templated narratives distribution-shape match training premise." The second sentence has a valid core: PLAN.md:9 and PLAN.md:382 do claim the templated eval keeps the distribution shape close to training. But PLAN.md:590 also explicitly lists "Synthetic-data saturation (all baselines AUC ceiling)" as a known risk and says to increase hard-negative ratio and document it as a finding. README.md:133 gets this right by saying the PLAN risk materialized. The stronger "PLAN.md assumption falsified" framing reads like the plan missed the saturation risk, when the plan actually anticipated it.
+
+Recommendation:
+Replace the broad line with something narrower: "Result: saturation discovered; the templated medium/large eval distribution-match assumption failed, and the PLAN.md synthetic-data-saturation risk materialized." Keep the Day-2 metric pivot, but do not imply the whole PLAN premise was false.
+
+3. Minor: The Stage-0 wall-time comparison is not an apples-to-apples hardware conclusion.
+
+Status: OPEN, doc wording
+
+Details:
+README.md:48 says Stage-0 took 53 minutes "vs PLAN.md's 3-4 hr H100 projection - Blackwell is faster." The observed 53-minute run is useful, but it was on an RTX PRO 6000 Blackwell community host, while PLAN.md was scoped around a single RunPod H100. The repo snapshot also lacks the metrics.json that would show whether the 3194 seconds includes training only or training plus merge/eval overhead. As written, the sentence turns one observed run into a hardware conclusion.
+
+Recommendation:
+Phrase it as an observation, not a benchmark: "Observed Stage-0 training wall time was 53 min on RTX PRO 6000 Blackwell for this config, faster than the PLAN.md H100 time budget; not a controlled H100 comparison." If 3194s excludes merge and eval, say that explicitly.
+
+4. Minor: The narrator-temp cache-hit number in the README does not match the final local 15k eval summary.
+
+Status: OPEN, doc wording
+
+Details:
+README.md:90 says "the 7,602 cache hits served back the train-time temp-0.3 narratives." The final local artifact at data/eval_medium_15k_llm/build_summary.json reports n_records=15000, n_calls=0, and n_cache_hits=15000. review/011-vslice-debug-and-xattn-preflight/followup.txt:165-172 also describes the salvaged 15k eval as 100% cache hits from the previous temp-0.3 cache. The README's 7,602 number may be a true intermediate run counter, but it is not the number a reader sees in the final local eval artifact.
+
+Recommendation:
+Either change the writeup to "the final 15k eval summary shows 15,000/15,000 cache hits" or explicitly label 7,602 as an intermediate restart count. Also consider adding narrator_temp to future build_summary.json output; right now the temp=0.3 conclusion is verified via review 011 followup and cache behavior, not by the dataset summary itself.
+
+5. Minor: "11 reviews closed, 5 commits since" is ambiguous against the current commit graph.
+
+Status: OPEN, doc wording
+
+Details:
+README.md:127 lists "11 reviews closed, 5 commits since (all integration bugs surfaced from real Day-1 work)" under the verified Day-2 starting state. The current graph has e0f610f after 3ae3f56, and 3ae3f56 after db723c1. If "since" means since review 011 closed, the count is not five. If it means the Day-1 integration-fix commits, the anchor should be stated explicitly because the graph includes additional Day-1-adjacent commits such as 110f0d1 and db723c1.
+
+Recommendation:
+Replace the shorthand with explicit anchors, for example: "11 reviews closed; Day-1 integration fixes recorded in 4bf30f3, 3218f56, 2043d78, 43e3c6c, plus xattn preflight 110f0d1 and review-011 closure db723c1." That keeps the writeup factual even after more commits land.
+
+Bottom line:
+Do not proceed with README.md as the only durable Day-1 record until the evidence gap is closed or clearly documented as pod-local. The metric pivot may be correct, but the repository currently cannot verify the AUC/FPR/loss/wall-time/preflight claims it uses to justify that pivot.
