@@ -166,7 +166,9 @@ def main():
     # the two arms are guaranteed to see byte-identical LM text — which
     # is what makes the v4 architectural comparison interpretable.
     from data.gen.build_dataset import verify_v4_text_contract
-    verify_v4_text_contract(train_ds, sample_n=3, arm_name="xattn")
+    # Review 021 finding #4 fix: strict=True is the v4 default,
+    # sample_n=32 spreads checks across the dataset.
+    verify_v4_text_contract(train_ds, sample_n=32, arm_name="xattn", strict=True)
 
     batch_size = train_cfg.get("micro_batch", 4)
     train_loader = DataLoader(

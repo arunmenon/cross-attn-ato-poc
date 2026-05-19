@@ -4,7 +4,9 @@
 
 # Required fields:
 exp_id: exp_NNN                          # auto-assigned by run_next_experiment.py
-arm: xattn                                # one of: xattn | cpt_light | lora_text | structured_as_text | event_only
+arm: xattn                                # one of: xattn | cpt_light | text_only | lora_text | structured_as_text | event_only
+                                          # (v4: `text_only` is the new clean-narrative baseline; `lora_text` is
+                                          #  retained as a legacy v3 alias and routes to the same trainer file.)
 
 # x-attn architecture dials (required for arm=xattn)
 xattn:

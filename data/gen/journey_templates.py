@@ -649,7 +649,19 @@ def gen_phish_takeover_mfa_phished(seed: int, actor: str = "human") -> Journey:
         txn_feat = _txn_features(rng, fam)
         # Force AT LEAST ONE transfer to a newly-added recipient — that's
         # the disambiguating feature.
-        if i == n_txns - 1 and txn_feat["rcpt_age"] == _bt("recipient_age", "known"):
+        #
+        # Review 021 finding #3 fix: _txn_features returns RAW values
+        # like "known"/"newly_added"; _txn_event later converts them
+        # into bucket tokens like "<recipient_age=known>". The v0
+        # comparison `txn_feat["rcpt_age"] == _bt("recipient_age",
+        # "known")` was always False because the LHS is "known" not
+        # "<recipient_age=known>". That meant ~16% of samples (160/1000
+        # in spot check) had no newly-added recipient at all — the
+        # adversarial feature was silently absent for those samples.
+        # Fix: compare against the raw value. The last txn ALWAYS gets
+        # a newly_added recipient now, even if the prior sample was
+        # already newly_added (idempotent).
+        if i == n_txns - 1:
             txn_feat["rcpt_age"] = "newly_added"
         events.append(_txn_event(t, actor, keeper, rng=rng, amount_usd=amount, **txn_feat))
 
@@ -712,7 +724,28 @@ def _self_test() -> None:
         for a, b in zip(j.events, j2.events):
             assert a == b, f"{family} non-deterministic at t={a.get('t')}"
 
-    print(f"journey_templates self-test OK ({len(JOURNEY_GENERATORS)} families)")
+    # Review 021 finding #3 regression: phish_takeover_mfa_phished must
+    # ALWAYS contain at least one event with recipient_age=newly_added.
+    # The v0 implementation used the wrong comparison (raw "known" vs
+    # bucket token "<recipient_age=known>") so ~16% of samples (160 of
+    # 1000) silently lacked the disambiguating feature. After the fix,
+    # the last txn unconditionally sets rcpt_age="newly_added".
+    newly_added_token = format_bucket_token("recipient_age", "newly_added")
+    n_check = 100
+    misses = []
+    for s in range(n_check):
+        j = generate("phish_takeover_mfa_phished", seed=s, actor="human")
+        has_na = any(ev.get("recipient_age") == newly_added_token for ev in j.events)
+        if not has_na:
+            misses.append(s)
+    assert not misses, (
+        f"phish_takeover_mfa_phished is missing newly_added recipient in "
+        f"{len(misses)}/{n_check} samples — review 021 finding #3 regression. "
+        f"First miss seeds: {misses[:5]}"
+    )
+
+    print(f"journey_templates self-test OK ({len(JOURNEY_GENERATORS)} families, "
+          f"adversarial-feature invariant: {n_check}/{n_check})")
 
 
 def main() -> int:

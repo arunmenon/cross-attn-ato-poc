@@ -411,9 +411,14 @@ def assert_byte_identical_invariant(record: dict) -> None:
     # design as long as both trainers consume `compose_text_only`.
 
 
-def verify_v4_text_contract(dataset, sample_n: int = 3, arm_name: str = "v4") -> None:
+def verify_v4_text_contract(
+    dataset,
+    sample_n: int = 32,
+    arm_name: str = "v4",
+    strict: bool = True,
+) -> None:
     """Trainer startup smoke check: confirm the dataset's `text` field
-    matches `compose_text_only(record)` for a few sample rows.
+    matches `compose_text_only(record)` across a spread of sample rows.
 
     Why this exists:
       Both `train_text_only.py` and `train_xattn.py` read the `text`
@@ -428,25 +433,57 @@ def verify_v4_text_contract(dataset, sample_n: int = 3, arm_name: str = "v4") ->
     Args:
       dataset: any indexable dataset of dict-like rows (HuggingFace
         Datasets, list of dicts, etc.).
-      sample_n: number of rows to spot-check.
+      sample_n: number of rows to spot-check. The check samples a
+        DETERMINISTIC SPREAD across the dataset (rows 0, len/N, 2*len/N,
+        ..., len-1) rather than just the first N rows — this catches
+        partial preprocessing that only touches one end of the file.
+        Default 32 (review 021 finding #4 fix; v0 was 3).
       arm_name: which trainer is calling this; included in messages.
+      strict: when True (default for v4 trainers), rows that lack the
+        v4 canonical fields (`narrative`, `label`) raise RuntimeError
+        rather than skip. v4 arms cannot be trained on v3 data
+        without producing uninterpretable results, so this is the
+        right default. Set strict=False to allow v3 datasets through
+        for backward-compat (legacy v3 reruns).
 
     Raises:
-      RuntimeError if a row's text field does not match the
-      canonical composition. Prints a pass message otherwise.
-
-    Graceful skip:
-      If a row lacks the v4 canonical fields (`narrative`, `label`),
-      the dataset was generated under v3 — print a warning and skip.
-      v3 datasets cannot be used for the v4 architectural test
-      anyway, so the trainer will produce a different finding
-      regardless.
+      RuntimeError if a sampled row's text field does not match the
+      canonical composition, or if `strict=True` and any sampled row
+      lacks v4 canonical fields. Prints a pass message otherwise.
     """
+    n_total = len(dataset)
+    if n_total == 0:
+        print(f"[{arm_name}] v4 contract check: SKIPPED (empty dataset)")
+        return
+
+    # Deterministic spread across the dataset — catches partial
+    # preprocessing that only mutates one part of the file.
+    n_to_check = min(sample_n, n_total)
+    if n_to_check <= 1 or n_total == 1:
+        indices = [0]
+    else:
+        step = max(1, n_total // n_to_check)
+        indices = list(range(0, n_total, step))[:n_to_check]
+        if indices[-1] != n_total - 1:
+            indices.append(n_total - 1)
+
     n_checked = 0
     n_skipped = 0
-    for i in range(min(sample_n, len(dataset))):
+    for i in indices:
         row = dataset[i]
         if "narrative" not in row or "label" not in row:
+            if strict:
+                raise RuntimeError(
+                    f"[{arm_name}] v4 contract check FAILED: row {i} lacks "
+                    f"v4 canonical fields (`narrative`, `label`). This "
+                    f"dataset was generated under v3 OR was preprocessed "
+                    f"to strip the canonical fields. v4 trainers cannot "
+                    f"produce interpretable results on v3 data. Either:\n"
+                    f"  1. Regenerate the dataset with the v4 narrator "
+                    f"(data/gen/build_dataset.py at HEAD), OR\n"
+                    f"  2. Pass `strict=False` to verify_v4_text_contract "
+                    f"(only for explicit legacy v3 reruns)."
+                )
             n_skipped += 1
             continue
         expected = compose_text_only(row)
@@ -464,12 +501,15 @@ def verify_v4_text_contract(dataset, sample_n: int = 3, arm_name: str = "v4") ->
                 f"to regenerate, or use a fresh v4 dataset."
             )
         n_checked += 1
+
     if n_skipped > 0:
-        print(f"[{arm_name}] v4 contract check: SKIPPED ({n_skipped}/{sample_n} "
-              f"rows lack canonical fields → v3-format dataset, no check possible)")
+        print(f"[{arm_name}] v4 contract check: SKIPPED ({n_skipped}/{len(indices)} "
+              f"rows lack canonical fields → v3-format dataset, "
+              f"non-strict mode allowed it through)")
     else:
         print(f"[{arm_name}] v4 contract check: PASS "
-              f"({n_checked}/{sample_n} sample rows match compose_text_only)")
+              f"({n_checked} sample rows match compose_text_only, "
+              f"spread across indices {indices[0]}..{indices[-1]} of {n_total} total)")
 
 
 # ---------------------------------------------------------------------------

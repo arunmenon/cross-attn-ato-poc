@@ -121,7 +121,11 @@ def main():
     # train_text_only and train_xattn both call this against the SAME
     # dataset, so if both pass, they're seeing byte-identical text.
     from data.gen.build_dataset import verify_v4_text_contract
-    verify_v4_text_contract(train_ds, sample_n=3, arm_name="text_only")
+    # Review 021 finding #4 fix: strict=True is the v4 default (hard
+    # fail on v3-format data), sample_n=32 spreads checks across the
+    # dataset rather than just the first 3 rows. Legacy v3 reruns
+    # should pass strict=False explicitly via config if needed.
+    verify_v4_text_contract(train_ds, sample_n=32, arm_name="text_only", strict=True)
 
     batch_size = train_cfg.get("micro_batch", 4)
     train_loader = DataLoader(
@@ -194,8 +198,20 @@ def main():
         max_length=train_cfg.get("seq_len", 2048),
     )
 
+    # v4 (review 021 finding #1): record the arm name from the config,
+    # not a hardcoded string. The renamed trainer is now invoked by
+    # BOTH `arm: text_only` (v4 canonical) and `arm: lora_text` (v3
+    # legacy alias). The recorded arm preserves which contract the
+    # config asked for so the leaderboard groups runs correctly.
+    arm_from_config = cfg.get("arm", "text_only")
+    if arm_from_config not in {"text_only", "lora_text"}:
+        # Defensive: someone invoked this trainer with an unexpected arm.
+        # Default to text_only since that's the v4 contract, but warn.
+        print(f"[train_text_only] WARN: unexpected arm {arm_from_config!r}; "
+              f"recording as text_only")
+        arm_from_config = "text_only"
     metrics = {
-        "status": "ok", "arm": "lora_text",
+        "status": "ok", "arm": arm_from_config,
         "final_train_loss": losses[-1] if losses else None,
         "n_steps": step, "wall_clock_sec": time.time() - t_start,
         "n_trainable": n_trainable,

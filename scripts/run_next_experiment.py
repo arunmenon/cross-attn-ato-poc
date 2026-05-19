@@ -70,7 +70,13 @@ LOCKFILE = Path("/workspace/.gpu.lock") if Path("/workspace").exists() else REPO
 # Schema (manual whitelist — Minor Patch 2)
 # ---------------------------------------------------------------------------
 
-ALLOWED_ARMS = {"xattn", "cpt_light", "lora_text", "structured_as_text", "event_only"}
+ALLOWED_ARMS = {"xattn", "cpt_light", "lora_text", "text_only", "structured_as_text", "event_only"}
+# v4 (review 021 finding #1): `text_only` is the renamed v4 baseline that
+# replaces v3's `lora_text` (which started from raw Qwen and was not
+# apples-to-apples with the other Stage-1 arms). `lora_text` is retained
+# in this set as a legacy alias for any v3-config reruns, but its
+# ARM_TO_TRAINER target now points at the same trainer file (the
+# rename was train_lora_text_only.py → train_text_only.py).
 
 # Per-arm allowed keys. Unknown keys = reject.
 ARM_SCHEMA: dict[str, dict[str, type]] = {
@@ -87,6 +93,9 @@ ARM_SCHEMA: dict[str, dict[str, type]] = {
         "exp_id": str, "arm": str, "training": dict, "data": dict, "eval": dict, "rationale": str,
     },
     "lora_text": {
+        "exp_id": str, "arm": str, "training": dict, "data": dict, "eval": dict, "rationale": str,
+    },
+    "text_only": {  # v4: replaces lora_text; starts from shared CPT-light merged base
         "exp_id": str, "arm": str, "training": dict, "data": dict, "eval": dict, "rationale": str,
     },
     "structured_as_text": {
@@ -493,7 +502,14 @@ def release_lock(fd: int | None) -> None:
 ARM_TO_TRAINER = {
     "xattn": "src/train/train_xattn.py",
     "cpt_light": "src/train/train_cpt_light.py",
-    "lora_text": "src/train/train_lora_text_only.py",
+    # v4 (review 021 finding #1): `text_only` is the v4 arm that uses
+    # the shared CPT-light merged base + clean narrative-only prompt.
+    # `lora_text` is the v3 legacy alias and now points to the SAME
+    # renamed trainer file (the file used to be train_lora_text_only.py;
+    # it was renamed in commit 669d56e). Configs that say arm=lora_text
+    # under the v3 base_checkpoint still work for legacy reruns.
+    "text_only": "src/train/train_text_only.py",
+    "lora_text": "src/train/train_text_only.py",
     "structured_as_text": "src/train/train_structured_as_text.py",
     "event_only": "src/train/train_event_only_classifier.py",
 }

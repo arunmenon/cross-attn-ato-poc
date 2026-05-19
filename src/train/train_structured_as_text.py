@@ -259,16 +259,28 @@ def main():
     # For the eval pass we need text with structured events prepended.
     # The eval_runner expects dataset[i]["text"] to be the full prefix
     # ending at "<risk_verdict>\nlabel:". We pre-transform eval_ds.
+    #
+    # Review 021 finding #2 fix: this MUST use the same dispatch as the
+    # training collator (v4 compose_structured_as_text vs v3 prepend),
+    # otherwise the model trains on one prompt shape and is evaluated on
+    # another — invalidating the structured_as_text_v4 measurement.
     # Review 011 finding #1: structured_events is a JSON string after
     # load_paired_dataset; parse before serialization.
     from src.train.common import parse_structured_events
+    from data.gen.build_dataset import compose_structured_as_text
+
     eval_records = []
     for i in range(len(eval_ds)):
         ex = eval_ds[i]
         events = parse_structured_events(ex)
-        preamble = _serialize_events_compact(events) + "\n"
         new_ex = dict(ex)
-        new_ex["text"] = preamble + ex["text"]
+        new_ex["structured_events"] = events  # ensure list, not JSON str
+        if "narrative" in new_ex and "label" in new_ex:
+            # v4 path — matches the training collator's v4 branch
+            new_ex["text"] = compose_structured_as_text(new_ex)
+        else:
+            # v3 fallback — matches the training collator's v3 branch
+            new_ex["text"] = _serialize_events_compact(events) + "\n" + ex["text"]
         eval_records.append(new_ex)
     from datasets import Dataset
     eval_ds_pre = Dataset.from_list(eval_records)
