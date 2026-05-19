@@ -43,6 +43,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 from dataclasses import dataclass, field
@@ -340,11 +341,67 @@ def _cache_path(cache_dir: Path, key: str) -> Path:
     return cache_dir / key[:2] / key[2:4] / f"{key}.txt"
 
 
+# PII placeholder tokens the narrator sometimes echoes verbatim from its
+# input (e.g., when the structured stream carries a fenced `<acct_id>`
+# token, gpt-5-nano occasionally copies the angle-bracket form into the
+# prose). These are not a v4-contract violation (no bucket paraphrase,
+# no class label) but they are visible artifacts that shouldn't appear
+# in narrative text. The substitutions are short natural-English noun
+# phrases verified post-substitution by the paraphrase scanner, so they
+# don't introduce new banned bucket phrases.
+#
+# Caught in review of the v4 25k build: 1018 / 25000 narratives (~4%)
+# contained at least one `<acct_id>` token. Scrubbing is applied at
+# write-time (in `_one()` after fence + before scan) AND at read-time
+# (in `_cache_get()`) so existing cache entries get cleaned the next
+# time they're read, with the cleaned form persisted back to disk.
+_PII_SUBSTITUTIONS: tuple[tuple[str, str], ...] = (
+    ("<acct_id>",   "the account"),
+    ("<email>",     "an email address"),
+    ("<phone>",     "a phone number"),
+    ("<device_id>", "a device"),
+    ("<ip>",        "a network address"),
+    ("<recipient>", "a recipient"),
+    ("<merchant>",  "a merchant"),
+    ("<browser>",   "a browser"),
+)
+_PII_PATTERN = re.compile("|".join(re.escape(p) for p, _ in _PII_SUBSTITUTIONS))
+_PII_SUB_MAP = dict(_PII_SUBSTITUTIONS)
+
+
+def scrub_pii_placeholders(text: str) -> tuple[str, int]:
+    """Replace bare PII placeholder tokens in narrative prose.
+
+    Returns ``(cleaned_text, n_replaced)``. Idempotent — running it
+    twice on the same text returns ``(text, 0)`` on the second pass.
+
+    Exposed at module-level (not underscore-private) so the
+    ``build_dataset --resplit`` CLI and any post-hoc cleanup script
+    can call it without reaching into internals.
+    """
+    n = 0
+    def _sub(match: re.Match[str]) -> str:
+        nonlocal n
+        n += 1
+        return _PII_SUB_MAP[match.group(0)]
+    return _PII_PATTERN.sub(_sub, text), n
+
+
 def _cache_get(cache_dir: Path, key: str) -> str | None:
     p = _cache_path(cache_dir, key)
-    if p.exists():
-        return p.read_text()
-    return None
+    if not p.exists():
+        return None
+    body = p.read_text()
+    # Retroactively scrub PII placeholders left behind by pre-scrubber
+    # cache entries. Idempotent on already-clean entries (n == 0 ->
+    # short-circuit, no disk write). When n > 0 we persist the cleaned
+    # form back to disk so subsequent reads are no-ops.
+    cleaned, n = scrub_pii_placeholders(body)
+    if n > 0:
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(cleaned)
+        tmp.rename(p)
+    return cleaned
 
 
 def _cache_put(cache_dir: Path, key: str, body: str) -> None:
@@ -719,6 +776,11 @@ def generate_narratives_concurrent(
                         f"also complete before the executor halts."
                     )
             body, _hits = fence(body)
+            # Scrub PII placeholders (e.g., <acct_id>) the LLM may have
+            # echoed from the fenced structured stream. Applied before
+            # the paraphrase scan so the scrubbed form is what gets
+            # validated and cached.
+            body, _n_pii = scrub_pii_placeholders(body)
             scan = narrative_leakage_scan(body)
             if scan["clean"]:
                 _cache_put(cache_dir, key, body)
@@ -726,12 +788,48 @@ def generate_narratives_concurrent(
             last_body = body
             prev_hits = scan["hits"]
 
-        raise RuntimeError(
-            f"narrative-leakage scan failed after {max_retries + 1} attempts "
-            f"for journey idx={idx} seed={journey.seed} "
-            f"family={journey.journey_family}. Hits: {prev_hits}. "
-            f"Last body: {last_body!r}"
+        # Retry exhaustion. v4 (post-first-crash): rather than raising
+        # and killing the entire build (which costs us all in-flight
+        # work for n_workers other futures), fall back to the cheap
+        # template generator. Templates are v4-paraphrase-compliant by
+        # construction (audited per-variant in
+        # cheap_template_generator._self_test). The fallback narrative
+        # is cached under the same key so subsequent runs replay from
+        # cache without re-attempting the LLM.
+        #
+        # The build_dataset summary reports the fallback count so the
+        # operator can sanity-check it's a small fraction (target <1%).
+        # If the rate is high, that signals a prompt/scanner mismatch
+        # that the retry feedback isn't escaping — investigate, but
+        # the build still finishes.
+        from data.gen.cheap_template_generator import generate_narrative as _cheap
+        fallback_body = _cheap(journey)
+        fallback_body, _fence_hits = fence(fallback_body)
+        # Apply the same scrubber for symmetry (templates shouldn't
+        # emit these tokens, but applying keeps the contract uniform).
+        fallback_body, _n_pii = scrub_pii_placeholders(fallback_body)
+        # Verify the fallback is itself v4-clean. If not, the templates
+        # have regressed (a separate bug) — surface it loud.
+        fb_scan = narrative_leakage_scan(fallback_body)
+        if not fb_scan["clean"]:
+            raise RuntimeError(
+                f"Cheap-template FALLBACK for idx={idx} "
+                f"family={journey.journey_family} ALSO failed leakage "
+                f"scan: {fb_scan['hits']}. This indicates a cheap "
+                f"template regression — fix data/gen/cheap_template_generator.py "
+                f"before retrying. Last LLM body: {last_body!r} hits: {prev_hits}"
+            )
+        # Cache the fallback so the next run replays from cache.
+        _cache_put(cache_dir, key, fallback_body)
+        # Log the fallback so the operator can audit the rate.
+        print(
+            f"[narrator] FALLBACK to cheap template at idx={idx} "
+            f"family={journey.journey_family}: LLM kept emitting "
+            f"banned phrase(s) {[h[0] for h in prev_hits]} after "
+            f"{max_retries + 1} attempts. Used cheap template instead.",
+            flush=True,
         )
+        return idx, fallback_body
 
     n_done = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -999,6 +1097,38 @@ def _self_test() -> None:
             f"cache replay should bill 0 calls, got {replay_tracker.n_calls}"
         assert replay_tracker.n_cache_hits == 32
         print("  concurrent batch path OK (32 journeys, 4 workers, cache replay clean)")
+
+        # PII placeholder scrubber — verify all 8 tokens substitute, the
+        # function is idempotent, and that a polluted cache entry gets
+        # retroactively cleaned on read with the cleaned form persisted.
+        raw = (
+            "The customer logged into <acct_id> from <device_id> at "
+            "<ip>, sent <email> to <recipient>, used <browser> to pay "
+            "<merchant>, then was contacted on <phone>."
+        )
+        cleaned, n = scrub_pii_placeholders(raw)
+        assert n == 8, f"expected 8 substitutions, got {n}"
+        for tok in ("<acct_id>", "<email>", "<phone>", "<device_id>",
+                    "<ip>", "<recipient>", "<merchant>", "<browser>"):
+            assert tok not in cleaned, f"token {tok} still present after scrub: {cleaned!r}"
+        # Idempotence
+        cleaned2, n2 = scrub_pii_placeholders(cleaned)
+        assert n2 == 0 and cleaned2 == cleaned, "scrubber should be idempotent"
+        # Retroactive cache clean: write a polluted body directly, then
+        # read via _cache_get; the read should return the cleaned form
+        # AND persist the cleaned form back to disk.
+        polluted_dir = Path(tdir) / "polluted"
+        polluted_key = "deadbeef" + "0" * 16
+        polluted_path = _cache_path(polluted_dir, polluted_key)
+        polluted_path.parent.mkdir(parents=True, exist_ok=True)
+        polluted_path.write_text("Sent funds from <acct_id> to <recipient>.")
+        out = _cache_get(polluted_dir, polluted_key)
+        assert out is not None and "<acct_id>" not in out and "<recipient>" not in out, \
+            f"cache_get failed to scrub: {out!r}"
+        on_disk_after = polluted_path.read_text()
+        assert on_disk_after == out, \
+            "cache_get should persist scrubbed form back to disk"
+        print("  PII placeholder scrubber OK (8 tokens, idempotent, retroactive cache clean)")
 
     print("narrative_generator self-test OK (using stub narrator)")
     print(f"  tracker summary: {tracker.summary()}")

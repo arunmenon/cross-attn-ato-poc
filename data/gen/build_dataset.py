@@ -631,6 +631,267 @@ def assign_disjoint_splits(
     return train_idx, eval_idx, stats
 
 
+class _UnionFind:
+    """Small disjoint-set-union with path compression and rank merge."""
+
+    def __init__(self, n: int) -> None:
+        self._parent = list(range(n))
+        self._rank = [0] * n
+
+    def find(self, x: int) -> int:
+        while self._parent[x] != x:
+            self._parent[x] = self._parent[self._parent[x]]
+            x = self._parent[x]
+        return x
+
+    def union(self, a: int, b: int) -> None:
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return
+        if self._rank[ra] < self._rank[rb]:
+            ra, rb = rb, ra
+        self._parent[rb] = ra
+        if self._rank[ra] == self._rank[rb]:
+            self._rank[ra] += 1
+
+
+def resplit_records_disjoint(
+    records: list[dict],
+    eval_frac: float,
+    seed: int = 12345,
+) -> tuple[list[dict], list[dict], dict]:
+    """Post-narration disjoint train/eval split by (events_hash UNION text_hash).
+
+    Stricter complement to `assign_disjoint_splits` (which runs PRE-narration
+    and so can only group by events_hash). This function operates on
+    already-narrated records and union-finds groups by *both* axes:
+
+      - Rows with identical structured events → same group (Gate A axis).
+      - Rows with identical narrative text → same group (Gate B axis).
+        Catches narrator-collapse cases where different event skeletons
+        produced the same final narrative (e.g., the cheap-template
+        fallback emitted the same body for two near-identical journeys).
+
+    Groups are then stratified by (journey_family, label) and allocated
+    to train/eval until each stratum's row-count target is met. Disjointness
+    is asserted on both axes before return.
+
+    Used by the `--resplit` CLI to rescue pre-existing data.jsonl files
+    whose split was made without one of the gates (e.g., the v4 25k
+    initial build that used --eval-frac 0.0 and was naively re-split
+    later by family/label only).
+
+    Args:
+        records: rows with ``text``, ``structured_events``, ``journey_family``,
+                 ``label`` keys.
+        eval_frac: target fraction of rows that should land in eval.
+        seed: RNG seed for the per-stratum group shuffle. Deterministic
+              given the same input rows.
+
+    Returns:
+        ``(train_records, eval_records, stats)``. Both row lists are
+        shuffled in place using `seed`. `stats` reports per-stratum counts,
+        achieved eval fraction, and disjointness verification.
+    """
+    if not 0.0 <= eval_frac <= 1.0:
+        raise ValueError(f"eval_frac must be in [0,1], got {eval_frac}")
+
+    n = len(records)
+    if n == 0:
+        return [], [], {"n_total": 0, "n_train": 0, "n_eval": 0,
+                        "n_groups": 0, "n_overlap_events": 0,
+                        "n_overlap_text": 0}
+
+    uf = _UnionFind(n)
+    events_to_first: dict[str, int] = {}
+    text_to_first: dict[str, int] = {}
+    for i, r in enumerate(records):
+        eh = _events_hash(r["structured_events"])
+        th = _text_hash(r["text"])
+        if eh in events_to_first:
+            uf.union(events_to_first[eh], i)
+        else:
+            events_to_first[eh] = i
+        if th in text_to_first:
+            uf.union(text_to_first[th], i)
+        else:
+            text_to_first[th] = i
+
+    groups: dict[int, list[int]] = {}
+    for i in range(n):
+        groups.setdefault(uf.find(i), []).append(i)
+
+    # Each group should share (family, label). Mixed-stratum groups would
+    # indicate a same-text row landed in two different labels — possible
+    # if the generator is poorly seeded but should be loud-failed rather
+    # than silently allocated to one side.
+    groups_by_stratum: dict[tuple[str, str], list[list[int]]] = {}
+    for g_indices in groups.values():
+        fams = {records[i]["journey_family"] for i in g_indices}
+        labels = {records[i]["label"] for i in g_indices}
+        if len(fams) > 1 or len(labels) > 1:
+            raise AssertionError(
+                f"resplit found a hash-collision group spanning multiple "
+                f"(family, label) strata — generator labeling is "
+                f"inconsistent. fams={fams}, labels={labels}, "
+                f"indices={g_indices[:5]}"
+            )
+        key = (next(iter(fams)), next(iter(labels)))
+        groups_by_stratum.setdefault(key, []).append(g_indices)
+
+    rng = random.Random(seed)
+    train_idx: list[int] = []
+    eval_idx: list[int] = []
+    per_stratum: dict[str, dict] = {}
+    for stratum, group_list in sorted(groups_by_stratum.items()):
+        rng.shuffle(group_list)
+        stratum_rows = sum(len(g) for g in group_list)
+        target_eval_rows = int(round(stratum_rows * eval_frac))
+        e_so_far = 0
+        split_at = len(group_list)  # default: all train
+        for i, g in enumerate(group_list):
+            if e_so_far >= target_eval_rows:
+                split_at = i
+                break
+            e_so_far += len(g)
+            split_at = i + 1
+        eval_groups = group_list[:split_at]
+        train_groups = group_list[split_at:]
+        for g in train_groups:
+            train_idx.extend(g)
+        for g in eval_groups:
+            eval_idx.extend(g)
+        per_stratum["|".join(stratum)] = {
+            "n_train": sum(len(g) for g in train_groups),
+            "n_eval":  sum(len(g) for g in eval_groups),
+            "n_groups": len(group_list),
+        }
+
+    rng.shuffle(train_idx)
+    rng.shuffle(eval_idx)
+    train_records = [records[i] for i in train_idx]
+    eval_records = [records[i] for i in eval_idx]
+
+    # Defense-in-depth — the union-find guarantees disjointness on both
+    # axes by construction, so a non-zero here is a bug, not a data issue.
+    train_e = {_events_hash(r["structured_events"]) for r in train_records}
+    eval_e = {_events_hash(r["structured_events"]) for r in eval_records}
+    train_t = {_text_hash(r["text"]) for r in train_records}
+    eval_t = {_text_hash(r["text"]) for r in eval_records}
+    n_e_overlap = len(train_e & eval_e)
+    n_t_overlap = len(train_t & eval_t)
+    assert n_e_overlap == 0, f"resplit BUG: events_hash overlap = {n_e_overlap}"
+    assert n_t_overlap == 0, f"resplit BUG: text_hash overlap = {n_t_overlap}"
+
+    stats = {
+        "n_total": n,
+        "n_train": len(train_records),
+        "n_eval": len(eval_records),
+        "n_groups": len(groups),
+        "actual_eval_frac": (len(eval_records) / n) if n > 0 else 0.0,
+        "n_overlap_events": 0,
+        "n_overlap_text": 0,
+        "per_stratum": per_stratum,
+    }
+    return train_records, eval_records, stats
+
+
+def scrub_records_pii(records: list[dict]) -> dict:
+    """Apply the narrator's PII placeholder scrubber to ``narrative`` and
+    recompose ``text`` from canonical fields for any row that changed.
+
+    Returns aggregate stats: ``n_rows_scrubbed``, ``n_tokens_scrubbed``.
+
+    The scrubber is idempotent — calling this on an already-clean dataset
+    is a no-op and reports zeros.
+    """
+    from data.gen.narrative_generator import scrub_pii_placeholders
+
+    n_rows = 0
+    n_tokens = 0
+    for r in records:
+        narrative = r.get("narrative", "")
+        if not narrative:
+            continue
+        cleaned, n = scrub_pii_placeholders(narrative)
+        if n == 0:
+            continue
+        r["narrative"] = cleaned
+        # Recompose the canonical text field if the record carries one.
+        # `text` is the field every trainer actually reads; if we scrubbed
+        # the narrative but left `text` stale, the scrubber would be a
+        # no-op from the model's perspective. compose_text_only is the
+        # canonical form (review 020 + 021 v4 contract).
+        if "text" in r:
+            r["text"] = compose_text_only(r)
+        n_rows += 1
+        n_tokens += n
+    return {"n_rows_scrubbed": n_rows, "n_tokens_scrubbed": n_tokens}
+
+
+def resplit_dataset_file(
+    src_path: Path,
+    out_dir: Path,
+    *,
+    eval_frac: float = 0.20,
+    seed: int = 12345,
+    scrub_pii: bool = True,
+) -> dict:
+    """End-to-end resplit of an existing JSONL dataset.
+
+    Reads records from ``src_path``; optionally scrubs PII placeholders;
+    re-splits via :func:`resplit_records_disjoint`; writes
+    ``out_dir/data.jsonl`` (post-scrub canonical), ``train.jsonl``, and
+    ``eval.jsonl``. Returns a summary dict.
+    """
+    src_path = Path(src_path)
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    records: list[dict] = []
+    with src_path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            records.append(json.loads(line))
+
+    scrub_stats = {"n_rows_scrubbed": 0, "n_tokens_scrubbed": 0}
+    if scrub_pii:
+        scrub_stats = scrub_records_pii(records)
+
+    train_records, eval_records, split_stats = resplit_records_disjoint(
+        records, eval_frac=eval_frac, seed=seed,
+    )
+
+    data_path = out_dir / "data.jsonl"
+    train_path = out_dir / "train.jsonl"
+    eval_path = out_dir / "eval.jsonl"
+    with data_path.open("w") as f:
+        for r in records:
+            f.write(json.dumps(r) + "\n")
+    with train_path.open("w") as f:
+        for r in train_records:
+            f.write(json.dumps(r) + "\n")
+    with eval_path.open("w") as f:
+        for r in eval_records:
+            f.write(json.dumps(r) + "\n")
+
+    return {
+        "src": str(src_path),
+        "out_dir": str(out_dir),
+        "n_input": len(records),
+        "scrub_pii_applied": scrub_pii,
+        "scrub": scrub_stats,
+        "split": split_stats,
+        "files": {
+            "data": str(data_path),
+            "train": str(train_path),
+            "eval": str(eval_path),
+        },
+    }
+
+
 def assert_no_text_overlap(train_records: list[dict], eval_records: list[dict]) -> dict:
     """Gate B: post-narration text-hash CROSS-SPLIT dedup invariant.
 
@@ -875,10 +1136,157 @@ def _write_jsonl(path: Path, records: list[dict]) -> None:
 # CLI
 # ---------------------------------------------------------------------------
 
+def _self_test() -> None:
+    """Self-tests for the post-narration resplit + PII scrubber helpers.
+
+    Does NOT exercise the full build loop (which needs journey + narrator
+    machinery and is covered by a separate smoke build). Focuses on the
+    two utilities added in v4 Phase-1.5:
+
+      - scrub_records_pii: PII placeholder removal on dicts; recomposes
+        `text` field; idempotent.
+      - resplit_records_disjoint + resplit_dataset_file: union-find on
+        (events_hash, text_hash); hash-disjoint output on both axes;
+        respects (family, label) stratification; honors eval_frac.
+    """
+    import tempfile
+
+    # ---- Scrubber on dicts ----
+    base_events = [{"t": 0, "event": "login"}, {"t": 5, "event": "txn"}]
+    recs = [
+        {
+            "narrative": "Sent funds from <acct_id> to <recipient>.",
+            "structured_events": base_events,
+            "label": "fraud",
+            "journey_family": "phish_takeover",
+            "text": "",
+        },
+        {
+            "narrative": "Routine activity, nothing of note.",
+            "structured_events": [{"t": 0, "event": "login"}],
+            "label": "legit",
+            "journey_family": "clean",
+            "text": "",
+        },
+    ]
+    # Pre-populate `text` so we can verify it gets recomposed.
+    for r in recs:
+        r["text"] = compose_text_only(r)
+    orig_text_clean = recs[1]["text"]
+
+    stats = scrub_records_pii(recs)
+    assert stats["n_rows_scrubbed"] == 1, stats
+    assert stats["n_tokens_scrubbed"] == 2, stats
+    assert "<acct_id>" not in recs[0]["narrative"]
+    assert "<recipient>" not in recs[0]["narrative"]
+    # Recomposed text must reflect the scrubbed narrative.
+    assert recs[0]["text"] == compose_text_only(recs[0])
+    # Unchanged row's text must NOT be rewritten.
+    assert recs[1]["text"] == orig_text_clean
+    # Idempotence
+    stats2 = scrub_records_pii(recs)
+    assert stats2 == {"n_rows_scrubbed": 0, "n_tokens_scrubbed": 0}
+    print("  scrub_records_pii OK (substitutes, recomposes text, idempotent)")
+
+    # ---- Resplit: hash-disjoint on both axes ----
+    # Build a small dataset with deliberate collisions:
+    #   - rows 0,1 share events_hash (same structured_events) - one group
+    #   - rows 2,3 share text_hash (same narrative)             - one group
+    #   - rows 4..9 are all unique                              - six singletons
+    # Family/label distribution: 6 fraud (phish_takeover), 4 legit (clean).
+    events_A = [{"t": 0, "event": "login"}, {"t": 5, "event": "txn", "amount_bucket": "high"}]
+    events_B = [{"t": 0, "event": "login"}, {"t": 7, "event": "device_add"}]
+    events_unique = lambda k: [{"t": k, "event": "login"}, {"t": k + 1, "event": "txn"}]
+    records: list[dict] = []
+    # Group 1: same events_hash, different narratives, fraud
+    for i in range(2):
+        records.append({
+            "narrative": f"Variant narrative {i} of group A.",
+            "structured_events": events_A,
+            "label": "fraud",
+            "journey_family": "phish_takeover",
+        })
+    # Group 2: different events, same narrative, fraud
+    for i in range(2):
+        records.append({
+            "narrative": "Identical narrative-collapse case.",
+            "structured_events": events_B if i == 0 else events_unique(100 + i),
+            "label": "fraud",
+            "journey_family": "phish_takeover",
+        })
+    # Singletons: 2 more fraud, 4 legit
+    for i in range(2):
+        records.append({
+            "narrative": f"Fraud singleton {i}.",
+            "structured_events": events_unique(200 + i),
+            "label": "fraud",
+            "journey_family": "phish_takeover",
+        })
+    for i in range(4):
+        records.append({
+            "narrative": f"Legit singleton {i}.",
+            "structured_events": events_unique(300 + i),
+            "label": "legit",
+            "journey_family": "clean",
+        })
+    for r in records:
+        r["text"] = compose_text_only(r)
+    assert len(records) == 10
+
+    train, ev, stats = resplit_records_disjoint(records, eval_frac=0.30, seed=7)
+    # Disjointness asserted internally; just sanity-check totals + stats.
+    assert len(train) + len(ev) == len(records)
+    assert stats["n_overlap_events"] == 0
+    assert stats["n_overlap_text"] == 0
+    # We had 8 distinct hash-groups: 2 multi-row groups + 6 singletons.
+    assert stats["n_groups"] == 8, f"expected 8 groups, got {stats['n_groups']}"
+    # Stratification: legit groups can't bleed into the fraud quota.
+    train_labels = {r["label"] for r in train}
+    eval_labels = {r["label"] for r in ev}
+    assert train_labels <= {"fraud", "legit"}
+    assert eval_labels <= {"fraud", "legit"}
+    # Determinism: same seed → same split.
+    train2, ev2, _ = resplit_records_disjoint(records, eval_frac=0.30, seed=7)
+    # Compare on a stable key — text is unique per row in this fixture.
+    assert [r["text"] for r in train] == [r["text"] for r in train2]
+    assert [r["text"] for r in ev] == [r["text"] for r in ev2]
+    print("  resplit_records_disjoint OK (8 groups, 0/0 overlap, deterministic)")
+
+    # ---- End-to-end resplit_dataset_file ----
+    with tempfile.TemporaryDirectory() as tdir:
+        src = Path(tdir) / "src.jsonl"
+        # Re-write records WITH a PII token in one narrative so the
+        # end-to-end path exercises both the scrubber and the resplit.
+        records[0]["narrative"] = "Sent funds from <acct_id> to a contact."
+        records[0]["text"] = compose_text_only(records[0])
+        with src.open("w") as f:
+            for r in records:
+                f.write(json.dumps(r) + "\n")
+
+        out_dir = Path(tdir) / "out"
+        summary = resplit_dataset_file(src, out_dir, eval_frac=0.30, seed=7)
+        assert summary["scrub_pii_applied"] is True
+        assert summary["scrub"]["n_rows_scrubbed"] == 1
+        assert summary["scrub"]["n_tokens_scrubbed"] == 1
+        assert summary["split"]["n_overlap_events"] == 0
+        assert summary["split"]["n_overlap_text"] == 0
+        # Output files exist and round-trip.
+        out_data = [json.loads(L) for L in (out_dir / "data.jsonl").open() if L.strip()]
+        out_train = [json.loads(L) for L in (out_dir / "train.jsonl").open() if L.strip()]
+        out_eval = [json.loads(L) for L in (out_dir / "eval.jsonl").open() if L.strip()]
+        assert len(out_data) == len(records)
+        assert len(out_train) + len(out_eval) == len(records)
+        for r in out_data:
+            assert "<acct_id>" not in r["narrative"]
+        print("  resplit_dataset_file OK (PII scrubbed, files written, no overlap)")
+
+    print("build_dataset self-test OK")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--n", type=int, required=True, help="number of journeys to generate")
-    parser.add_argument("--out", type=Path, required=True, help="output directory")
+    parser.add_argument("--n", type=int, default=None, help="number of journeys to generate (required for build mode)")
+    parser.add_argument("--out", type=Path, default=None, help="output directory (required for build/resplit modes)")
     parser.add_argument("--mode", choices=("llm", "template"), default="template",
                         help="narrative source: 'llm' (OpenAI/Anthropic API) or 'template' (no LLM)")
     parser.add_argument("--seed", type=int, default=0)
@@ -928,7 +1336,62 @@ def main() -> int:
              "split. Ablation use only — reintroduces the leakage Codex "
              "documented in review 018.",
     )
+    # ----- Resplit mode -----
+    parser.add_argument(
+        "--resplit",
+        action="store_true",
+        help="Re-split an existing data.jsonl (post-narration) using "
+             "union-find on (events_hash, text_hash) instead of generating "
+             "new data. Requires --in. --n is ignored.",
+    )
+    parser.add_argument(
+        "--in", "--input",
+        dest="input_path",
+        type=Path,
+        default=None,
+        help="Source data.jsonl for --resplit mode.",
+    )
+    parser.add_argument(
+        "--scrub-pii",
+        dest="scrub_pii",
+        action="store_true",
+        default=True,
+        help="Apply the narrator PII placeholder scrubber to "
+             "narratives during --resplit (default on).",
+    )
+    parser.add_argument(
+        "--no-scrub-pii",
+        dest="scrub_pii",
+        action="store_false",
+        help="Disable PII placeholder scrubbing during --resplit.",
+    )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run self-tests for the resplit + scrubber helpers and exit.",
+    )
     args = parser.parse_args()
+
+    if args.self_test:
+        _self_test()
+        return 0
+
+    if args.resplit:
+        if args.input_path is None or args.out is None:
+            parser.error("--resplit requires --in <data.jsonl> and --out <dir>")
+        if args.eval_frac <= 0.0:
+            parser.error(f"--resplit requires --eval-frac > 0 (got {args.eval_frac})")
+        summary = resplit_dataset_file(
+            args.input_path, args.out,
+            eval_frac=args.eval_frac, seed=args.seed,
+            scrub_pii=args.scrub_pii,
+        )
+        print(json.dumps(summary, indent=2))
+        return 0
+
+    # Build mode (the default — preserves the existing CLI contract).
+    if args.n is None or args.out is None:
+        parser.error("build mode requires --n and --out (or pass --resplit / --self-test)")
 
     if args.llm_provider is not None:
         import os
