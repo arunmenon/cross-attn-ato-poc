@@ -1,0 +1,75 @@
+# Stage-0 CPT-light, v4 data.
+#
+# First training run of the v4 data-pivot experiment. Trains a fresh
+# CPT-light LoRA from raw Qwen3-8B on the v4 25k LLM-narrated set
+# (post-resplit, post-scrub, hash-disjoint train/eval). The merged
+# output is the shared base for both `text_only_v4` and `xattn_v4`.
+#
+# Hyperparameters intentionally MIRROR exp_stage0_001 (v3) so the
+# variable being tested is the v4 data/prompt design, not a new
+# training recipe. Any deviation here would confound the v4 result
+# with a training-config change.
+#
+# Pre-launch gates (verified on the pod 2026-05-19):
+#   - train.jsonl: 20,000 rows
+#   - eval.jsonl:   5,000 rows
+#   - cross-split text overlap:    0
+#   - cross-split events overlap:  0
+#   - <acct_id> mentions:          0
+#   - event tokens in text:        0
+#
+# Output:
+#   - stage0_lora_adapter/ (consumed by scripts/merge_stage0_lora.py)
+#   - then: /workspace/checkpoints/qwen3-8b-cpt-light-v4-merged/
+#     (this is the shared starting checkpoint for Stage-1 v4 arms)
+
+exp_id: exp_stage0_v4_001
+arm: cpt_light
+
+training:
+  # Explicitly raw Qwen3-8B. Carrying the v3 merged checkpoint forward
+  # would leak v3's narrator vocabulary into the v4 LM and contaminate
+  # the experiment.
+  base_checkpoint: Qwen/Qwen3-8B
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8                           # effective batch = 32
+  lr: 5.0e-5                              # CPT-light default (PLAN.md)
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+  # seed defaults to 0 in train_cpt_light.py; omitted here so the
+  # config passes the launcher schema even though Stage-0 launches
+  # via `accelerate launch` directly (not through run_next_experiment).
+
+data:
+  # The v4 resplit output dir contains train.jsonl + eval.jsonl + a
+  # combined data.jsonl. load_paired_dataset picks up the splits
+  # automatically; we point eval at the same dir so the carved 5k
+  # eval split is what the 3-mode eval sees.
+  train_path: /workspace/data/train_llm_narrated_v4
+  eval_fast_path: /workspace/data/train_llm_narrated_v4
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  Stage-0 CPT-light v4 retrain. Mirrors exp_stage0_001's hyperparameter
+  recipe so the only variable across v3 -> v4 is the data + prompt
+  contract. Produces qwen3-8b-cpt-light-v4-merged as the shared base
+  for text_only_v4 and xattn_v4. Stage-0's own metrics are not the
+  load-bearing comparison — they're a sanity check that Stage-0
+  converges on v4 data. Slight degradation vs v3 cpt_light is expected
+  and welcome: it confirms Change 1 stripped the narrator's bucket
+  vocabulary from the LM's view.

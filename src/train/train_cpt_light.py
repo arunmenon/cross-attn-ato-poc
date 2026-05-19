@@ -48,6 +48,25 @@ def main():
     train_cfg = cfg["training"]
     data_cfg = cfg["data"]
 
+    # v4 startup gate fires BEFORE model load. Stage-0 reads the same
+    # `text` field as train_text_only / train_xattn; a stale v3-format
+    # dataset would silently train the shared base on the wrong prompt
+    # contract and contaminate every downstream Stage-1 run. Doing this
+    # before the 8B base loads into VRAM means a misconfigured launch
+    # hard-fails in seconds (jsonl read + 32 string compares) rather
+    # than ~30-60s into model materialization. strict=True is the v4
+    # default; legacy v3 reruns must use a pre-Phase-1 checkout.
+    from data.gen.build_dataset import verify_v4_text_contract
+    splits = load_paired_dataset(data_cfg["train_path"])
+    train_ds = splits["train"]
+    eval_ds_path = data_cfg.get("eval_fast_path")
+    if eval_ds_path:
+        eval_splits = load_paired_dataset(eval_ds_path)
+        eval_ds = eval_splits.get("eval") or eval_splits["train"]
+    else:
+        eval_ds = splits.get("eval") or train_ds
+    verify_v4_text_contract(train_ds, sample_n=32, arm_name="cpt_light", strict=True)
+
     import torch
     from accelerate import Accelerator
     from peft import LoraConfig, get_peft_model
@@ -110,15 +129,6 @@ def main():
         max_length=train_cfg.get("seq_len", 2048),
         seed=cfg.get("training", {}).get("seed", 0),
     )
-
-    splits = load_paired_dataset(data_cfg["train_path"])
-    train_ds = splits["train"]
-    eval_ds_path = data_cfg.get("eval_fast_path")
-    if eval_ds_path:
-        eval_splits = load_paired_dataset(eval_ds_path)
-        eval_ds = eval_splits.get("eval") or eval_splits["train"]
-    else:
-        eval_ds = splits.get("eval") or train_ds
 
     batch_size = train_cfg.get("micro_batch", 4)
     train_loader = DataLoader(
