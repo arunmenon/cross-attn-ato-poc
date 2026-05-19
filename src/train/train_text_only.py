@@ -66,8 +66,15 @@ def main():
     accelerator = Accelerator(mixed_precision=train_cfg.get("precision", "bf16"))
     device = accelerator.device
 
-    # Base model + tokenizer
-    model_id = train_cfg.get("base_checkpoint", "Qwen/Qwen3-8B")
+    # Base model + tokenizer.
+    # v4: default to the shared CPT-light merged base — same starting
+    # point as train_structured_as_text.py and train_xattn.py. This
+    # is what makes text_only_v4 / structured_as_text_v4 / xattn_v4
+    # apples-to-apples. (Per-config `base_checkpoint` override still
+    # honored; defaults to the v4 path.)
+    model_id = train_cfg.get(
+        "base_checkpoint", "/workspace/checkpoints/qwen3-8b-cpt-light-merged",
+    )
     tokenizer, n_new = prepare_tokenizer(model_id)
     model = AutoModelForCausalLM.from_pretrained(
         model_id, torch_dtype=torch.bfloat16, trust_remote_code=True,
@@ -109,6 +116,12 @@ def main():
         eval_ds = eval_splits.get("eval") or eval_splits["train"]
     else:
         eval_ds = splits.get("eval") or train_ds
+
+    # v4 startup smoke: confirm dataset rows match compose_text_only(row).
+    # train_text_only and train_xattn both call this against the SAME
+    # dataset, so if both pass, they're seeing byte-identical text.
+    from data.gen.build_dataset import verify_v4_text_contract
+    verify_v4_text_contract(train_ds, sample_n=3, arm_name="text_only")
 
     batch_size = train_cfg.get("micro_batch", 4)
     train_loader = DataLoader(

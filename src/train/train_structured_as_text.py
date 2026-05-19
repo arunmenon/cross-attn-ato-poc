@@ -51,18 +51,15 @@ from src.train.train_cpt_light import CPT_LIGHT_LORA_TARGETS
 def _serialize_events_compact(events) -> str:
     """One-line-per-event serialization wrapped in <events>...</events>.
 
-    Imports `event_to_line` directly from `data/gen/build_dataset.py` so
-    the per-event format is byte-identical to the corpus's event lines.
-    This was a real bug (review 007 finding #5): an earlier
-    hand-written version diverged from `_event_to_line` and produced
-    `t=7 event=txn actor=<actor_human> high low` while the corpus
-    produces `<event_txn>t=7 high low`.
+    LEGACY v3 path. Kept for backward compatibility with v3 datasets
+    that lack the canonical `narrative` + `label` fields. v4 datasets
+    use `compose_structured_as_text(record)` from build_dataset.py
+    instead — see `_structured_as_text_collator_factory` below for
+    the dispatch logic.
 
-    The `<events>` wrapper IS specific to this baseline (PLAN.md
-    Baselines §3 example) — the corpus does not wrap events in
-    `<events>`. So the baseline is "the corpus's per-event lines
-    + an `<events>` wrapper, prepended to the rest of the corpus
-    text". Documented as an intentional baseline variant.
+    Imports `event_to_line` directly from `data/gen/build_dataset.py` so
+    the per-event format is byte-identical to the corpus's event lines
+    (review 007 finding #5).
     """
     from data.gen.build_dataset import event_to_line
     lines = [event_to_line(ev) for ev in events]
@@ -70,21 +67,54 @@ def _serialize_events_compact(events) -> str:
 
 
 def _structured_as_text_collator_factory(eval_mode_collator, max_events: int = 200):
-    """Wraps EvalModeDropoutCollator to prepend the compact event
-    serialization to each example's text BEFORE the eval-mode dropout
-    transform is applied.
+    """Compose each row's text via the structured-as-text recipe BEFORE
+    the eval-mode dropout transform is applied.
+
+    Two code paths:
+
+    1. **v4** (canonical-form data — has `narrative` + `label` fields):
+       call `compose_structured_as_text(row)` from build_dataset.py,
+       which produces:
+            <case>
+            <events>...</events>
+            <narrative>...</narrative>
+            <risk_verdict>label: {fraud|legit}</risk_verdict>
+            </case>
+       This is the single source of truth for the v4 structured_as_text
+       prompt; xattn's text branch reads `compose_text_only(row)`
+       against the same row, differing only by the absence of the
+       `<events>` block. That's the architectural comparison.
+
+    2. **v3** (legacy data — `text` is the v3 monolithic format):
+       prepend `_serialize_events_compact(events)` to the existing
+       `text` field. Same behavior as the original v3 trainer; kept
+       so we can re-run the v3 baseline if needed for direct
+       comparison.
+
+    The dispatch is per-row, so a mixed dataset (rare) won't break —
+    each row uses the right path based on whether it has canonical
+    fields.
     """
     def _collator(batch):
-        # Mutate the text field in-place per example.
-        # Review 011 finding #1: structured_events is a JSON string
-        # after load_paired_dataset; parse before slicing.
         from src.train.common import parse_structured_events
+        from data.gen.build_dataset import compose_structured_as_text
+
         new_batch = []
         for ex in batch:
-            events = parse_structured_events(ex)[:max_events]
-            preamble = _serialize_events_compact(events) + "\n"
             new_ex = dict(ex)
-            new_ex["text"] = preamble + ex["text"]
+            events = parse_structured_events(new_ex)[:max_events]
+            # Stash the parsed events back so compose_structured_as_text
+            # sees the truncated list (v3 path expects events as a list,
+            # v4's compose_structured_as_text reads new_ex["structured_events"]).
+            new_ex["structured_events"] = events
+            if "narrative" in new_ex and "label" in new_ex:
+                # v4 path: single source of truth for the prompt format.
+                new_ex["text"] = compose_structured_as_text(new_ex)
+            else:
+                # v3 fallback: prepend events block to existing v3 text.
+                new_ex["text"] = (
+                    _serialize_events_compact(events) + "\n" + new_ex["text"]
+                )
             new_batch.append(new_ex)
         return eval_mode_collator(new_batch)
     return _collator

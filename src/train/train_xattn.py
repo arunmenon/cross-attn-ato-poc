@@ -159,6 +159,15 @@ def main():
     else:
         eval_ds = splits.get("eval") or train_ds
 
+    # v4 startup smoke: confirm dataset rows match compose_text_only(row).
+    # This is the LM-text branch of the cross-attn arm; the side-stream
+    # encoder consumes `structured_events` separately. If this check
+    # passes here AND in train_text_only.py against the same dataset,
+    # the two arms are guaranteed to see byte-identical LM text — which
+    # is what makes the v4 architectural comparison interpretable.
+    from data.gen.build_dataset import verify_v4_text_contract
+    verify_v4_text_contract(train_ds, sample_n=3, arm_name="xattn")
+
     batch_size = train_cfg.get("micro_batch", 4)
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True, collate_fn=paired_collator,
