@@ -486,20 +486,56 @@ def _real_openai_call(
             )
         temperature = base_temperature if attempt == 0 else max(0.7, base_temperature + 0.4)
 
-        # gpt-5.4 family uses `max_completion_tokens`, not the legacy
+        # gpt-5 family uses `max_completion_tokens`, not the legacy
         # `max_tokens` param (same naming shift OpenAI made for o-series
         # reasoning models — the older keyword returns HTTP 400 with
-        # 'Unsupported parameter'). Caught by the first live API gate
-        # after the OpenAI switch.
-        resp = client.chat.completions.create(
-            model=model,
-            max_completion_tokens=max_tokens,
-            temperature=temperature,
-            messages=[
+        # 'Unsupported parameter').
+        #
+        # Reasoning models (gpt-5*, o1*, o3*, o4*) have THREE additional
+        # quirks vs older Chat Completions:
+        #
+        #   1. They reject custom temperature with HTTP 400 ('Only the
+        #      default (1) value is supported'). Omit temperature; rely
+        #      on prompt diversification (banned-phrase feedback in the
+        #      system prompt) for retry variety.
+        #
+        #   2. `max_completion_tokens` covers BOTH reasoning tokens AND
+        #      visible output tokens. With max_completion_tokens=300
+        #      and the model's default reasoning budget, all 300 tokens
+        #      can be consumed internally with 0 left for visible
+        #      output — narratives come back as empty strings and the
+        #      paraphrase scanner passes them trivially because there's
+        #      nothing to flag. Bump to 2000 for reasoning models so
+        #      narratives actually fit.
+        #
+        #   3. `reasoning_effort` (minimal / low / medium / high) controls
+        #      how aggressively the model reasons. The v4 narrator task
+        #      is qualitative paraphrasing of a short event sequence —
+        #      "minimal" produces clean output with reasoning_tokens=0
+        #      at ~42 visible-token cost. "low" or higher wastes budget
+        #      on unnecessary internal deliberation for this task.
+        is_reasoning_model = (
+            model.startswith("gpt-5")
+            or model.startswith("o1")
+            or model.startswith("o3")
+            or model.startswith("o4")
+        )
+        kwargs = {
+            "model": model,
+            "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_msg},
             ],
-        )
+        }
+        if is_reasoning_model:
+            # See block comment above for why these defaults differ.
+            kwargs["max_completion_tokens"] = max(max_tokens, 2000)
+            kwargs["reasoning_effort"] = "minimal"
+        else:
+            kwargs["max_completion_tokens"] = max_tokens
+            kwargs["temperature"] = temperature
+
+        resp = client.chat.completions.create(**kwargs)
         body = resp.choices[0].message.content if resp.choices else ""
         # Token counts — OpenAI reports prompt_tokens / completion_tokens.
         # Cached-token sub-count (when present) is consumed by
