@@ -1,0 +1,16 @@
+{
+  "status": "ok",
+  "arm": "xattn",
+  "final_train_loss": 0.4617833383381367,
+  "n_steps": 1500,
+  "wall_clock_sec": 2414.380347967148,
+  "n_trainable": 113604614,
+  "predictions": {
+    "stripped": 5002,
+    "opaque": 5002,
+    "full": 5002
+  },
+  "max_gate_magnitude": 0.0220947265625,
+  "estimated_trainable_total": 113639430,
+  "actual_trainable_total": 113604614
+}

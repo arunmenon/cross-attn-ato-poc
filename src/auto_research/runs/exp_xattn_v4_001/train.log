@@ -1,0 +1,25 @@
+The tokenizer you are loading from '/workspace/checkpoints/qwen3-8b-cpt-light-v4-merged' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:00<00:00, 29.62it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:00<00:00, 36.45it/s]
+/workspace/.venv/lib/python3.11/site-packages/torch/nn/modules/transformer.py:307: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  warnings.warn(f"enable_nested_tensor is True, but self.use_nested_tensor is False because {why_not_sparsity_fast_path}")
+trainable params (actual)   : 113,604,614
+trainable params (estimated): 113,639,430
+[xattn] v4 contract check: PASS (33 sample rows match compose_text_only, spread across indices 0..19997 of 19998 total)
+step     0 loss 0.5490  max_gate 0.0100
+step   100 loss 0.4942  max_gate 0.0100
+step   200 loss 0.5326  max_gate 0.0135
+step   300 loss 0.5309  max_gate 0.0206
+step   400 loss 0.4538  max_gate 0.0214
+step   500 loss 0.4841  max_gate 0.0211
+step   600 loss 0.4924  max_gate 0.0215
+step   700 loss 0.5067  max_gate 0.0219
+step   800 loss 0.4693  max_gate 0.0220
+step   900 loss 0.5531  max_gate 0.0219
+step  1000 loss 0.4584  max_gate 0.0219
+step  1100 loss 0.5285  max_gate 0.0219
+step  1200 loss 0.4452  max_gate 0.0219
+step  1300 loss 0.4730  max_gate 0.0219
+step  1400 loss 0.4994  max_gate 0.0219
+wrote src/auto_research/runs/exp_xattn_v4_001/metrics.json + xattn_state.pt + gate_trajectory.json
+max gate magnitude across training: 0.0221

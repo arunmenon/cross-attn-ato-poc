@@ -1,0 +1,27 @@
+[cpt_light] v4 contract check: PASS (33 sample rows match compose_text_only, spread across indices 0..19997 of 19998 total)
+`torch_dtype` is deprecated! Use `dtype` instead!
+Fetching 5 files:   0%|          | 0/5 [00:00<?, ?it/s]Fetching 5 files:  20%|██        | 1/5 [00:35<02:23, 35.96s/it]Fetching 5 files: 100%|██████████| 5/5 [00:35<00:00,  7.19s/it]
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards:  80%|████████  | 4/5 [00:00<00:00, 38.41it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:00<00:00, 47.30it/s]
+cpt_light: trainable params = 665,149,440
+train: 19998 examples; eval: 5002 examples
+total_steps=1500 lr=5e-05
+LoRA targets: ['q_proj', 'k_proj', 'v_proj', 'o_proj', 'gate_proj', 'up_proj', 'down_proj']
+step     0 loss 3.2424
+step   100 loss 2.2989
+step   200 loss 0.9065
+step   300 loss 0.7881
+step   400 loss 0.6141
+step   500 loss 0.5689
+step   600 loss 0.6204
+step   700 loss 0.5734
+step   800 loss 0.5690
+step   900 loss 0.6161
+step  1000 loss 0.5731
+step  1100 loss 0.5537
+step  1200 loss 0.5550
+step  1300 loss 0.4910
+step  1400 loss 0.5764
+/workspace/.venv/lib/python3.11/site-packages/peft/utils/save_and_load.py:257: UserWarning: Setting `save_embedding_layers` to `True` as the embedding layer has been resized during finetuning.
+  warnings.warn(
+wrote src/auto_research/runs/exp_stage0_v4_001/metrics.json + src/auto_research/runs/exp_stage0_v4_001/stage0_lora_adapter/
+next: run scripts/merge_stage0_lora.py --lora src/auto_research/runs/exp_stage0_v4_001/stage0_lora_adapter --out /workspace/checkpoints/qwen3-8b-cpt-light-merged

@@ -1,0 +1,14 @@
+{
+  "status": "ok",
+  "arm": "text_only",
+  "final_train_loss": 0.5208970159292221,
+  "n_steps": 1500,
+  "wall_clock_sec": 1978.8052632808685,
+  "n_trainable": 4718592,
+  "predictions": {
+    "stripped": 5002,
+    "opaque": 5002,
+    "full": 5002
+  },
+  "max_gate_magnitude": null
+}

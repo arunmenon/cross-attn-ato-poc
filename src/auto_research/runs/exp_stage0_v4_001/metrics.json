@@ -1,0 +1,15 @@
+{
+  "status": "ok",
+  "arm": "cpt_light",
+  "final_train_loss": 0.5844808369874954,
+  "n_steps": 1500,
+  "wall_clock_sec": 3156.147214651108,
+  "n_trainable": 665149440,
+  "predictions": {
+    "stripped": 5002,
+    "opaque": 5002,
+    "full": 5002
+  },
+  "max_gate_magnitude": null,
+  "adapter_path": "src/auto_research/runs/exp_stage0_v4_001/stage0_lora_adapter"
+}
