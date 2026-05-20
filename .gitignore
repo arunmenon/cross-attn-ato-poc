@@ -60,3 +60,25 @@ preflight_*.log
 # Editor
 .vscode/
 .idea/
+
+# Local API key files (added 2026-05-19 during v4 generation kickoff)
+/key
+/openai_key
+/.openai_key
+/oai_key
+/runpod_key
+
+# v4 dataset: keep canonical data.jsonl + build_summary.json in git
+# (the source of truth), but the train/eval split and the build log
+# are derived artifacts and stay local-only. Regenerate the splits
+# from data.jsonl with:
+#   python -m data.gen.build_dataset --resplit \
+#     --in data/train_llm_narrated_v4/data.jsonl \
+#     --out data/train_llm_narrated_v4 \
+#     --eval-frac 0.20 --seed 12345 --scrub-pii
+data/train_llm_narrated_v4/train.jsonl
+data/train_llm_narrated_v4/eval.jsonl
+data/train_llm_narrated_v4/build.log
+
+# Balance poller log (local-only operational artifact)
+/balance.log

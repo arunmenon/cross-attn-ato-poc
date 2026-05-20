@@ -1,0 +1,39 @@
+{
+  "n_records": 25000,
+  "mode": "llm",
+  "family_counts": {
+    "hn_large_purchase": 2543,
+    "cred_stuff": 1418,
+    "sim_swap": 1540,
+    "hn_travel": 2514,
+    "hn_account_recovery": 2075,
+    "clean": 10038,
+    "malware_rat": 1528,
+    "phish_takeover": 1121,
+    "hn_recovery_high_amount": 391,
+    "mule_chain": 1477,
+    "phish_takeover_mfa_phished": 355
+  },
+  "actor_counts": {
+    "human": 17880,
+    "agent_buying": 2032,
+    "hybrid": 996,
+    "agent_finance": 1489,
+    "agent_adversarial": 1194,
+    "agent_compromised": 1409
+  },
+  "eval_frac": 0.0,
+  "leakage_audit_n": 200,
+  "leakage_audit_failures": 0,
+  "duration_seconds": 4328.78,
+  "enforce_disjointness": true,
+  "llm_cost": {
+    "spent_usd": 2.0299,
+    "budget_usd": 10.0,
+    "n_calls": 26319,
+    "n_cache_hits": 332,
+    "by_model": {
+      "gpt-5-nano-2025-08-07": 2.0299
+    }
+  }
+}
