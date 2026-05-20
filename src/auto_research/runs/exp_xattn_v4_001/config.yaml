@@ -1,0 +1,129 @@
+# xattn_v4 — Q1 architectural TEST arm.
+#
+# Pair to exp_text_only_v4_001. Same merged base, same prompt,
+# same data, same hyperparameters as text_only_v4. ONLY difference:
+# the cross-attention pathway + structured-event side stream are
+# wired in.
+#
+#     metric(xattn_v4) − metric(text_only_v4)
+#
+# is therefore an unbiased estimator of the architectural contribution
+# from cross-attention + side-stream event routing. That is the Q1
+# verdict of the v4 plan.
+#
+# Architectural knobs mirror v3's leader cell `exp_xa_round1_002`
+# (every_8 / slots=64 / gate=small_0.01 / small_transformer). The
+# v3 cell was the closest-to-winning x-attn config across the 18-arm
+# sweep before we diagnosed the v3 data-redundancy bug. v4 holds the
+# architecture constant and varies only the data + prompt contract,
+# so this same cell is the right one to test.
+#
+# What this arm does:
+#   - Loads /workspace/checkpoints/qwen3-8b-cpt-light-v4-merged
+#     (same shared base as text_only_v4)
+#   - Wraps the LM with QwenXattnWrapper:
+#       - 3 cross-attn layers inserted at blocks 8, 16, 24 (every_8)
+#       - 64 resampler latents per insertion
+#       - gate init = tanh(0.01), near-identity at start
+#       - small_transformer side-stream encoder reading structured_events
+#   - Trains q-only LoRA r=16 on the LM (same as text_only_v4) +
+#     the cross-attn pathway (gates, key/value proj, resampler, encoder)
+#   - LM body frozen. Embeddings frozen (matches text_only_v4 after
+#     the v4 contract fix).
+#   - SFT via next-token-prediction on the full <case>...</case>
+#     text — IDENTICAL to text_only_v4's prompt. The events stream
+#     enters the model ONLY through the side stream, not the prompt.
+#
+# Pre-launch gates (verified post-Stage-0 merge + ahead of
+# text_only_v4):
+#   - merged base loads + generates correctly
+#   - data: 19,998 train / 5,002 eval, 0/0 hash overlap, 0 <acct_id>
+#   - contract gate strict=True will fire at trainer startup
+#
+# Apples-to-apples invariants vs exp_text_only_v4_001:
+#   - base_checkpoint: IDENTICAL
+#   - all training.* keys: IDENTICAL (steps, seq_len, micro_batch,
+#     grad_accum, lr, warmup, precision, optimizer, stress_run)
+#   - data.train_path / data.eval_fast_path / eval_mode_dropout: IDENTICAL
+#   - eval.modes / bootstrap_resamples / breakdowns: IDENTICAL
+#   - LM-facing text prompt: BYTE-IDENTICAL (both arms call
+#     compose_text_only(record); contract gate enforces this)
+
+exp_id: exp_xattn_v4_001
+arm: xattn
+
+xattn:
+  insertion_pattern: every_8
+  gate_init: small_0.01
+  resampler_slots: 64
+  encoder: small_transformer
+  lora_r_on_q: 16
+
+training:
+  # SAME merged base as text_only_v4. Launcher schema enforces that
+  # xattn must use the merged CPT-light checkpoint (review 007 #3).
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-v4-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8                              # effective batch = 32
+  lr: 1.0e-4
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated_v4
+  eval_fast_path: /workspace/data/train_llm_narrated_v4
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  v4 Q1 architectural TEST. Paired with exp_text_only_v4_001 (the
+  control arm) from the same merged base, same prompt, same data,
+  same hyperparameters. Only the cross-attn pathway + structured-event
+  side stream differ.
+
+  Expected outcomes:
+    Pass A — `hn_fpr_worst_stripped(xattn_v4) <
+             hn_fpr_worst_stripped(text_only_v4) − 0.005`
+             outside CIs: side stream carries signal AND cross-attn
+             surfaces it. Architectural win.
+
+    Pass B — `max_gate_magnitude >= 0.05` even if hn_fpr is
+             CI-tied: gates opened in some layers; the LM found the
+             side stream useful even if it didn't translate to a
+             metric improvement at this eval. Softer win.
+
+    Fail — gates stay near init AND hn_fpr CI-tied with text_only_v4:
+           either v4 data still doesn't have a real modality gap on
+           this cell, or cross-attn doesn't help on this surface.
+           Honest negative result.
+
+  Focus families for the comparison (from Stage-0's pattern):
+    - phish_takeover: Stage-0 mean -0.88 (essentially undetected
+      from text alone). Side stream has the recipient_age,
+      device_age, ip_risk buckets that should disambiguate.
+    - phish_takeover_mfa_phished: Stage-0 mean -2.67 (misclassified
+      as legit). Adversarial cross-modal subtype where ONLY the
+      event stream reveals the rcpt_age=newly_added signature.
+    - hn_recovery_high_amount: Stage-0 mean +0.78 (text-only can't
+      tell legit-vs-fraud). Adversarial subtype where events show
+      this is a known recipient on a legitimate recovery flow.
+
+  Architectural budget: every_8 inserts 3 x-attn layers (at blocks
+  8, 16, 24), each with a 64-slot resampler reading the encoder
+  output. gate_init=small_0.01 means tanh-bounded near-zero gates
+  so the model starts identical to text_only_v4 and must LEARN to
+  open the gate per-layer per-token.

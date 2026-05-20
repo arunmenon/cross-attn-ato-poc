@@ -1,0 +1,96 @@
+# Stage-1: text_only_v4 — Q1 architectural CONTROL arm.
+#
+# This is the text-only baseline that `xattn_v4` will be compared
+# against. Both arms start from the same merged base
+# (`qwen3-8b-cpt-light-v4-merged`), see the same `<case>...</case>`
+# prompt, train on the same data. The ONLY difference between this
+# arm and xattn_v4 is the presence/absence of the cross-attention
+# side stream + structured-event encoder. Therefore:
+#
+#     metric(xattn_v4) − metric(text_only_v4)
+#
+# is an unbiased estimator of the architectural contribution from
+# cross-attention + side-stream routing.
+#
+# What this arm does:
+#   - Loads /workspace/checkpoints/qwen3-8b-cpt-light-v4-merged
+#     (the shared base produced by exp_stage0_v4_001 + merge)
+#   - Trains a narrow LoRA (r=16) on q_proj only
+#   - FREEZES embed_tokens (Stage-0 v4 already trained them and they
+#     are baked into the merged checkpoint). This matches xattn_v4's
+#     frozen-embedding posture — required for apples-to-apples.
+#   - SFT via next-token-prediction on the full <case>...</case>
+#     text (narrative + verdict footer with the label)
+#
+# v4 text contract: the <case> body contains ONLY the narrative
+# block + verdict footer. No <journey_X>, <actor_Y>, or <event_Z>
+# wrapper tokens; those were removed in Change 4 of the v4 plan
+# (canonical-form refactor). The model sees behavior described in
+# prose, plus the label inside <verdict>.
+#
+# Hyperparameters mirror the v3 lora_text baseline (lr=1e-4 not the
+# Stage-0 5e-5, since a narrow LoRA needs a faster effective rate to
+# move through 1500 steps), so the only v3 -> v4 variable is the data
+# + the upstream merged-base coming from v4 Stage-0.
+#
+# Pre-launch gates (verified 2026-05-20 post-merge):
+#   - train.jsonl    : 19,998 rows
+#   - eval.jsonl     :  5,002 rows
+#   - <acct_id>      : 0 across all rows
+#   - hash overlap   : 0 events, 0 text
+#   - merged base    : 16 GB, vocab 151,734, generates correctly
+#   - contract gate  : strict=True fires after model load in
+#                      train_text_only.py (Stage-0 v4's gate-before-
+#                      model-load reorder lives in train_cpt_light.py
+#                      only; pre-launch gate on the dataset already
+#                      ran before this config was submitted, so the
+#                      trainer's startup check is defense-in-depth)
+
+exp_id: exp_text_only_v4_001
+arm: text_only
+
+training:
+  # Explicit v4 merged base. Trainer's hardcoded default points at the
+  # v3 path which doesn't exist on this volume — overriding makes the
+  # apples-to-apples contract unambiguous and would crash early (rather
+  # than silently inherit a different base) if someone runs this on a
+  # pod without v4 Stage-0 done.
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-v4-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8                              # effective batch = 32
+  lr: 1.0e-4                                 # narrow LoRA, faster lr than Stage-0
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  # Same v4 corpus + same hash-disjoint split as Stage-0. eval_fast_path
+  # points at the same dir so load_paired_dataset picks up the eval split.
+  train_path: /workspace/data/train_llm_narrated_v4
+  eval_fast_path: /workspace/data/train_llm_narrated_v4
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  Q1 architectural CONTROL for the v4 comparison. Same merged base,
+  same prompt, same data, same hyperparameters as xattn_v4 — only
+  difference is the side stream. Expected to handle the easy fraud
+  families (cred_stuff, mule_chain, malware_rat) well and STRUGGLE on
+  phish_takeover + adversarial subtypes (phish_takeover_mfa_phished,
+  hn_recovery_high_amount), matching the Stage-0 prediction pattern.
+  If xattn_v4 closes the gap on those struggling families relative to
+  this baseline, that's the load-bearing evidence for the architectural
+  contribution.

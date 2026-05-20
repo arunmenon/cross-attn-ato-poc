@@ -84,8 +84,10 @@ DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 # "cached_in" is the price for tokens served from OpenAI's prompt-cache.
 # The tracker treats cache hits as `cached_in` priced.
 _PRICING: dict[str, dict[str, float]] = {
-    # v4 active models
+    # v4 active models. Dated snapshots are listed alongside their alias
+    # so callers can pin for reproducibility without breaking CostTracker.
     "gpt-5-nano":                {"in": 0.05  / 1e6, "out": 0.40 / 1e6, "cached_in": 0.005 / 1e6},
+    "gpt-5-nano-2025-08-07":     {"in": 0.05  / 1e6, "out": 0.40 / 1e6, "cached_in": 0.005 / 1e6},
     # v3 legacy entries (DO NOT USE — kept only to avoid KeyError on legacy cache rows)
     "gpt-5.4-nano":              {"in": 0.20  / 1e6, "out": 1.25 / 1e6, "cached_in": 0.02  / 1e6},
     "gpt-5.4-mini":              {"in": 0.75  / 1e6, "out": 4.50 / 1e6, "cached_in": 0.075 / 1e6},

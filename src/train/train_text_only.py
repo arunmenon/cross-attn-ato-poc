@@ -84,16 +84,24 @@ def main():
         model.resize_token_embeddings(len(tokenizer))
         from src.tokenizer.custom_tokens import init_new_embeddings
         init_new_embeddings(model, tokenizer, old_vocab_size=old_vocab_size)
-    # Freeze base, apply LoRA r=16 on q_proj only. Custom-token
-    # embeddings need to be trainable so this baseline can READ the
-    # journey/actor tokens (review 007 finding #1 — frozen mean-init
-    # rows would make this baseline blind to the structural tokens).
+    # Freeze base, apply LoRA r=16 on q_proj only. Embeddings stay
+    # FROZEN here — Stage-0 v4 already trained the custom-token rows
+    # and merged them into the base, so this baseline must consume
+    # them as-is. Training embed_tokens here would break the apples-
+    # to-apples contract with train_xattn.py (which freezes the LM
+    # body including embeddings); the metric difference between the
+    # two arms must isolate the cross-attn pathway, not "text_only
+    # got to retrain the dictionary too."
+    #
+    # Historical note: pre-v4 this trainer set `modules_to_save=
+    # ["embed_tokens"]` because it ran on raw Qwen and the custom-
+    # token rows were still at mean-init values. v4 moved that
+    # learning into Stage-0; Stage-1 freezes.
     for p in model.parameters():
         p.requires_grad = False
     lora_config = LoraConfig(
         r=16, lora_alpha=16, lora_dropout=0.0, bias="none",
         task_type="CAUSAL_LM", target_modules=["q_proj"],
-        modules_to_save=["embed_tokens"],
     )
     model = get_peft_model(model, lora_config)
     model = model.to(device)
