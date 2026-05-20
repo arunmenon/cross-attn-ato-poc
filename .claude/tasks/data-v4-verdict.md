@@ -7,9 +7,17 @@ corpus, vs serializing the events into the LM's text prompt?
 
 ## Result
 
-**Pass A — architectural win.** Cross-attention beats the text-only baseline
-on every cohort and dramatically on the adversarial families the v4 data
-pivot was specifically designed to expose.
+**Pass A on recall — architectural win.** Cross-attention catches 100% of
+fraud at 1% legit FPR vs text-only's 72%, with the entire 28-percentage-point
+gap coming from the two adversarial fraud subtypes the v4 data pivot was
+designed around (phish_takeover and phish_takeover_mfa_phished). Honest
+caveat: neither arm cracks the adversarial *legit* subtype
+(hn_recovery_high_amount), which both flag ~100% of the time at the 1%
+legit-FPR threshold.
+
+The earlier framing of this verdict (just score-means per family) was
+incomplete. The full formal-metric picture is in the "Bootstrap CI"
+section below.
 
 ## The headline numbers
 
@@ -69,6 +77,54 @@ the legit side.
 4. **Hard negatives got more negative, not less.** Hard-neg mean went
    from −6.1 to −11.3. xattn isn't over-flagging legit-looking-suspicious
    activity — it's holding the line.
+
+## Bootstrap CI — formal metrics at 1% legit FPR
+
+Predictions on the 5,002-row eval split, stripped mode, 1,000 bootstrap
+resamples for each CI.
+
+### Fraud recall per family @ 1% legit FPR
+
+| Fraud family | text_only_v4 (95% CI) | xattn_v4 (95% CI) | Δ |
+| --- | ---: | ---: | ---: |
+| cred_stuff | 1.0000 [1.00, 1.00] | 1.0000 [1.00, 1.00] | 0 |
+| malware_rat | 1.0000 [1.00, 1.00] | 1.0000 [1.00, 1.00] | 0 |
+| mule_chain | 1.0000 [1.00, 1.00] | 1.0000 [1.00, 1.00] | 0 |
+| sim_swap | 0.9773 [0.95, 1.00] | 1.0000 [1.00, 1.00] | +0.023 |
+| **phish_takeover** | **0.3304 [0.26, 0.40]** | **1.0000 [1.00, 1.00]** | **+0.67** |
+| **phish_takeover_mfa_phished** | **0.0141 [0.00, 0.05]** | **1.0000 [1.00, 1.00]** | **+0.99** |
+| **Mean across all fraud families** | **0.7203** | **1.0000** | **+0.28** |
+| **Mean across adversarial subtypes** | **0.1722** | **1.0000** | **+0.83** |
+
+xattn_v4's CIs **do not overlap** with text_only_v4 on the two adversarial
+subtypes (text_only's UB of 0.05 for mfa_phished is well below xattn's LB
+of 1.0). That is the formal architectural win.
+
+### Hard-negative FPR per family @ 1% legit FPR
+
+| HN family | text_only_v4 (95% CI) | xattn_v4 (95% CI) | Δ |
+| --- | ---: | ---: | ---: |
+| hn_account_recovery | 0.0024 [0.00, 0.01] | 0.0000 [0.00, 0.00] | xattn better |
+| hn_large_purchase | 0.0000 [0.00, 0.00] | 0.0020 [0.00, 0.01] | tied |
+| hn_travel | 0.0179 [0.01, 0.03] | 0.0099 [0.00, 0.03] | xattn better (CI overlap) |
+| **hn_recovery_high_amount** | **0.9872 [0.92, 1.00]** | **1.0000 [1.00, 1.00]** | **CIs overlap; both catastrophic** |
+| **Worst-family HN-FPR** | **0.9872 [0.92, 1.00]** | **1.0000 [1.00, 1.00]** | **CIs overlap** |
+
+Neither arm cracks `hn_recovery_high_amount` at this strict threshold —
+both flag ~all 78 rows. The score-mean did move (text_only +0.97 →
+xattn −0.57) but not far enough to escape the threshold. Threshold
+calibration: text_only's 1%-legit-FPR threshold is −0.25; xattn's is
+−4.50, because xattn pushed bulk legit scores far more negative.
+
+### Operational interpretation
+
+The xattn arm catches **~220 more real attackers** (across the two
+adversarial fraud subtypes that text_only misses almost entirely) at
+the cost of **~1 additional false positive** on hn_recovery_high_amount.
+For any practical fraud system, that trade-off is overwhelmingly net
+positive. The strict worst-HN-FPR metric being CI-tied on a single
+catastrophic family masks the architectural win that lives on the
+fraud-recall side of the trade-off.
 
 ## Caveat: max_gate magnitude
 
