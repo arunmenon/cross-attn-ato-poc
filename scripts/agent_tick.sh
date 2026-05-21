@@ -192,3 +192,51 @@ if [[ $TICK_RC -eq 124 ]]; then
     echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) CLI TIMED OUT after 180m (rc=124)"
 fi
 echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) tick complete (rc=$TICK_RC)"
+
+# ---------------------------------------------------------------------------
+# Auto-stop on sweep halt (cost-control safety net)
+# ---------------------------------------------------------------------------
+# When sweep_state.yaml reports halted: true, the V5 sweep is done (budget
+# cap, NaN cascade, Phase 2 stop, or any other launcher-recorded halt).
+# Call the RunPod GraphQL podStop mutation to terminate this pod before
+# overnight idle-burn accumulates.
+#
+# Required env (sourced from /workspace/.env earlier in this script):
+#   RUNPOD_API_KEY  — must have write/admin scope; a read-only key will
+#                     fail the mutation and leave the pod up.
+# Required setting (hardcoded; rotate when pod changes):
+#   RUNPOD_POD_ID   — static pod-id from the RunPod UI for this pod.
+#
+# Defensive: never crashes the tick. Logs failures so the operator can
+# investigate via agent_tick.log. The next tick re-evaluates state and
+# tries again if still halted.
+RUNPOD_POD_ID="${RUNPOD_POD_ID:-b0b6dnykxttbgv}"
+SWEEP_STATE="$REPO_ROOT/src/auto_research/sweep_state.yaml"
+if [[ -f "$SWEEP_STATE" ]] && grep -qE '^halted:[[:space:]]*true' "$SWEEP_STATE"; then
+    HALT_REASON=$(grep -E '^halt_reason:' "$SWEEP_STATE" | sed 's/^halt_reason:[[:space:]]*//')
+    echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) sweep halted: ${HALT_REASON}"
+    if [[ -z "${RUNPOD_API_KEY:-}" ]]; then
+        echo "[agent_tick] auto-stop SKIPPED: RUNPOD_API_KEY not in env (add to /workspace/.env to enable)"
+    elif ! command -v curl >/dev/null 2>&1; then
+        echo "[agent_tick] auto-stop SKIPPED: curl not on PATH"
+    else
+        echo "[agent_tick] auto-stop: calling podStop on $RUNPOD_POD_ID..."
+        set +e
+        STOP_RESP=$(curl -sS -w '\n__HTTP__:%{http_code}' \
+            --max-time 30 \
+            -X POST https://api.runpod.io/graphql \
+            -H "Authorization: Bearer $RUNPOD_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{\"query\":\"mutation { podStop(input:{podId:\\\"$RUNPOD_POD_ID\\\"}) { id desiredStatus } }\"}" 2>&1)
+        STOP_RC=$?
+        set -e
+        echo "[agent_tick] auto-stop curl rc=$STOP_RC"
+        echo "[agent_tick] auto-stop response:"
+        echo "$STOP_RESP" | sed 's/^/  /'
+        if echo "$STOP_RESP" | grep -q '"desiredStatus"'; then
+            echo "[agent_tick] auto-stop ACCEPTED by API; container should terminate shortly"
+        else
+            echo "[agent_tick] auto-stop did NOT receive desiredStatus — pod may still be running (check key scope / pod id)"
+        fi
+    fi
+fi
