@@ -63,33 +63,18 @@ Find the best V5 cross-attention configuration on the v4 synthetic ATO dataset a
 
 ## Proposer heuristic
 
-Three rounds:
+The current arc is V5 (2026-05-21). All proposer logic lives in the
+"V5 directive" section below. The Round 1/2/3 v3 proposer that previously
+occupied this section has been removed to avoid the LLM agent mixing
+stale per-round guidance with the V5 queue. v3 history is still
+readable via the archived `experiments.jsonl.pre_v5_*` file alongside
+the current `experiments.jsonl`, but it does NOT inform proposal
+decisions and is excluded from `current_best` (the launcher filters
+by `metric_version >= 5`).
 
-### Round 1 — Spread (first 6-8 experiments, Day 2 PM)
-
-Cover the `insertion_pattern × resampler_slots` cells (3 × 2 = 6). Fix `gate_init=small_0.01` and `encoder=small_transformer`. Order:
-
-| Order | insertion_pattern | resampler_slots |
-|---|---|---|
-| 1 | every_4 | 64 |
-| 2 | every_8 | 64 |
-| 3 | late_only | 64 |
-| 4 | every_4 | 128 |
-| 5 | every_8 | 128 |
-| 6 | late_only | 128 |
-
-If any of 1-2 fail (NaN or zero gate), pause and report — do not blindly continue. The launcher's halt logic enforces this.
-
-### Round 2 — Perturb top-2 along gate_init (2-4 experiments, Day 3 AM)
-
-After Round 1, identify the top-2 configs by worst-family hard-negative FPR (`hn_fpr_worst_stripped` in `experiments.jsonl`, lower is better; tiebreak on `hn_fpr_mean_stripped`). AUC-stripped is a sanity gate, not the ranking metric — it saturates at 1.0 on every variant (review 013 finding #1). All rows from this commit forward carry `metric_version: 2` with tie-aware exact-target HN-FPR computed against a leakage-filtered eval (text-hash + structured_events-hash overlap removed). Older rows are visible in history but excluded from `current_best`. The launcher applies the clean-eval mask automatically; agent configs do not need to set anything special. For each top-2 config, propose a perturbation:
-- Top-1: same config but `gate_init=zero` (probe initialization sensitivity).
-- Top-2: same config but `gate_init=zero`.
-- If either round-2 result beats its round-1 sibling by non-overlapping CI, that becomes a new top-1 candidate.
-
-### Round 3 — Stress (1-2 experiments, Day 3 midday)
-
-Take the top-1. Propose ONE stress run with `stress_run: true` (steps=3000, seq_len=4096). If VRAM allows. If OOM on the smoke check inside `run_next_experiment.py`, skip and stop. Total Day 2+3 experiments: 10-12.
+If you need the v3 proposer (Round 1/2/3 spread + perturb + stress) for
+a future arc, recover it from `git log -- src/auto_research/AGENT_INSTRUCTIONS.md`
+(present in commits before `2026-05-21`).
 
 ---
 

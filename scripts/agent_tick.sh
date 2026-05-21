@@ -196,25 +196,162 @@ echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) tick complete (rc=$TICK_RC)"
 # ---------------------------------------------------------------------------
 # Auto-stop on sweep halt (cost-control safety net)
 # ---------------------------------------------------------------------------
-# When sweep_state.yaml reports halted: true, the V5 sweep is done (budget
-# cap, NaN cascade, Phase 2 stop, or any other launcher-recorded halt).
-# Call the RunPod GraphQL podStop mutation to terminate this pod before
-# overnight idle-burn accumulates.
+# Three independent halt triggers; ANY of them stops the pod:
+#
+#   1. Launcher-set: sweep_state.yaml has `halted: true`
+#      Covers budget cap, NaN cascade, zero-gate, convergence — the
+#      conditions the launcher itself records.
+#
+#   2. Launcher-budget mirror: count V5 x-attn rows + total wall-clock
+#      from experiments.jsonl ourselves. Catches the case where the
+#      launcher's halt check ran but the file write was incomplete, OR
+#      where an agent restart skipped updating sweep_state.yaml.
+#
+#   3. Stale-tick detector: if `n_xattn_runs` in sweep_state.yaml has
+#      not advanced across 2 consecutive ticks AND the GPU lockfile is
+#      absent (no training in flight), the sweep has stopped making
+#      progress. Catches the INSTRUCTION-LEVEL halts that the launcher
+#      does NOT record: V5 Phase 2 stop rule, queue exhaustion, and
+#      "early-exit-on-success-then-local-perturbations-exhausted".
 #
 # Required env (sourced from /workspace/.env earlier in this script):
 #   RUNPOD_API_KEY  — must have write/admin scope; a read-only key will
 #                     fail the mutation and leave the pod up.
-# Required setting (hardcoded; rotate when pod changes):
-#   RUNPOD_POD_ID   — static pod-id from the RunPod UI for this pod.
+#   RUNPOD_POD_ID   — static pod-id from the RunPod UI. Set in /workspace/.env
+#                     for the current pod; the hardcoded fallback below is
+#                     a defensive default that becomes wrong if the pod
+#                     rotates and /workspace/.env isn't updated.
 #
 # Defensive: never crashes the tick. Logs failures so the operator can
 # investigate via agent_tick.log. The next tick re-evaluates state and
 # tries again if still halted.
 RUNPOD_POD_ID="${RUNPOD_POD_ID:-b0b6dnykxttbgv}"
 SWEEP_STATE="$REPO_ROOT/src/auto_research/sweep_state.yaml"
+EXPERIMENTS_JSONL="$REPO_ROOT/src/auto_research/experiments.jsonl"
+BUDGET_YAML="$REPO_ROOT/src/auto_research/configs/budget.yaml"
+TICK_STATE_FILE=/workspace/.agent_tick_state.json
+GPU_LOCK_FILE="${GPU_LOCK_FILE:-/workspace/.gpu.lock}"
+
+SHOULD_STOP=0
+HALT_REASON=""
+
+# Trigger 1: launcher-set halted flag.
 if [[ -f "$SWEEP_STATE" ]] && grep -qE '^halted:[[:space:]]*true' "$SWEEP_STATE"; then
-    HALT_REASON=$(grep -E '^halt_reason:' "$SWEEP_STATE" | sed 's/^halt_reason:[[:space:]]*//')
-    echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) sweep halted: ${HALT_REASON}"
+    HALT_REASON="launcher halt: $(grep -E '^halt_reason:' "$SWEEP_STATE" | sed 's/^halt_reason:[[:space:]]*//')"
+    SHOULD_STOP=1
+fi
+
+# Trigger 2: budget mirror + Trigger 3: stale-tick detector.
+# Both done via one Python helper for cleaner state I/O.
+if [[ $SHOULD_STOP -eq 0 ]]; then
+    STOP_CHECK=$(SWEEP_STATE="$SWEEP_STATE" EXPERIMENTS_JSONL="$EXPERIMENTS_JSONL" \
+                 BUDGET_YAML="$BUDGET_YAML" TICK_STATE_FILE="$TICK_STATE_FILE" \
+                 GPU_LOCK_FILE="$GPU_LOCK_FILE" \
+                 python3 - <<'PYEOF'
+import json
+import os
+import sys
+from pathlib import Path
+
+sweep_state = Path(os.environ["SWEEP_STATE"])
+experiments = Path(os.environ["EXPERIMENTS_JSONL"])
+budget_yaml = Path(os.environ["BUDGET_YAML"])
+tick_state_file = Path(os.environ["TICK_STATE_FILE"])
+gpu_lock_file = Path(os.environ["GPU_LOCK_FILE"])
+
+# Budget caps (mirror launcher logic, V5 x-attn rows only).
+max_exp = 999
+max_hr = 999
+try:
+    import yaml
+    if budget_yaml.exists():
+        b = yaml.safe_load(budget_yaml.read_text()) or {}
+        max_exp = int(b.get("max_experiments", 999))
+        max_hr = float(b.get("max_gpu_hours", 999))
+except Exception:
+    pass
+
+n_xattn_v5 = 0
+gpu_min = 0.0
+if experiments.exists():
+    for line in experiments.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            r = json.loads(line)
+        except Exception:
+            continue
+        if (r.get("arm") == "xattn"
+            and r.get("metric_version", 1) >= 5
+            and r.get("status") == "ok"):
+            n_xattn_v5 += 1
+        gpu_min += float(r.get("wall_clock_min") or 0)
+gpu_hr = gpu_min / 60.0
+
+if n_xattn_v5 >= max_exp:
+    print(f"STOP|budget mirror: V5 x-attn count {n_xattn_v5} >= max_experiments {max_exp}")
+    sys.exit(0)
+if gpu_hr >= max_hr:
+    print(f"STOP|budget mirror: gpu_hours_used {gpu_hr:.2f} >= max_gpu_hours {max_hr}")
+    sys.exit(0)
+
+# Stale-tick detector. Compare n_xattn_runs in sweep_state.yaml against
+# the value we recorded after the previous tick. Increment a stale
+# counter when it hasn't moved AND the GPU lockfile is absent (so we
+# know no training is mid-flight, which is the legitimate "long wall
+# clock" case).
+current_n = None
+if sweep_state.exists():
+    for line in sweep_state.read_text().splitlines():
+        if line.startswith("n_xattn_runs:"):
+            try:
+                current_n = int(line.split(":", 1)[1].strip())
+            except Exception:
+                pass
+            break
+
+if current_n is None:
+    print("OK|n_xattn_runs not parseable; skipping stale detector")
+    sys.exit(0)
+
+prior = {"last_n_xattn_runs": -1, "stale_count": 0}
+if tick_state_file.exists():
+    try:
+        prior = json.loads(tick_state_file.read_text())
+    except Exception:
+        pass
+last_n = prior.get("last_n_xattn_runs", -1)
+stale = prior.get("stale_count", 0)
+
+gpu_locked = gpu_lock_file.exists()
+
+if current_n == last_n and not gpu_locked:
+    stale += 1
+else:
+    stale = 0
+
+# Persist for next tick.
+tick_state_file.write_text(json.dumps(
+    {"last_n_xattn_runs": current_n, "stale_count": stale}
+))
+
+# 2 consecutive ticks (= 60 min) of no new runs + GPU idle => done.
+if stale >= 2:
+    print(f"STOP|stale detector: n_xattn_runs={current_n} unchanged across {stale} ticks, GPU idle")
+else:
+    print(f"OK|n_xattn_v5={n_xattn_v5}/{max_exp} gpu_hr={gpu_hr:.2f}/{max_hr} stale={stale} (current_n={current_n}, last_n={last_n}, gpu_locked={gpu_locked})")
+PYEOF
+)
+    echo "[agent_tick] halt-check: $STOP_CHECK"
+    if [[ "${STOP_CHECK:0:5}" == "STOP|" ]]; then
+        HALT_REASON="${STOP_CHECK:5}"
+        SHOULD_STOP=1
+    fi
+fi
+
+# Fire the stop if any trigger fired.
+if [[ $SHOULD_STOP -eq 1 ]]; then
+    echo "[agent_tick] $(date -u +%Y-%m-%dT%H:%M:%SZ) AUTO-STOP triggered: ${HALT_REASON}"
     if [[ -z "${RUNPOD_API_KEY:-}" ]]; then
         echo "[agent_tick] auto-stop SKIPPED: RUNPOD_API_KEY not in env (add to /workspace/.env to enable)"
     elif ! command -v curl >/dev/null 2>&1; then

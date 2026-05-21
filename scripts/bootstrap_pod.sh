@@ -136,13 +136,17 @@ echo "================ BOOTSTRAP COMPLETE ================"
 echo
 echo "Remaining manual steps before the auto-loop runs:"
 echo
-echo "  a) Verify required keys are set in /workspace/.env:"
+echo "  a) Verify required keys/IDs are set in /workspace/.env:"
 echo "       grep -c OPENAI_API_KEY /workspace/.env             # narrator API"
 echo "       grep -c CLAUDE_CODE_OAUTH_TOKEN /workspace/.env    # agent CLI auth"
 echo "       grep -c RUNPOD_API_KEY /workspace/.env             # auto-stop on sweep halt"
+echo "       grep -c RUNPOD_POD_ID /workspace/.env              # which pod to stop"
 echo "     If any returns 0, append the corresponding 'export KEY=value' line."
 echo "     RUNPOD_API_KEY needs write/admin scope for the podStop mutation;"
 echo "     a read-only key will fail silently and leave the pod running."
+echo "     RUNPOD_POD_ID must match the CURRENT pod's id (visible in the"
+echo "     RunPod UI under Pods → <name> → ID). If absent, agent_tick.sh"
+echo "     falls back to a hardcoded id which becomes wrong on pod rotation."
 echo
 echo "  b) Generate / persist Claude OAuth token (if not already in"
 echo "     /workspace/.env from a prior session):"
