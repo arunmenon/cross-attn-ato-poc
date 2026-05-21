@@ -1,0 +1,53 @@
+exp_id: exp_v5_p1_slots32
+arm: xattn
+
+xattn:
+  insertion_pattern: every_8
+  gate_init: small_0.01
+  resampler_slots: 32
+  encoder: small_transformer
+  lora_r_on_q: 16
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-v4-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8
+  lr: 1.0e-4
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated_v4
+  eval_fast_path: /workspace/data/train_llm_narrated_v4
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  V5 Phase 1, item 5. Tests resampler_slots=32 (half of the baseline's 64)
+  with every_8 / small_0.01. Completing the slots sweep: slots={32, 64, 128}
+  at baseline routing/gate.
+
+  If slots=32 degrades significantly vs slots=64 (baseline), it suggests 64+
+  is needed to carry sufficient event information. If it matches or improves,
+  the resampler may be over-parameterized at 64 slots for this dataset.
+
+  Note: slots=128 achieved hn_recovery_high_amount FPR=0.438 (same as the
+  best configs) but was slightly worse on phish_takeover_mfa_phished. Slots=32
+  provides the lower end of the capacity range.
+
+  Dedup check: (every_8, small_0.01, 32, small_transformer, 16, 1e-4, 500,
+  1500, 2048) does not match any prior row in experiments.jsonl.

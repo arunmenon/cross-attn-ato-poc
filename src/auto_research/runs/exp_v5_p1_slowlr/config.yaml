@@ -1,0 +1,51 @@
+exp_id: exp_v5_p1_slowlr
+arm: xattn
+
+xattn:
+  insertion_pattern: every_8
+  gate_init: zero
+  resampler_slots: 64
+  encoder: small_transformer
+  lora_r_on_q: 16
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-v4-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8
+  lr: 3.0e-5
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated_v4
+  eval_fast_path: /workspace/data/train_llm_narrated_v4
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  V5 Phase 1, item 7 (slowlr). Base = best of first five = exp_v5_p1_zero_64
+  (every_8 / gate=zero / slots=64 / small_transformer), with lr=3e-5 and
+  warmup_steps=500. Tests whether a conservative 3x lower LR helps the
+  cross-attention pathway integrate without disturbing the LoRA-fine-tuned LM.
+
+  Context: fastlr (lr=3e-4, warmup=100) catastrophically failed (v5_adv_error=
+  0.752). This run anchors the low end of the LR range; the baseline lr=1e-4
+  is the middle. Warmup kept at 500 (same as baseline) to isolate the LR effect.
+
+  Dedup check: (every_8, zero, 64, small_transformer, 16, 3e-5, 500, 1500, 2048)
+  does not match any prior row in experiments.jsonl (exp_v5_p1_zero_64 used
+  lr=1e-4 — different).

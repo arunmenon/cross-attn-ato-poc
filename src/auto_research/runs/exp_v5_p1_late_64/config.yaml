@@ -1,0 +1,55 @@
+exp_id: exp_v5_p1_late_64
+arm: xattn
+
+xattn:
+  insertion_pattern: late_only
+  gate_init: small_0.01
+  resampler_slots: 64
+  encoder: small_transformer
+  lora_r_on_q: 16
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-v4-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8
+  lr: 1.0e-4
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated_v4
+  eval_fast_path: /workspace/data/train_llm_narrated_v4
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  V5 Phase 1, item 2. Tests late_only insertion pattern (x-attn in the last 4
+  transformer layers only) vs every_8 (baseline) and every_4 (item 1). The
+  hypothesis is that concentrating cross-attn at the highest-level abstraction
+  layers — where the LM has already built its richest representations — may
+  extract more signal from the structured event stream per parameter.
+
+  late_only inserts 4 x-attn layers at blocks 29-32. Fewer layers than every_4
+  (6) but same as or more than every_8 (3) depending on config.
+
+  Key question: does layer position matter more than insertion frequency for
+  hn_recovery_high_amount FPR? Prior runs suggest FPR is stuck near 0.44-0.45
+  regardless of insertion frequency; late_only tests whether final-layer
+  cross-attn attention is the missing ingredient.
+
+  Dedup check: (late_only, small_0.01, 64, small_transformer, 16, 1e-4, 500,
+  1500, 2048) does not match any prior row in experiments.jsonl.

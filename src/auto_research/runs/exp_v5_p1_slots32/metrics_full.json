@@ -1,0 +1,129 @@
+{
+  "n": 5002,
+  "metric_version": 5,
+  "auc": 0.9996503043127032,
+  "r_at_fpr_0.001": {
+    "target_fpr": 0.001,
+    "achieved_fpr": 0.001,
+    "threshold": 3.0,
+    "alpha": 0.5140000000000002,
+    "n_above": 3,
+    "n_tied": 1,
+    "need": 3.5140000000000002,
+    "tie_fraction": 0.0002845759817871372,
+    "recall": 0.921138440860215,
+    "n_positive": 1488,
+    "n_negative": 3514
+  },
+  "r_at_fpr_0.01": {
+    "target_fpr": 0.01,
+    "achieved_fpr": 0.01,
+    "threshold": 0.125,
+    "alpha": 0.7133333333333335,
+    "n_above": 33,
+    "n_tied": 3,
+    "need": 35.14,
+    "tie_fraction": 0.0008537279453614115,
+    "recall": 0.9969265232974911,
+    "n_positive": 1488,
+    "n_negative": 3514
+  },
+  "r_at_fpr_0.05": {
+    "target_fpr": 0.05,
+    "achieved_fpr": 0.05,
+    "threshold": -4.5,
+    "alpha": 0.7800000000000011,
+    "n_above": 164,
+    "n_tied": 15,
+    "need": 175.70000000000002,
+    "tie_fraction": 0.0042686397268070575,
+    "recall": 0.9993279569892473,
+    "n_positive": 1488,
+    "n_negative": 3514
+  },
+  "per_journey_auc": {
+    "clean": NaN,
+    "cred_stuff": 1.0,
+    "hn_account_recovery": NaN,
+    "hn_large_purchase": NaN,
+    "hn_recovery_high_amount": NaN,
+    "hn_travel": NaN,
+    "malware_rat": 1.0,
+    "mule_chain": 1.0,
+    "phish_takeover": 1.0,
+    "phish_takeover_mfa_phished": 0.9976372177286827,
+    "sim_swap": 0.9988552284369018
+  },
+  "per_actor_auc": {
+    "agent_adversarial": NaN,
+    "agent_buying": 1.0,
+    "agent_compromised": NaN,
+    "agent_finance": 1.0,
+    "human": 0.999446124932266,
+    "hybrid": 0.9991071428571429
+  },
+  "hard_negative_fpr_at_decision_threshold_1pct": {
+    "hn_account_recovery": 0.0,
+    "hn_large_purchase": 0.0,
+    "hn_recovery_high_amount": 0.45051282051282054,
+    "hn_travel": 0.0,
+    "_threshold_alpha": [
+      0.125,
+      0.7133333333333335
+    ]
+  },
+  "hard_negative_fpr_at_decision_threshold_1pct_tie_aware": {
+    "hn_account_recovery": 0.0,
+    "hn_large_purchase": 0.0,
+    "hn_recovery_high_amount": 0.45051282051282054,
+    "hn_travel": 0.0,
+    "_threshold_alpha": [
+      0.125,
+      0.7133333333333335
+    ]
+  },
+  "v5_adversarial": {
+    "target_fpr": 0.01,
+    "metric_version": 5,
+    "threshold": 0.125,
+    "alpha": 0.7133333333333335,
+    "v5_adv_error": 0.16560130010834234,
+    "components": {
+      "phish_takeover_miss": 0.0,
+      "phish_takeover_mfa_phished_miss": 0.04629107981220648,
+      "hn_recovery_high_amount_fpr": 0.45051282051282054
+    },
+    "families": {
+      "phish_takeover": {
+        "family": "phish_takeover",
+        "label": "fraud",
+        "n": 224,
+        "rate": 1.0,
+        "n_above": 224,
+        "n_tied": 0,
+        "recall": 1.0,
+        "miss": 0.0
+      },
+      "phish_takeover_mfa_phished": {
+        "family": "phish_takeover_mfa_phished",
+        "label": "fraud",
+        "n": 71,
+        "rate": 0.9537089201877935,
+        "n_above": 67,
+        "n_tied": 1,
+        "recall": 0.9537089201877935,
+        "miss": 0.04629107981220648
+      },
+      "hn_recovery_high_amount": {
+        "family": "hn_recovery_high_amount",
+        "label": "legit",
+        "n": 78,
+        "rate": 0.45051282051282054,
+        "n_above": 33,
+        "n_tied": 3,
+        "fpr": 0.45051282051282054
+      }
+    }
+  },
+  "v5_adv_error": 0.16560130010834234
+}

@@ -1,0 +1,10 @@
+[launcher] survival mode active (pid=8683, sid=8681, state=shared-session-but-SIGHUP-ignored); logs to src/auto_research/runs/exp_v5_p1_fastlr/launcher.log
+launching: accelerate launch --config_file /workspace/cross_attn_ato_poc/src/train/accelerate_configs/single_h100.yaml /workspace/cross_attn_ato_poc/src/train/train_xattn.py --config src/auto_research/runs/exp_v5_p1_fastlr/config.yaml (timeout=90min)
+wrote src/auto_research/runs/exp_v5_p1_fastlr/metrics.json (status=ok)
+wrote src/auto_research/runs/exp_v5_p1_fastlr/metrics_stripped.json
+wrote src/auto_research/runs/exp_v5_p1_fastlr/ci_report_stripped.json
+wrote src/auto_research/runs/exp_v5_p1_fastlr/metrics_opaque.json
+wrote src/auto_research/runs/exp_v5_p1_fastlr/ci_report_opaque.json
+wrote src/auto_research/runs/exp_v5_p1_fastlr/metrics_full.json
+wrote src/auto_research/runs/exp_v5_p1_fastlr/ci_report_full.json
+OK: appended exp exp_v5_p1_fastlr to /workspace/cross_attn_ato_poc/src/auto_research/experiments.jsonl

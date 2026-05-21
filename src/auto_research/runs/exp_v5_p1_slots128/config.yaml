@@ -1,0 +1,52 @@
+exp_id: exp_v5_p1_slots128
+arm: xattn
+
+xattn:
+  insertion_pattern: every_8
+  gate_init: small_0.01
+  resampler_slots: 128
+  encoder: small_transformer
+  lora_r_on_q: 16
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-v4-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8
+  lr: 1.0e-4
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated_v4
+  eval_fast_path: /workspace/data/train_llm_narrated_v4
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  V5 Phase 1, item 4. Tests resampler_slots=128 vs the baseline 64 slots,
+  holding every_8 and small_0.01 constant. The resampler compresses the
+  structured event stream into K/V tokens; doubling capacity may allow the
+  model to retain more event detail per session.
+
+  The hn_recovery_high_amount family has been stuck at ~0.44-0.45 FPR across
+  all three insertion patterns and both gate-init values. The hypothesis is
+  that 64 slots may be a bottleneck for this family's high-information sessions
+  (recovery flows have richer event sequences). If 128 slots reduces FPR for
+  this family, it isolates resampler capacity as the binding constraint.
+
+  Dedup check: (every_8, small_0.01, 128, small_transformer, 16, 1e-4, 500,
+  1500, 2048) does not match any prior row in experiments.jsonl.

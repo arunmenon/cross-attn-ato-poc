@@ -1,0 +1,53 @@
+exp_id: exp_v5_p1_zero_64
+arm: xattn
+
+xattn:
+  insertion_pattern: every_8
+  gate_init: zero
+  resampler_slots: 64
+  encoder: small_transformer
+  lora_r_on_q: 16
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-v4-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8
+  lr: 1.0e-4
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated_v4
+  eval_fast_path: /workspace/data/train_llm_narrated_v4
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  V5 Phase 1, item 3. Tests gate_init=zero (true Flamingo init, gates exactly
+  zero at step 0) vs gate_init=small_0.01 (baseline). Holds insertion_pattern=
+  every_8 and resampler_slots=64 fixed to isolate the gate initialization
+  effect.
+
+  Zero-init means the base LM is perfectly preserved at step 0 and gates must
+  earn their way open from scratch. small_0.01 provides a slight initial
+  signal, potentially biasing early-training gradient flow. The hn_recovery_
+  high_amount family has been stuck at ~0.44-0.45 FPR across all three
+  insertion patterns with small_0.01; probing whether zero-init changes the
+  training dynamics for this family.
+
+  Dedup check: (every_8, zero, 64, small_transformer, 16, 1e-4, 500, 1500,
+  2048) does not match any prior row in experiments.jsonl.

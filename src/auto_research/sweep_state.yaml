@@ -7,27 +7,35 @@ metric_definition:
     threshold: 1-recall(phish_takeover), 1-recall(phish_takeover_mfa_phished), and
     FPR(hn_recovery_high_amount). Tiebreakers: hn_fpr_worst_stripped then hn_fpr_mean_stripped.
     AUC is a sanity gate, not the objective.'
-n_completed: 2
+n_completed: 12
 n_failed: 0
-n_xattn_runs: 1
-gpu_hours_used: 1.22
+n_xattn_runs: 11
+gpu_hours_used: 7.922
 current_best:
-  exp_id: exp_xattn_v4_001
+  exp_id: exp_v5_p1_zero_64
   arm: xattn
-  v5_adv_error: 0.15956061153244253
+  v5_adv_error: 0.15059227157818708
   v5_adv_components_stripped:
     phish_takeover_miss: 0.0
-    phish_takeover_mfa_phished_miss: 0.028169014084507005
-    hn_recovery_high_amount_fpr: 0.45051282051282054
-  hn_fpr_worst_stripped: 0.45051282051282054
-  hn_fpr_mean_stripped: 0.11262820512820514
-  auc_stripped_sanity: 0.9997411467800076
-  config_summary: every_8 / slots=64 / gate=small_0.01 / small_transformer
+    phish_takeover_mfa_phished_miss: 0.014084507042253502
+    hn_recovery_high_amount_fpr: 0.4376923076923077
+  hn_fpr_worst_stripped: 0.4376923076923077
+  hn_fpr_mean_stripped: 0.10942307692307693
+  auc_stripped_sanity: 0.999766487047203
+  config_summary: every_8 / slots=64 / gate=zero / small_transformer
 top_3:
-- exp_id: exp_xattn_v4_001
-  v5_adv_error: 0.15956061153244253
-  hn_fpr_worst_stripped: 0.45051282051282054
-  hn_fpr_mean_stripped: 0.11262820512820514
+- exp_id: exp_v5_p1_zero_64
+  v5_adv_error: 0.15059227157818708
+  hn_fpr_worst_stripped: 0.4376923076923077
+  hn_fpr_mean_stripped: 0.10942307692307693
+- exp_id: exp_v5_p1_every4_64
+  v5_adv_error: 0.15059227157818708
+  hn_fpr_worst_stripped: 0.4376923076923077
+  hn_fpr_mean_stripped: 0.1099132730015083
+- exp_id: exp_v5_p1_slots128
+  v5_adv_error: 0.15261105092091012
+  hn_fpr_worst_stripped: 0.4376923076923077
+  hn_fpr_mean_stripped: 0.1099132730015083
 halted: false
 halt_reason: null
-last_updated: '2026-05-21T03:58:42.432224Z'
+last_updated: '2026-05-21T12:26:29.894501Z'

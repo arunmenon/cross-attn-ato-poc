@@ -1,0 +1,166 @@
+{
+  "auc": {
+    "point": 0.999784081798765,
+    "ci_lo": 0.9996499768017026,
+    "ci_hi": 0.9998926194224637,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "r_at_fpr_0.001": {
+    "target_fpr": 0.001,
+    "point": 0.9402822580645162,
+    "ci_lo": 0.9025061518284747,
+    "ci_hi": 0.9769158794758214,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "r_at_fpr_0.01": {
+    "target_fpr": 0.01,
+    "point": 0.9986559139784946,
+    "ci_lo": 0.9936923737913118,
+    "ci_hi": 1.0,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "r_at_fpr_0.05": {
+    "target_fpr": 0.05,
+    "point": 1.0,
+    "ci_lo": 1.0,
+    "ci_hi": 1.0,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "hard_negative_fpr_at_1pct": {
+    "target_fpr": 0.01,
+    "metric_version": 2,
+    "per_family": {
+      "hn_account_recovery": {
+        "point": 0.0,
+        "ci_lo": 0.0,
+        "ci_hi": 0.0,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "hn_large_purchase": {
+        "point": 0.0,
+        "ci_lo": 0.0,
+        "ci_hi": 0.0,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "hn_recovery_high_amount": {
+        "point": 0.45051282051282054,
+        "ci_lo": 0.36853823138297875,
+        "ci_hi": 0.562404761904762,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "hn_travel": {
+        "point": 0.0,
+        "ci_lo": 0.0,
+        "ci_hi": 0.0,
+        "resamples": 1000,
+        "confidence": 0.95
+      }
+    },
+    "worst_family": {
+      "point": 0.45051282051282054,
+      "ci_lo": 0.36853823138297875,
+      "ci_hi": 0.562404761904762,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "mean": {
+      "point": 0.11262820512820514,
+      "ci_lo": 0.09213455784574469,
+      "ci_hi": 0.1406011904761905,
+      "resamples": 1000,
+      "confidence": 0.95
+    },
+    "tie_fraction_mean": 0.0010705068105738066,
+    "achieved_fpr_mean": 0.010000000000000002,
+    "threshold_mean": -0.6248749942481517,
+    "alpha_mean": 0.5033096891719394,
+    "threshold_point": -0.6250000596046448,
+    "alpha_point": 0.14000000000000057,
+    "tie_fraction_point": 0.0002845759817871372,
+    "achieved_fpr_point": 0.01,
+    "resamples": 1000,
+    "confidence": 0.95
+  },
+  "v5_adv_error": {
+    "target_fpr": 0.01,
+    "metric_version": 5,
+    "point": 0.15486577585169134,
+    "ci_lo": 0.12792182409740255,
+    "ci_hi": 0.1927369566389091,
+    "resamples": 1000,
+    "confidence": 0.95,
+    "components": {
+      "phish_takeover_miss": {
+        "point": 0.0,
+        "ci_lo": 0.0,
+        "ci_hi": 0.0,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "phish_takeover_mfa_phished_miss": {
+        "point": 0.014084507042253502,
+        "ci_lo": 0.0,
+        "ci_hi": 0.048387096774193505,
+        "resamples": 1000,
+        "confidence": 0.95
+      },
+      "hn_recovery_high_amount_fpr": {
+        "point": 0.45051282051282054,
+        "ci_lo": 0.36853823138297875,
+        "ci_hi": 0.562404761904762,
+        "resamples": 1000,
+        "confidence": 0.95
+      }
+    },
+    "point_details": {
+      "target_fpr": 0.01,
+      "metric_version": 5,
+      "threshold": -0.6250000596046448,
+      "alpha": 0.14000000000000057,
+      "v5_adv_error": 0.15486577585169134,
+      "components": {
+        "phish_takeover_miss": 0.0,
+        "phish_takeover_mfa_phished_miss": 0.014084507042253502,
+        "hn_recovery_high_amount_fpr": 0.45051282051282054
+      },
+      "families": {
+        "phish_takeover": {
+          "family": "phish_takeover",
+          "label": "fraud",
+          "n": 224,
+          "rate": 1.0,
+          "n_above": 224,
+          "n_tied": 0,
+          "recall": 1.0,
+          "miss": 0.0
+        },
+        "phish_takeover_mfa_phished": {
+          "family": "phish_takeover_mfa_phished",
+          "label": "fraud",
+          "n": 71,
+          "rate": 0.9859154929577465,
+          "n_above": 70,
+          "n_tied": 0,
+          "recall": 0.9859154929577465,
+          "miss": 0.014084507042253502
+        },
+        "hn_recovery_high_amount": {
+          "family": "hn_recovery_high_amount",
+          "label": "legit",
+          "n": 78,
+          "rate": 0.45051282051282054,
+          "n_above": 35,
+          "n_tied": 1,
+          "fpr": 0.45051282051282054
+        }
+      }
+    }
+  }
+}

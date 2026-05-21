@@ -5,23 +5,16 @@
 Plan: `PLAN.md` (v3).
 Runbook: `RUNBOOK.md`.
 
-> **Status — 2026-05-18: Expanded Sweep in progress; the Day-4 "Pivot, then stop"
-> recommendation below is superseded.** After the Day-3 synthesis closed
-> with 8 valid x-attn runs and the `zero_gate_activation` halt, the user
-> authorized a four-phase Expanded Sweep (LR/warmup → seq4096 stress →
-> grid completion → conditional rank capacity) to probe whether
-> training-dial perturbations unlock gate learning before declaring
-> architecture invariance on this surface. `configs/budget.yaml` lifted
-> `max_experiments` 12 → 999 and disabled both `zero_gate_activation`
-> and `convergence` halts for the duration; `nan_cascade` and the GPU-
-> hours cap remain the real stops. Source of truth:
-> `.claude/tasks/xattn-expanded-sweep-plan.md`. First arm
-> (`exp_xa_lr_009`: every_8 / slots=64 / gate=small_0.01, lr=3e-4,
-> warmup=100) is training on the pod as of this writing. The Final
-> Synthesis and Day-4 recommendation below will be re-written by the
-> auto-loop agent when the expansion closes (early-exit success,
-> Phase-3 completion, `nan_cascade`, or GPU-hours cap — whichever fires
-> first).
+> **Status — 2026-05-21: V5 sweep complete. Phase 2 stop rule fired.**
+> The V5 arc (v4 dataset + merged base, metric_version=5, v5_adv_error
+> primary) ran 11 x-attn experiments (2 seeds + 8 Phase 1 + 2 Phase 2).
+> Phase 1 winner: `exp_v5_p1_zero_64` (every_8 / gate=zero / slots=64 /
+> small_transformer), v5_adv_error=0.1506. Phase 2 encoder sweep found
+> neither `pooled_mlp` (0.1549) nor `ft_transformer` (0.1737) beat Phase
+> 1 winner by ≥0.005, so Phase 2 stopped after two experiments. GPU hours
+> used: 7.92/12. Dominant finding: `hn_recovery_high_amount` FPR stuck at
+> 0.44-0.45 across all 11 V5 runs — no architectural dial moved it. See
+> V5 Final Synthesis below.
 
 ---
 
@@ -522,3 +515,127 @@ Tied back to `.claude/tasks/cross-attn-ato/next-steps-checklist.md`:
   generator most differs from real data. Without that, the
   architectural sweep is exercising the generator's ceiling, not the
   model's.
+
+---
+
+## V5 Final Synthesis (2026-05-21)
+
+V5 re-ran the cross-attention sweep on the v4 synthetic ATO dataset with the
+merged CPT-light-v4 base, a revised primary metric (`v5_adv_error`), and an
+expanded two-phase queue (Phase 1: routing/training sweep; Phase 2: encoder
+sweep). 11 x-attn runs completed (2 seeds + 8 Phase 1 + 2 Phase 2 encoder
+variants). Phase 2 stop rule fired: neither Phase 2 encoder variant beat
+the Phase 1 winner by ≥0.005 absolute v5_adv_error.
+
+### 1. Did any V5 config beat exp_xattn_v4_001?
+
+**Yes on the point estimate, but CIs overlap.** The Phase 1 winner
+`exp_v5_p1_zero_64` (every_8 / gate=zero / slots=64 / small_transformer)
+scored `v5_adv_error` 0.1506 (CI [0.1278, 0.1893]) vs the V4 seed
+`exp_xattn_v4_001` at 0.1596 (CI [0.1306, 0.1945]) — a point improvement of
+0.0090 absolute, nominally above the 0.005 threshold. However, the 95%
+bootstrap CIs fully overlap (winner_hi=0.1893 > seed_lo=0.1306), so no
+statistically robust separation exists. The improvement comes almost entirely
+from `hn_recovery_high_amount` FPR dropping from 0.4505 to 0.4377 (still
+enormous) and `phish_takeover_mfa_phished` miss dropping from 0.0282 to
+0.0141. Both moves are within CI noise — the underlying model capability
+did not change.
+
+Notably, `exp_v5_p1_fastlr` (lr=3e-4 / warmup=100) catastrophically
+regressed to v5_adv_error=0.7516 (phish_takeover recall collapsed to 0.17),
+confirming the lr=1e-4 / warmup=500 default from exp_xattn_v4_001 is the
+robust training recipe. `exp_v5_p1_slowlr` (lr=3e-5) hurt mfa_phished
+recall (0.846 vs 0.986 for winner). The gate-init dial (zero vs small_0.01)
+appears mostly neutral: both `exp_v5_p1_zero_64` and `exp_v5_p1_every4_64`
+(gate=small_0.01) tied at v5_adv_error=0.1506.
+
+### 2. Did encoder architecture matter?
+
+**No.** All three encoders tested at the Phase 1 winner's hyperparameters
+produced similar or worse results:
+
+| Encoder | v5_adv_error | CI [lo, hi] | mfa_phished miss | hn_recovery FPR |
+|---|---|---|---|---|
+| small_transformer (P1 winner) | **0.1506** | [0.1278, 0.1893] | 0.0141 | 0.4377 |
+| pooled_mlp | 0.1549 | [0.1282, 0.1938] | 0.0141 | 0.4505 |
+| ft_transformer | 0.1737 | [0.1448, 0.2136] | 0.0704 | 0.4505 |
+
+`pooled_mlp` (mean/max pooling + MLP projection) effectively ties with
+`small_transformer` within CIs — collapsing attention-over-events to pooling
+causes no measurable harm. `ft_transformer` was the worst encoder: its larger
+parameter count (113M vs 109M pooled_mlp vs ~105M small_transformer) did not
+help and actively hurt `phish_takeover_mfa_phished` recall (0.9296 vs 0.9859
+for the winner), suggesting the higher-capacity tabular-style encoder
+overfits or underfits the event sequence representation in 1500 steps.
+Gate magnitudes were indistinguishable across encoders (0.0146-0.0220),
+confirming the encoder architecture does not affect whether the cross-attention
+gates open.
+
+The Phase 2 stop rule correctly fired: encoder choice is neutral-to-negative.
+
+### 3. Were gains concentrated in the adversarial families?
+
+**The bottleneck family shifted dramatically between v3 and V5.** In the v3
+sweep, the worst family was `hn_account_recovery` at FPR ~0.05-0.07. In V5,
+`hn_recovery_high_amount` FPR is the dominant failure: **stuck at 0.4377-
+0.4505 across every single V5 run**, contributing ~0.146/0.150 of the total
+v5_adv_error (the metric is a mean of three components). No architectural
+dial — insertion_pattern, resampler_slots, gate_init, lora_r, lr, encoder
+type — moved this family's FPR. This is not a model failure; it is a data
+signal problem. The `hn_recovery_high_amount` family (legitimate
+high-dollar-amount account-recovery transactions) is indistinguishable from
+fraud at the threshold that achieves 1% legit-wide FPR: ~44% of these legit
+journeys score above the fraud threshold.
+
+The V5 adversarial families that cross-attention *did* handle well:
+- `phish_takeover`: recall=1.0 universally — no challenge for any config
+- `phish_takeover_mfa_phished`: recall 0.846-0.986 across Phase 1 runs;
+  winner achieved 0.986. This was the only dial-sensitive family.
+
+In short: gains (or losses) across all Phase 1 experiments were concentrated
+entirely in `phish_takeover_mfa_phished` recall. The `hn_recovery_high_amount`
+FPR is immovable with the current data and architecture.
+
+### 4. Next step: more x-attn tuning, data redesign, or production-style eval?
+
+**Data redesign targeting `hn_recovery_high_amount`.** More x-attn
+architecture tuning cannot help: every Phase 1 and Phase 2 variant tested
+returned `hn_recovery_high_amount` FPR in the 0.437-0.451 band regardless of
+configuration. The ceiling is upstream of the architecture in the synthetic
+data generator's `hn_recovery_high_amount` template.
+
+The `hn_recovery_high_amount` family appears to be the hardest case in the v4
+data by design: large-dollar legitimate recovery events that structurally
+resemble fraud at the signal level visible to the model. Either (a) the
+generator needs richer contrastive features that let the model distinguish
+"authorized high-amount recovery by the legitimate account owner" from
+credential-takeover, or (b) the V5 metric's inclusion of this family's FPR
+in the objective is exposing a genuine production ambiguity that no
+classification head can resolve without additional context (device trust,
+step-up auth, out-of-band verification signal). If (b), then the right framing
+is not "lower FPR" but "route to step-up auth" — which is a product decision,
+not a model one.
+
+The cross-attention gates did not materially open in V5 either: Phase 2 best
+was 0.0220 (exp_xattn_v4_001 seed), Phase 1 runs ranged 0.0059-0.0212.
+This is above the zero-collapse threshold (>0.005) but well below any
+evidence of strong event-stream integration (the PLAN.md "gates open" target
+was 0.05, never achieved). Gate behavior is consistent with the LLM handling
+most of the discrimination from the narrative alone and the cross-attention
+resampler contributing a marginal structured-stream signal.
+
+**Concrete Day-N recommendations:**
+
+1. **Data redesign** — regenerate `hn_recovery_high_amount` with harder
+   contrastive signal: vary the recovery amount, authentication chain
+   complexity, device/IP novelty. Target: FPR < 0.15 on the 5k eval before
+   investing in further architecture sweep.
+2. **Production framing review** — if `hn_recovery_high_amount` FPR < 0.15
+   is impossible with synthetic data, reframe the metric: treat this family
+   as a "route to step-up" case rather than a binary fraud/legit classifier
+   target, and measure step-up-routing precision instead of FPR.
+3. **Architecture sweep is not the next lever** — Phase 1 exhausted
+   insertion_pattern, slots, gate_init, lr, warmup, and lora_r; Phase 2
+   exhausted encoder choice. All variants tie or regress vs the v4 seed on
+   the dominant bottleneck. Spending more GPU budget on architecture before
+   fixing the data ceiling is not recommended.

@@ -1,0 +1,53 @@
+exp_id: exp_v5_p2_pooled_mlp
+arm: xattn
+
+xattn:
+  insertion_pattern: every_8
+  gate_init: zero
+  resampler_slots: 64
+  encoder: pooled_mlp
+  lora_r_on_q: 16
+
+training:
+  base_checkpoint: /workspace/checkpoints/qwen3-8b-cpt-light-v4-merged
+  steps: 1500
+  seq_len: 2048
+  micro_batch: 4
+  grad_accum: 8
+  lr: 1.0e-4
+  warmup_steps: 500
+  precision: bf16
+  optimizer: paged_adamw_8bit
+  stress_run: false
+
+data:
+  train_path: /workspace/data/train_llm_narrated_v4
+  eval_fast_path: /workspace/data/train_llm_narrated_v4
+  eval_mode_dropout:
+    full: 0.50
+    opaque: 0.25
+    stripped: 0.25
+
+eval:
+  modes: [stripped, opaque, full]
+  primary_mode: stripped
+  bootstrap_resamples: 1000
+  per_journey_breakdown: true
+  per_actor_breakdown: true
+  hard_negative_fpr: true
+
+rationale: |
+  V5 Phase 2, item 1. Base = Phase 1 winner = exp_v5_p1_zero_64
+  (every_8 / gate=zero / slots=64 / lora_r_on_q=16 / lr=1e-4).
+  Swaps encoder from small_transformer to pooled_mlp. Tests whether a
+  simpler, pooling-based MLP encoder (lower capacity, faster, no
+  attention mechanism) matches or beats the Phase 1 winner.
+
+  The pooled_mlp encoder compresses the event sequence via mean/max
+  pooling + MLP projection, rather than learned attention between
+  event tokens. If it matches small_transformer, the cross-attention
+  benefit is from the resampler/integration side, not from the encoder
+  having attention over events.
+
+  Dedup check: (every_8, zero, 64, pooled_mlp, 16, 1e-4, 500, 1500,
+  2048) does not match any prior row in experiments.jsonl.

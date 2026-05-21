@@ -1,0 +1,25 @@
+The tokenizer you are loading from '/workspace/checkpoints/qwen3-8b-cpt-light-v4-merged' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading checkpoint shards:   0%|          | 0/4 [00:00<?, ?it/s]Loading checkpoint shards:  25%|██▌       | 1/4 [00:00<00:02,  1.37it/s]Loading checkpoint shards:  50%|█████     | 2/4 [00:01<00:01,  1.21it/s]Loading checkpoint shards:  75%|███████▌  | 3/4 [00:02<00:00,  1.25it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:02<00:00,  1.80it/s]Loading checkpoint shards: 100%|██████████| 4/4 [00:02<00:00,  1.55it/s]
+/workspace/.venv/lib/python3.11/site-packages/torch/nn/modules/transformer.py:307: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because encoder_layer.norm_first was True
+  warnings.warn(f"enable_nested_tensor is True, but self.use_nested_tensor is False because {why_not_sparsity_fast_path}")
+trainable params (actual)   : 214,372,364
+trainable params (estimated): 214,407,180
+[xattn] v4 contract check: PASS (33 sample rows match compose_text_only, spread across indices 0..19997 of 19998 total)
+step     0 loss 0.5794  max_gate 0.0100
+step   100 loss 0.5379  max_gate 0.0100
+step   200 loss 0.5182  max_gate 0.0139
+step   300 loss 0.4905  max_gate 0.0162
+step   400 loss 0.5173  max_gate 0.0166
+step   500 loss 0.4672  max_gate 0.0165
+step   600 loss 0.4707  max_gate 0.0162
+step   700 loss 0.4789  max_gate 0.0154
+step   800 loss 0.4526  max_gate 0.0159
+step   900 loss 0.4782  max_gate 0.0159
+step  1000 loss 0.4748  max_gate 0.0157
+step  1100 loss 0.4604  max_gate 0.0157
+step  1200 loss 0.5372  max_gate 0.0157
+step  1300 loss 0.4786  max_gate 0.0157
+step  1400 loss 0.5419  max_gate 0.0157
+wrote src/auto_research/runs/exp_v5_p1_every4_64/metrics.json + xattn_state.pt + gate_trajectory.json
+max gate magnitude across training: 0.0171

@@ -1,0 +1,25 @@
+{
+  "status": "ok",
+  "arm": "xattn",
+  "final_train_loss": 0.5242201425135136,
+  "n_steps": 1500,
+  "wall_clock_sec": 2275.571309328079,
+  "n_trainable": 108998150,
+  "predictions": {
+    "stripped": 5002,
+    "opaque": 5002,
+    "full": 5002
+  },
+  "max_gate_magnitude": 0.0146484375,
+  "estimated_trainable_total": 109051910,
+  "actual_trainable_total": 108998150,
+  "n_train_loss_records": 0,
+  "final_eval_loss": null,
+  "final_eval_auc": {
+    "stripped": null,
+    "opaque": null,
+    "full": null
+  },
+  "gate_trajectory_n_records": 0,
+  "train_runtime_seconds": null
+}
