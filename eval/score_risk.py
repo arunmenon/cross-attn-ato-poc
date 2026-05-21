@@ -30,6 +30,9 @@ import numpy as np
 from sklearn.metrics import roc_auc_score
 
 LABEL_TO_INT = {"fraud": 1, "legit": 0}
+V5_FRAUD_FAMILIES = ("phish_takeover", "phish_takeover_mfa_phished")
+V5_HARD_NEGATIVE_FAMILY = "hn_recovery_high_amount"
+V5_TARGET_FPR = 0.01
 
 
 def _to_arrays(predictions: Sequence[dict]) -> tuple[np.ndarray, np.ndarray]:
@@ -251,6 +254,129 @@ def hard_negative_fpr(
     return out
 
 
+def _tie_aware_family_rate(
+    predictions: Sequence[dict],
+    *,
+    family: str,
+    label: str,
+    threshold: float,
+    alpha: float,
+) -> dict:
+    """Family-local rate at the global decision threshold.
+
+    For fraud families this is recall; for legit hard-negative families
+    this is FPR. Ties at the global threshold are alpha-weighted so this
+    matches the decision surface produced by `recall_at_fpr`.
+    """
+    subset = [
+        p for p in predictions
+        if p.get("journey_family") == family and p.get("label") == label
+    ]
+    if not subset or math.isnan(threshold):
+        return {
+            "family": family,
+            "label": label,
+            "n": len(subset),
+            "rate": float("nan"),
+            "n_above": 0,
+            "n_tied": 0,
+        }
+
+    a = float(alpha) if not (alpha is None or math.isnan(alpha)) else 0.0
+    a = max(0.0, min(1.0, a))
+    n_above = sum(1 for p in subset if p["score"] > threshold)
+    n_tied = sum(1 for p in subset if p["score"] == threshold)
+    rate = (n_above + a * n_tied) / len(subset)
+    return {
+        "family": family,
+        "label": label,
+        "n": len(subset),
+        "rate": float(rate),
+        "n_above": int(n_above),
+        "n_tied": int(n_tied),
+    }
+
+
+def v5_adversarial_metrics(
+    predictions: Sequence[dict],
+    target_fpr: float = V5_TARGET_FPR,
+) -> dict:
+    """V5 adversarial composite.
+
+    Lower is better:
+      mean(
+        1 - recall(phish_takeover),
+        1 - recall(phish_takeover_mfa_phished),
+        fpr(hn_recovery_high_amount),
+      )
+
+    All three components are measured at the global tie-aware threshold
+    for `target_fpr` over the full eval surface.
+    """
+    decision = recall_at_fpr(predictions, target_fpr)
+    threshold = float(decision.get("threshold", float("nan")))
+    alpha = float(decision.get("alpha", 0.0))
+
+    phish = _tie_aware_family_rate(
+        predictions,
+        family="phish_takeover",
+        label="fraud",
+        threshold=threshold,
+        alpha=alpha,
+    )
+    phish_mfa = _tie_aware_family_rate(
+        predictions,
+        family="phish_takeover_mfa_phished",
+        label="fraud",
+        threshold=threshold,
+        alpha=alpha,
+    )
+    hn_recovery = _tie_aware_family_rate(
+        predictions,
+        family=V5_HARD_NEGATIVE_FAMILY,
+        label="legit",
+        threshold=threshold,
+        alpha=alpha,
+    )
+
+    components = {
+        "phish_takeover_miss": (
+            1.0 - phish["rate"] if not math.isnan(phish["rate"]) else float("nan")
+        ),
+        "phish_takeover_mfa_phished_miss": (
+            1.0 - phish_mfa["rate"] if not math.isnan(phish_mfa["rate"]) else float("nan")
+        ),
+        "hn_recovery_high_amount_fpr": hn_recovery["rate"],
+    }
+    vals = [v for v in components.values() if not math.isnan(v)]
+    v5_adv_error = sum(vals) / len(vals) if len(vals) == 3 else float("nan")
+
+    return {
+        "target_fpr": float(target_fpr),
+        "metric_version": 5,
+        "threshold": threshold,
+        "alpha": alpha,
+        "v5_adv_error": float(v5_adv_error),
+        "components": components,
+        "families": {
+            "phish_takeover": {
+                **phish,
+                "recall": phish["rate"],
+                "miss": components["phish_takeover_miss"],
+            },
+            "phish_takeover_mfa_phished": {
+                **phish_mfa,
+                "recall": phish_mfa["rate"],
+                "miss": components["phish_takeover_mfa_phished_miss"],
+            },
+            "hn_recovery_high_amount": {
+                **hn_recovery,
+                "fpr": hn_recovery["rate"],
+            },
+        },
+    }
+
+
 def compute_all(predictions: Sequence[dict], target_fprs: Sequence[float] = (0.001, 0.01, 0.05)) -> dict:
     """Top-level metrics bundle. Called by run_next_experiment.py.
 
@@ -270,9 +396,11 @@ def compute_all(predictions: Sequence[dict], target_fprs: Sequence[float] = (0.0
     else:
         hn = hard_negative_fpr(predictions, threshold_at_1pct, alpha=alpha_at_1pct)
 
+    v5_adv = v5_adversarial_metrics(predictions, target_fpr=V5_TARGET_FPR)
+
     return {
         "n": len(predictions),
-        "metric_version": 2,
+        "metric_version": 5,
         "auc": base_auc,
         **fpr_results,
         "per_journey_auc": per_journey_auc(predictions),
@@ -281,6 +409,8 @@ def compute_all(predictions: Sequence[dict], target_fprs: Sequence[float] = (0.0
         "hard_negative_fpr_at_decision_threshold_1pct": hn,
         # Explicit alias under the tie_aware name for unambiguous downstream reads.
         "hard_negative_fpr_at_decision_threshold_1pct_tie_aware": hn,
+        "v5_adversarial": v5_adv,
+        "v5_adv_error": v5_adv["v5_adv_error"],
     }
 
 
@@ -375,6 +505,21 @@ def _selftest() -> int:
     expected_hn = (3 + rr["alpha"] * 10) / 100
     assert abs(hn["hn_test"] - expected_hn) < 1e-9, f"C: hn={hn['hn_test']} != {expected_hn}"
     print(f"selftest C pass: hn_test={hn['hn_test']:.6f} expected={expected_hn:.6f}")
+
+    # --- Fixture D: V5 adversarial composite shape ----------------------------
+    v5_preds = []
+    for s in [-5.0] * 300:
+        v5_preds.append({"score": s, "label": "legit", "journey_family": "clean", "actor_family": "human", "is_hard_negative": False})
+    for s in [5.0] * 20:
+        v5_preds.append({"score": s, "label": "fraud", "journey_family": "phish_takeover", "actor_family": "human", "is_hard_negative": False})
+    for s in [4.0] * 10:
+        v5_preds.append({"score": s, "label": "fraud", "journey_family": "phish_takeover_mfa_phished", "actor_family": "human", "is_hard_negative": False})
+    for s in [-6.0] * 12:
+        v5_preds.append({"score": s, "label": "legit", "journey_family": "hn_recovery_high_amount", "actor_family": "human", "is_hard_negative": True})
+    v5 = v5_adversarial_metrics(v5_preds)
+    assert v5["metric_version"] == 5
+    assert abs(v5["v5_adv_error"]) < 1e-12, v5
+    print("selftest D pass: v5 adversarial composite shape OK")
 
     print("selftest OK")
     return 0

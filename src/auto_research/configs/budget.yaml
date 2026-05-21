@@ -5,12 +5,8 @@
 # Baselines (cpt_light, lora_text, structured_as_text, event_only) are
 # recorded for Day-3 comparison but excluded from this budget AND from
 # convergence-halt counts.
-max_experiments: 999        # effectively disabled for expanded sweep (post-Day-3, 2026-05-18);
-                            # GPU-hours cap + early-exit + nan_cascade are the real stops now.
-                            # Original 12-cap was for the smoke + Round-1 grid; expanded sweep
-                            # (.claude/tasks/xattn-expanded-sweep-plan.md) intentionally probes
-                            # 9-11 more cells around training dials + stress.
-max_gpu_hours: 18           # across Day 2 PM + Day 3 AM/midday — TOTAL spend, includes baselines
+max_experiments: 14         # V5: x-attn rows only, excluding text_only seed.
+max_gpu_hours: 12           # V5 budget on v4 data + merged base; includes seed wall-clock rows.
 max_llm_narrator_usd: 200
 
 # Halt conditions — ANY of these halts the loop. All convergence/cascade
@@ -21,14 +17,9 @@ halt:
     consecutive_threshold: 2
 
   zero_gate_activation:
-    # Disabled on 2026-05-18 after Round-2 (gate_init=zero perturbations)
-    # confirmed that gates legitimately don't move past 0.005 in either
-    # init regime on this surface. Halt was firing on a real signal that
-    # the expanded sweep (.claude/tasks/xattn-expanded-sweep-plan.md)
-    # specifically wants to probe further — Phase 1 tests whether LR /
-    # warmup variations unlock gate learning. Re-enable for production
-    # cron once the sweep is closed (or set magnitude_threshold to 0.001
-    # if you want a much weaker safety net).
+    # Disabled for V5. Zero-gate is a diagnostic signal, but the V5
+    # queue intentionally probes gate/routing sensitivity and should not
+    # halt only because a zero-init run keeps gates small.
     enabled: false
     consecutive_threshold: 2
     # Lowered from 0.05 → 0.005 on 2026-05-18 after exp_xa_round1_001
@@ -42,25 +33,12 @@ halt:
     eval_step: 1500                # measured at this step
 
   convergence:
-    # Disabled on 2026-05-18 after Round-1 spread completed and the
-    # convergence halt fired prematurely: round1_002 (the leader) was
-    # also the first row in the window, so no later row could "improve
-    # over first by 0.005" without beating 0.0474. That blocked Round 2
-    # (gate_init=zero perturbations) and Round 3 (stress run) from
-    # ever proposing. PLAN.md describes a 3-round progression; the
-    # launcher's halt logic doesn't distinguish "Round 1 done" from
-    # "whole sweep done". Disabling convergence lets the agent continue
-    # to Round 2 / 3. Budget (max_experiments=12, max_gpu_hours=18) and
-    # the NaN / zero_gate halts remain in place as the real stop
-    # conditions.
+    # Disabled until at least Phase 1 completes. If re-enabled, the
+    # launcher checks v5_adv_error, not HN-FPR.
     enabled: false
     min_valid_runs_before_halt: 6  # cannot halt before 6 valid x-attn runs (v3 minor 5)
     window: 4                      # look at last N x-attn runs
-    # Review 013 finding #1: convergence is now on worst-family HN-FPR
-    # (post-Day-1-pivot win condition), not AUC-stripped (saturated at
-    # 1.0 on every model variant). Threshold stays at 0.005 absolute,
-    # but the scale changes — HN-FPR is 0-10%, so 0.005 = 0.5
-    # percentage points of worst-family improvement.
+    # V5 convergence threshold: 0.005 absolute v5_adv_error improvement.
     hn_fpr_improvement_threshold: 0.005
     # Legacy key retained for ops scripts still referencing it.
     auc_lift_threshold: 0.005

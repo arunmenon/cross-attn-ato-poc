@@ -12,5 +12,14 @@
   },
   "max_gate_magnitude": 0.0220947265625,
   "estimated_trainable_total": 113639430,
-  "actual_trainable_total": 113604614
+  "actual_trainable_total": 113604614,
+  "n_train_loss_records": 0,
+  "final_eval_loss": null,
+  "final_eval_auc": {
+    "stripped": null,
+    "opaque": null,
+    "full": null
+  },
+  "gate_trajectory_n_records": 0,
+  "train_runtime_seconds": null
 }

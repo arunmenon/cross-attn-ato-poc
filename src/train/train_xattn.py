@@ -1,7 +1,7 @@
 """Main cross-attention trainer — Stage-1 x-attn adaptation.
 
 Per PLAN.md "Stages and adapter lifecycle":
-  - Start from `qwen3-8b-cpt-light-merged` (Stage-0 LoRA merged into
+  - Start from `qwen3-8b-cpt-light-v4-merged` (Stage-0 LoRA merged into
     base; the merged checkpoint is itself baseline #1 produced by
     train_cpt_light + scripts/merge_stage0_lora).
   - Construct QwenXAttnWrapper around the merged base.
@@ -99,7 +99,7 @@ def main():
 
     # Load the MERGED CPT-light base.
     base_id = train_cfg.get(
-        "base_checkpoint", "/workspace/checkpoints/qwen3-8b-cpt-light-merged",
+        "base_checkpoint", "/workspace/checkpoints/qwen3-8b-cpt-light-v4-merged",
     )
     tokenizer, n_new = prepare_tokenizer(base_id)
     base = AutoModelForCausalLM.from_pretrained(
@@ -118,6 +118,7 @@ def main():
         insertion_pattern=xattn_cfg.get("insertion_pattern", "every_4"),
         n_slots=xattn_cfg.get("resampler_slots", 64),
         gate_init=xattn_cfg.get("gate_init", "small_0.01"),
+        encoder_name=xattn_cfg.get("encoder", "small_transformer"),
         encoder_hidden_dim=256,
         encoder_n_layers=6, encoder_n_heads=4,
         resampler_n_layers=2, resampler_n_heads=8,
@@ -133,6 +134,7 @@ def main():
         insertion_pattern=xattn_cfg.get("insertion_pattern", "every_4"),
         n_hidden_layers=base.config.num_hidden_layers,
         hidden_size=base.config.hidden_size,
+        encoder_name=xattn_cfg.get("encoder", "small_transformer"),
         n_slots=xattn_cfg.get("resampler_slots", 64),
         lora_r_on_q=xattn_cfg.get("lora_r_on_q", 16),
     )

@@ -108,6 +108,10 @@ ARM_SCHEMA: dict[str, dict[str, type]] = {
 
 # Allowed sub-keys (one level deep) — defensive against shell-injection-like config values.
 XATTN_ALLOWED = {"insertion_pattern", "gate_init", "resampler_slots", "encoder", "lora_r_on_q"}
+XATTN_INSERTION_PATTERNS = {"every_4", "every_8", "late_only"}
+XATTN_GATE_INITS = {"zero", "small_0.01"}
+XATTN_ENCODERS = {"small_transformer", "pooled_mlp", "ft_transformer"}
+XATTN_RESAMPLER_SLOTS = {32, 64, 128}
 TRAINING_ALLOWED = {
     "base_checkpoint", "steps", "seq_len", "micro_batch", "grad_accum",
     "lr", "warmup_steps", "precision", "optimizer", "stress_run",
@@ -144,6 +148,22 @@ def validate_config(cfg: dict) -> list[str]:
 
     if arm == "xattn" and isinstance(cfg.get("xattn"), dict):
         errs += _validate_dict(cfg["xattn"], XATTN_ALLOWED, "xattn")
+        x = cfg["xattn"]
+        insertion = x.get("insertion_pattern")
+        if insertion is not None and insertion not in XATTN_INSERTION_PATTERNS:
+            errs.append(
+                f"xattn.insertion_pattern {insertion!r} not in "
+                f"{sorted(XATTN_INSERTION_PATTERNS)}"
+            )
+        gate_init = x.get("gate_init")
+        if gate_init is not None and gate_init not in XATTN_GATE_INITS:
+            errs.append(f"xattn.gate_init {gate_init!r} not in {sorted(XATTN_GATE_INITS)}")
+        encoder = x.get("encoder")
+        if encoder is not None and encoder not in XATTN_ENCODERS:
+            errs.append(f"xattn.encoder {encoder!r} not in {sorted(XATTN_ENCODERS)}")
+        slots = x.get("resampler_slots")
+        if slots is not None and slots not in XATTN_RESAMPLER_SLOTS:
+            errs.append(f"xattn.resampler_slots {slots!r} not in {sorted(XATTN_RESAMPLER_SLOTS)}")
 
     if isinstance(cfg.get("training"), dict):
         errs += _validate_dict(cfg["training"], TRAINING_ALLOWED, "training")
@@ -171,7 +191,10 @@ def validate_config(cfg: dict) -> list[str]:
         bc = cfg["training"].get("base_checkpoint")
         if bc is not None:
             bc_str = str(bc)
-            is_merged_path = "cpt-light-merged" in bc_str or "cpt_light_merged" in bc_str
+            is_merged_path = (
+                ("cpt-light" in bc_str and "merged" in bc_str)
+                or "cpt_light_merged" in bc_str
+            )
             is_raw_qwen = bc_str.startswith("Qwen/") or bc_str.startswith("qwen/")
             if arm in ("cpt_light", "lora_text") and is_merged_path:
                 errs.append(
@@ -181,7 +204,7 @@ def validate_config(cfg: dict) -> list[str]:
                     f"training.base_checkpoint so the trainer's per-arm "
                     f"default applies, or override with Qwen/Qwen3-8B."
                 )
-            if arm in ("structured_as_text", "xattn") and is_raw_qwen:
+            if arm in ("text_only", "structured_as_text", "xattn") and is_raw_qwen:
                 errs.append(
                     f"arm={arm!r} should use the merged CPT-light "
                     f"checkpoint, not raw Qwen3 ({bc_str!r}). The "
@@ -295,6 +318,23 @@ def _load_hn_ci(run_dir: Path, mode: str = "stripped") -> dict | None:
     return data.get("hard_negative_fpr_at_1pct")
 
 
+def _load_v5_ci(run_dir: Path, mode: str = "stripped") -> dict | None:
+    ci_path = run_dir / f"ci_report_{mode}.json"
+    if not ci_path.exists():
+        return None
+    try:
+        data = json.loads(ci_path.read_text())
+    except json.JSONDecodeError:
+        return None
+    return data.get("v5_adv_error")
+
+
+def _v5_family_field(v5_adv: dict, family: str, field: str) -> float | None:
+    fam = (v5_adv.get("families") or {}).get(family) or {}
+    val = fam.get(field)
+    return float(val) if isinstance(val, (int, float)) else None
+
+
 def _read_clean_eval_record_fields(run_dir: Path) -> dict:
     """Read the cached clean-eval mask stats and shape into record fields.
 
@@ -341,43 +381,27 @@ def check_halt_conditions() -> str | None:
     event_only) are recorded for Day-3 comparison but don't consume the
     x-attn sweep budget or trigger convergence halt.
 
-    Review 013 finding #1: convergence is now on worst-family HN-FPR
-    (the post-Day-1-pivot win condition), not AUC-stripped (saturated
-    at 1.0 on every model variant).
+    V5 convergence, when enabled, is on v5_adv_error. HN-FPR remains a
+    secondary metric and AUC is sanity-only.
     """
     if not BUDGET_YAML.exists():
         return None
     budget = yaml.safe_load(BUDGET_YAML.read_text())
     history = _load_history()
 
-    # Filter to x-attn arm for budget + halt counts (review 013 finding #4).
-    # Review 019 Blocker 2 extension (team-build T5 follow-on): apply the
-    # metric_version >= 2 filter symmetrically across ALL halt conditions,
-    # not just convergence. Otherwise v1 rows (with stale metric semantics
-    # or rescore-companion v2 rows from the same underlying experiment) can
-    # spuriously trigger nan_cascade or zero_gate_activation halts even
-    # when only the v2 row should count. Pipeline-eng's T5 applied the
-    # filter only to convergence; this expands it to nan_cascade and
-    # zero_gate_activation so the launcher's halt logic is internally
-    # consistent for metric_version 2 rows going forward.
+    # Filter to V5 x-attn rows for budget + halt counts. Archived v1-v4
+    # rows are not comparable under the V5 adversarial composite.
     xattn_history = [h for h in history if h.get("arm") == "xattn"]
     xattn_valid_all = [h for h in xattn_history if h.get("status") == "ok"]
-    xattn_history_v2 = [h for h in xattn_history if h.get("metric_version", 1) >= 2]
-    xattn_valid_v2 = [h for h in xattn_valid_all if h.get("metric_version", 1) >= 2]
+    xattn_history_v5 = [h for h in xattn_history if h.get("metric_version", 1) >= 5]
+    xattn_valid_v5 = [h for h in xattn_valid_all if h.get("metric_version", 1) >= 5]
 
-    # Budget caps -- x-attn v2 only (review 020 High 2). The previous
-    # implementation used xattn_valid_all, which double-counts the v1
-    # and v2 companion rows of the same underlying experiment (e.g.,
-    # exp_xa_smoke_001 + exp_xa_smoke_001_v2). max_experiments is meant
-    # to cap real GPU-trained x-attn experiments; v1 rows are
-    # pre-metric-correction history and v2 rows are the rescore
-    # companions of those same experiments — counting them as separate
-    # toward the cap would stop one real experiment early.
-    if len(xattn_valid_v2) >= budget.get("max_experiments", 999):
+    # Budget caps -- V5 x-attn rows only.
+    if len(xattn_valid_v5) >= budget.get("max_experiments", 999):
         return (
             f"max_experiments ({budget['max_experiments']}) reached "
             f"for x-attn arm; baselines excluded from this count "
-            f"(v2 rows only; v1 history rows do not count)"
+            f"(V5 rows only; archived history rows do not count)"
         )
 
     # GPU hours -- whole history (cost cap is about total spend, not just x-attn)
@@ -387,57 +411,42 @@ def check_halt_conditions() -> str | None:
 
     halt = budget.get("halt", {})
 
-    # NaN cascade -- x-attn v2 only (review 013 finding #4 + review 019 B2 extension)
+    # NaN cascade -- V5 x-attn rows only.
     if halt.get("nan_cascade", {}).get("enabled"):
         n = halt["nan_cascade"]["consecutive_threshold"]
-        recent = xattn_history_v2[-n:]
+        recent = xattn_history_v5[-n:]
         if len(recent) == n and all(h.get("status") == "nan" for h in recent):
             return f"nan_cascade: last {n} x-attn runs were NaN"
 
-    # Zero gates -- x-attn v2 only (review 019 B2 extension)
+    # Zero gates -- V5 x-attn rows only.
     if halt.get("zero_gate_activation", {}).get("enabled"):
         n = halt["zero_gate_activation"]["consecutive_threshold"]
         mag_thresh = halt["zero_gate_activation"]["magnitude_threshold"]
-        recent = xattn_valid_v2[-n:]
+        recent = xattn_valid_v5[-n:]
         if len(recent) == n and all(
             (h.get("max_gate_magnitude") or 0) < mag_thresh for h in recent
         ):
             return f"zero_gate_activation: last {n} x-attn runs had max gate < {mag_thresh}"
 
-    # Convergence -- worst-family HN-FPR over a sliding window (review 013
-    # finding #1). Compares the WORST (max) recent worst-family value
-    # against the FIRST in the window. If best is not at least `thresh`
-    # better than first, we have not improved.
-    #
-    # Review 019 Blocker 2: only metric_version >= 2 rows participate in
-    # the convergence window. v1 rows used the sklearn-cliff metric on a
-    # leaky eval; mixing them with v2 (tie-aware, clean-eval) reads as
-    # spurious improvement/regression and could halt or unhalt
-    # incorrectly.
+    # Convergence -- v5_adv_error over a sliding V5 window.
     conv = halt.get("convergence", {})
     if conv.get("enabled"):
         min_runs = conv.get("min_valid_runs_before_halt", 6)
         window = conv.get("window", 4)
         thresh = conv.get("hn_fpr_improvement_threshold",
                           conv.get("auc_lift_threshold", 0.005))
-        xattn_v2 = [h for h in xattn_valid_all if h.get("metric_version", 1) >= 2]
-        if len(xattn_v2) >= min_runs:
-            # Audit 014 H5 / audit 015 confirmed: filter Nones first, then
-            # rank against the last `window` VALID HN-FPR records.
-            # `all(v is not None ...)` silently bypassed convergence whenever
-            # a legacy (pre-review-013) row sat in the window.
-            worst_series = [
-                h.get("hn_fpr_worst_stripped") for h in xattn_v2
-            ]
-            worst_series = [v for v in worst_series if v is not None]
-            if len(worst_series) >= window:
-                recent_valid = worst_series[-window:]
-                # Lower HN-FPR is better. "Improvement" = first - best.
+        xattn_v5 = [h for h in xattn_valid_all if h.get("metric_version", 1) >= 5]
+        if len(xattn_v5) >= min_runs:
+            v5_series = [h.get("v5_adv_error") for h in xattn_v5]
+            v5_series = [v for v in v5_series if v is not None]
+            if len(v5_series) >= window:
+                recent_valid = v5_series[-window:]
+                # Lower V5 error is better. "Improvement" = first - best.
                 best = min(recent_valid)
                 first = recent_valid[0]
                 if (first - best) < thresh:
                     return (
-                        f"convergence: no worst-family HN-FPR "
+                        f"convergence: no v5_adv_error "
                         f"improvement >= {thresh} over last {window} "
                         f"x-attn runs (first={first:.4f}, best={best:.4f})"
                     )
@@ -630,11 +639,30 @@ def _resolve_clean_eval_paths(cfg: dict) -> tuple[Path, Path] | None:
     eval_dir = data.get("eval_fast_path") or data.get("eval_path")
     if train_dir is None or eval_dir is None:
         return None
-    train_jsonl = Path(train_dir) / "train.jsonl"
-    eval_jsonl = Path(eval_dir) / "eval.jsonl"
+    train_jsonl = _resolve_data_dir(train_dir) / "train.jsonl"
+    eval_jsonl = _resolve_data_dir(eval_dir) / "eval.jsonl"
     if not train_jsonl.exists() or not eval_jsonl.exists():
         return None
     return train_jsonl, eval_jsonl
+
+
+def _resolve_data_dir(pathlike: str | os.PathLike) -> Path:
+    """Resolve pod paths locally when a repo mirror exists.
+
+    On the pod, `/workspace/data/...` is authoritative. In this shared
+    workspace, the same datasets are checked out under `data/...`; this
+    fallback lets validation and V5 seeding run without changing
+    production configs.
+    """
+    p = Path(pathlike)
+    if p.exists():
+        return p
+    parts = p.parts
+    if len(parts) >= 4 and parts[0] == "/" and parts[1] == "workspace" and parts[2] == "data":
+        local = REPO_ROOT / "data" / Path(*parts[3:])
+        if local.exists():
+            return local
+    return p
 
 
 def _apply_clean_eval_mask_to_predictions(
@@ -675,9 +703,9 @@ def compute_and_cache_clean_eval_mask(
     `<run_dir>/clean_eval_mask.json` so the launcher only pays the
     hashing cost once per run even if multiple eval modes are processed.
 
-    Reviews 018/019 Blocker 2: every NEW run scores against a leakage-
-    filtered eval surface so `metric_version: 2` rows have an honest
-    HN-FPR.
+    Reviews 018/019 Blocker 2: every new run scores against a leakage-
+    filtered eval surface so V5 rows have honest adversarial and HN-FPR
+    metrics.
     """
     from eval.leakage_checks import compute_clean_eval_mask
 
@@ -730,10 +758,10 @@ def run_post_processing(
     # When a config is provided (a real launcher run), the clean-eval
     # mask MUST be resolvable BEFORE any downstream work. Otherwise we
     # might do parse + score + bootstrap effort and then either crash
-    # late or — worse — emit a metric_version=2 row scored on the raw
+    # late or — worse — emit a metric_version=5 row scored on the raw
     # /leaky eval (silently reintroducing review 018 finding 1
     # leakage). Fail closed up front. The legacy fallback path (cfg is
-    # None) keeps the pre-v2 behavior so stand-alone debug invocations
+    # None) keeps the legacy behavior so stand-alone debug invocations
     # still work, but those don't append rows downstream.
     mask_bundle = compute_and_cache_clean_eval_mask(cfg or {}, run_dir)
     clean_active = mask_bundle is not None
@@ -744,7 +772,7 @@ def run_post_processing(
             f"run_dir={run_dir}. cfg.data.train_path={data.get('train_path')!r}, "
             f"cfg.data.eval_fast_path={data.get('eval_fast_path')!r} (or eval_path). "
             "Both must point to existing directories containing train.jsonl + eval.jsonl. "
-            "Refusing to score on raw/leaky eval and append a metric_version=2 row "
+            "Refusing to score on raw/leaky eval and append a metric_version=5 row "
             "(would silently reintroduce review 018 finding 1 leakage)."
         )
 
@@ -784,7 +812,8 @@ def run_post_processing(
         )
         subprocess.run(
             [sys.executable, "-m", "eval.bootstrap_ci",
-             "--predictions", str(scoring_input), "--out", str(ci_out)],
+             "--predictions", str(scoring_input), "--out", str(ci_out),
+             "--resamples", str((cfg or {}).get("eval", {}).get("bootstrap_resamples", 1000))],
             check=True, cwd=str(REPO_ROOT),
         )
         with metrics_out.open() as f:
@@ -832,29 +861,21 @@ def update_sweep_state() -> None:
     failed = [h for h in history if h.get("status") not in ("ok", None)]
     gpu_hours = sum(h.get("wall_clock_min", 0) or 0 for h in history) / 60.0
 
-    # Rank by HN-FPR composite (review 013 finding #1).
-    # Primary: worst-family HN-FPR (minimize -- a single bad customer
-    # segment still matters in fraud/risk).
-    # Tiebreaker: mean HN-FPR (minimize).
-    # AUC is now a sanity gate (must not regress badly), not the objective.
-    #
-    # Review 019 Blocker 2: only metric_version >= 2 rows are eligible
-    # for current_best/top_3. v1 rows (pre-this-commit) used the
-    # sklearn-cliff HN-FPR on a leaky eval; their numbers are not
-    # directly comparable with v2's tie-aware HN-FPR on a clean eval.
-    # Historical v1 rows remain in experiments.jsonl for audit but are
-    # filtered out of the ranking surface.
+    # V5 rank: adversarial-family composite first, then HN-FPR as the
+    # secondary risk metric. Only rows carrying metric_version >= 5 are
+    # eligible for the V5 leaderboard.
     xattn_completed = [
         h for h in completed
         if h.get("arm") == "xattn"
-        and h.get("hn_fpr_worst_stripped") is not None
-        and h.get("metric_version", 1) >= 2
+        and h.get("v5_adv_error") is not None
+        and h.get("metric_version", 1) >= 5
     ]
-    # sort ascending on (worst, mean) — both lower-is-better
+    # sort ascending; lower is better for all ranking keys.
     ranked = sorted(
         xattn_completed,
         key=lambda h: (
-            h["hn_fpr_worst_stripped"],
+            h["v5_adv_error"],
+            h.get("hn_fpr_worst_stripped", float("inf")),
             h.get("hn_fpr_mean_stripped", float("inf")),
         ),
     )
@@ -865,6 +886,8 @@ def update_sweep_state() -> None:
         current_best = {
             "exp_id": b["exp_id"],
             "arm": b["arm"],
+            "v5_adv_error": b.get("v5_adv_error"),
+            "v5_adv_components_stripped": b.get("v5_adv_components_stripped"),
             "hn_fpr_worst_stripped": b["hn_fpr_worst_stripped"],
             "hn_fpr_mean_stripped": b.get("hn_fpr_mean_stripped"),
             "auc_stripped_sanity": b.get("auc_stripped"),
@@ -874,6 +897,7 @@ def update_sweep_state() -> None:
     top_3 = [
         {
             "exp_id": h["exp_id"],
+            "v5_adv_error": h.get("v5_adv_error"),
             "hn_fpr_worst_stripped": h["hn_fpr_worst_stripped"],
             "hn_fpr_mean_stripped": h.get("hn_fpr_mean_stripped"),
         }
@@ -882,29 +906,24 @@ def update_sweep_state() -> None:
 
     halt_reason = check_halt_conditions()
 
-    # Review 019 Blocker 2 / Medium 5: schema_version=2 documents that
-    # ranking now happens on tie-aware exact-target HN-FPR computed
-    # against a leakage-filtered eval surface. The metric_definition
-    # block describes the contract so an agent reading sweep_state.yaml
-    # cold can verify what number it's optimizing.
+    # schema_version=5 documents the V5 adversarial composite. HN-FPR
+    # fields remain in rows and top_3 as secondary diagnostics.
     metric_definition = {
-        "name": "hn_fpr_worst_stripped",
+        "name": "v5_adv_error",
         "lower_is_better": True,
-        "metric_version": 2,
+        "metric_version": 5,
         "description": (
-            "Tie-aware exact-target legit-FPR worst-family hard-negative FPR "
-            "at decision threshold 1% (review 018/019). Per-resample "
-            "(threshold, alpha) interpolation hits target_fpr = 0.01 exactly; "
-            "tied-at-threshold legit/hn rows are weighted by alpha. Evaluated "
-            "against the clean-eval surface (predictions_<mode>_clean.jsonl), "
-            "which removes train/eval text-hash and structured_events-hash "
-            "overlap before scoring. Tiebreaker: hn_fpr_mean_stripped. AUC is "
-            "a sanity gate, not the objective."
+            "Mean of three adversarial errors at the stripped-mode 1% FPR "
+            "decision threshold: 1-recall(phish_takeover), "
+            "1-recall(phish_takeover_mfa_phished), and "
+            "FPR(hn_recovery_high_amount). Tiebreakers: "
+            "hn_fpr_worst_stripped then hn_fpr_mean_stripped. AUC is a "
+            "sanity gate, not the objective."
         ),
     }
 
     state = {
-        "schema_version": 2,
+        "schema_version": 5,
         "metric_definition": metric_definition,
         "n_completed": len(completed),
         "n_failed": len(failed),
@@ -1096,16 +1115,13 @@ def _do_run(config_path: Path) -> int:
         train_metrics_path = run_dir / "metrics.json"
         train_metrics = json.loads(train_metrics_path.read_text()) if train_metrics_path.exists() else {}
 
-        # Review 013 finding #3: experiments.jsonl rows now carry the
-        # HN-FPR fields the auto-loop ranks/halts on, plus per-family
-        # detail + CI bounds for Day-3 audit. AUC stays in the row as a
-        # sanity field; it's no longer the comparison metric.
-        # Review 019 Blocker 2: rows from this commit forward carry
-        # metric_version: 2 (tie-aware HN-FPR, computed against a
-        # leakage-filtered eval surface). Clean-eval mask diagnostics
-        # are recorded so downstream audit can verify AC1b.
+        # Rows carry the V5 adversarial fields the auto-loop ranks on,
+        # HN-FPR fields as secondary diagnostics, and clean-eval mask
+        # diagnostics for auditability.
         hn_point = (stripped.get("hard_negative_fpr_at_decision_threshold_1pct") or {})
         hn_ci = _load_hn_ci(run_dir, mode="stripped")  # may be None pre-bootstrap
+        v5_adv = stripped.get("v5_adversarial") or {}
+        v5_ci = _load_v5_ci(run_dir, mode="stripped")
         clean_eval_fields = _read_clean_eval_record_fields(run_dir)
         record = {
             "exp_id": cfg["exp_id"],
@@ -1113,10 +1129,22 @@ def _do_run(config_path: Path) -> int:
             "config_hash": config_hash,
             "config_summary": _summarize_config(cfg),
             "status": train_metrics.get("status", "ok"),
-            # Review 019 Blocker 2: rows from this commit forward are
-            # ranked under the tie-aware exact-target HN-FPR metric.
-            "metric_version": 2,
-            # Primary comparison metric (review 013 finding #1, now tie-aware).
+            # V5 rows rank on adversarial-family composite; HN-FPR
+            # remains the formal secondary metric and diagnostic.
+            "metric_version": 5,
+            "v5_adv_error": v5_adv.get("v5_adv_error"),
+            "v5_adv_components_stripped": v5_adv.get("components"),
+            "v5_adv_error_ci_stripped": v5_ci,
+            "v5_phish_takeover_recall": _v5_family_field(
+                v5_adv, "phish_takeover", "recall"
+            ),
+            "v5_phish_takeover_mfa_phished_recall": _v5_family_field(
+                v5_adv, "phish_takeover_mfa_phished", "recall"
+            ),
+            "v5_hn_recovery_high_amount_fpr": _v5_family_field(
+                v5_adv, "hn_recovery_high_amount", "fpr"
+            ),
+            # Secondary comparison metric (review 013 finding #1, tie-aware).
             "hn_fpr_worst_stripped": _hn_worst(hn_point),
             "hn_fpr_mean_stripped":  _hn_mean(hn_point),
             "hn_fpr_per_family_stripped": hn_point,  # full dict for Day-3
@@ -1224,11 +1252,30 @@ def _do_dry_run_validate_clean_eval(config_path: Path) -> int:
     return 0
 
 
+def _do_validate_only(config_path: Path) -> int:
+    if not config_path.exists():
+        print(f"config not found: {config_path}", file=sys.stderr)
+        return 1
+    cfg = yaml.safe_load(config_path.read_text())
+    if not isinstance(cfg, dict):
+        print("config must be a YAML mapping", file=sys.stderr)
+        return 1
+    errs = validate_config(cfg)
+    if errs:
+        print("config validation FAILED:", file=sys.stderr)
+        for e in errs:
+            print(f"  - {e}", file=sys.stderr)
+        return 1
+    print(f"config validation OK: {config_path}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("config", nargs="?", type=Path, help="path to config.yaml")
     parser.add_argument("--mark-failed", type=Path, help="mark a run directory as failed")
     parser.add_argument("--halt-check", action="store_true", help="check halt conditions, exit 0 if clear")
+    parser.add_argument("--validate-only", type=Path, help="validate a config without launching")
     parser.add_argument(
         "--dry-run-validate-clean-eval",
         type=Path,
@@ -1241,6 +1288,9 @@ def main() -> int:
 
     if args.dry_run_validate_clean_eval is not None:
         return _do_dry_run_validate_clean_eval(args.dry_run_validate_clean_eval)
+
+    if args.validate_only is not None:
+        return _do_validate_only(args.validate_only)
 
     if args.mark_failed is not None:
         return _do_mark_failed(args.mark_failed)

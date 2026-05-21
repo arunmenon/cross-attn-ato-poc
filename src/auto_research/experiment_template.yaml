@@ -13,7 +13,7 @@ xattn:
   insertion_pattern: every_4              # see sweep_space.yaml
   gate_init: small_0.01                   # see sweep_space.yaml
   resampler_slots: 64                     # see sweep_space.yaml
-  encoder: small_transformer              # see sweep_space.yaml
+  encoder: small_transformer              # small_transformer | pooled_mlp | ft_transformer
   lora_r_on_q: 16
 
 # Training
@@ -25,7 +25,7 @@ training:
   #
   # Per-arm defaults applied by the trainers when this field is omitted:
   #   cpt_light, lora_text       -> Qwen/Qwen3-8B (raw)
-  #   structured_as_text, xattn  -> /workspace/checkpoints/qwen3-8b-cpt-light-merged
+  #   text_only, structured_as_text, xattn -> /workspace/checkpoints/qwen3-8b-cpt-light-v4-merged in V5 configs
   #   event_only                 -> no LM checkpoint needed
   #
   # An experiment may override `training.base_checkpoint` if needed, but
@@ -44,8 +44,8 @@ training:
 
 # Data
 data:
-  train_path: /workspace/data/train_llm_narrated
-  eval_fast_path: /workspace/data/eval_fast_5k
+  train_path: /workspace/data/train_llm_narrated_v4
+  eval_fast_path: /workspace/data/train_llm_narrated_v4
   eval_mode_dropout:
     full: 0.50
     opaque: 0.25

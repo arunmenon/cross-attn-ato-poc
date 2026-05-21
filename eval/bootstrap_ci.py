@@ -25,7 +25,7 @@ from typing import Sequence
 
 import numpy as np
 
-from .score_risk import LABEL_TO_INT, _load_predictions, recall_at_fpr
+from .score_risk import LABEL_TO_INT, _load_predictions, recall_at_fpr, v5_adversarial_metrics
 from sklearn.metrics import roc_auc_score
 
 
@@ -243,6 +243,66 @@ def bootstrap_hard_negative_fpr(
     }
 
 
+def bootstrap_v5_adv_error(
+    predictions: Sequence[dict],
+    target_fpr: float = 0.01,
+    resamples: int = 1000,
+    confidence: float = 0.95,
+    seed: int = 0,
+) -> dict:
+    """Bootstrap CI for the V5 adversarial composite.
+
+    Per resample, recomputes the global tie-aware decision threshold at
+    `target_fpr`, then recomputes the three V5 adversarial terms:
+    phish takeover miss, MFA-phished phish takeover miss, and
+    hn_recovery_high_amount FPR. The composite CI is the formal V5
+    ranking CI; HN-FPR CI remains available under its existing key.
+    """
+    rng = np.random.default_rng(seed)
+    n = len(predictions)
+    point = v5_adversarial_metrics(predictions, target_fpr=target_fpr)
+
+    boot_composite: list[float] = []
+    boot_components: dict[str, list[float]] = {
+        "phish_takeover_miss": [],
+        "phish_takeover_mfa_phished_miss": [],
+        "hn_recovery_high_amount_fpr": [],
+    }
+
+    for _ in range(resamples):
+        idx = rng.integers(0, n, size=n)
+        sub = [predictions[j] for j in idx]
+        m = v5_adversarial_metrics(sub, target_fpr=target_fpr)
+        boot_composite.append(float(m["v5_adv_error"]))
+        for key in boot_components:
+            boot_components[key].append(float(m["components"].get(key, float("nan"))))
+
+    pct_lo = (1.0 - confidence) / 2.0
+
+    def _ci(samples: list[float], point_value: float) -> dict:
+        arr = np.asarray(samples, dtype=np.float64)
+        return {
+            "point": float(point_value) if not np.isnan(point_value) else float("nan"),
+            "ci_lo": float(np.nanpercentile(arr, 100 * pct_lo)),
+            "ci_hi": float(np.nanpercentile(arr, 100 * (1.0 - pct_lo))),
+            "resamples": resamples,
+            "confidence": confidence,
+        }
+
+    component_ci = {
+        key: _ci(samples, float(point["components"].get(key, float("nan"))))
+        for key, samples in boot_components.items()
+    }
+
+    return {
+        "target_fpr": float(target_fpr),
+        "metric_version": 5,
+        **_ci(boot_composite, float(point["v5_adv_error"])),
+        "components": component_ci,
+        "point_details": point,
+    }
+
+
 def ci_overlap(a: dict, b: dict) -> bool:
     """True iff confidence intervals overlap. Used to decide 'win' claims."""
     return not (a["ci_hi"] < b["ci_lo"] or b["ci_hi"] < a["ci_lo"])
@@ -267,6 +327,13 @@ def _selftest() -> int:
         preds.append({"score": float(s), "label": "legit", "journey_family": "hn_a", "actor_family": "human", "is_hard_negative": True})
     for s in rng.normal(-0.2, 1.5, size=80):
         preds.append({"score": float(s), "label": "legit", "journey_family": "hn_b", "actor_family": "human", "is_hard_negative": True})
+    # V5 adversarial families for composite-CI shape.
+    for s in rng.normal(2.0, 1.0, size=40):
+        preds.append({"score": float(s), "label": "fraud", "journey_family": "phish_takeover", "actor_family": "human", "is_hard_negative": False})
+    for s in rng.normal(1.5, 1.0, size=30):
+        preds.append({"score": float(s), "label": "fraud", "journey_family": "phish_takeover_mfa_phished", "actor_family": "human", "is_hard_negative": False})
+    for s in rng.normal(0.0, 1.0, size=35):
+        preds.append({"score": float(s), "label": "legit", "journey_family": "hn_recovery_high_amount", "actor_family": "human", "is_hard_negative": True})
 
     rep = bootstrap_hard_negative_fpr(preds, target_fpr=0.01, resamples=200, seed=0)
 
@@ -277,7 +344,7 @@ def _selftest() -> int:
               "resamples", "confidence"):
         assert k in rep, f"missing key: {k}"
     assert rep["metric_version"] == 2
-    assert set(rep["per_family"].keys()) == {"hn_a", "hn_b"}
+    assert set(rep["per_family"].keys()) == {"hn_a", "hn_b", "hn_recovery_high_amount"}
     for fam, ci in rep["per_family"].items():
         assert ci["ci_lo"] <= ci["point"] <= ci["ci_hi"], f"{fam} CI inverted: {ci}"
     wf = rep["worst_family"]
@@ -291,6 +358,10 @@ def _selftest() -> int:
     # Also check bootstrap_recall_at_fpr still returns recall + threshold-like shape
     rec_ci = bootstrap_recall_at_fpr(preds, target_fpr=0.01, resamples=200, seed=0)
     assert "point" in rec_ci and "ci_lo" in rec_ci and "ci_hi" in rec_ci
+
+    v5_ci = bootstrap_v5_adv_error(preds, target_fpr=0.01, resamples=200, seed=0)
+    assert v5_ci["metric_version"] == 5
+    assert "components" in v5_ci
 
     print(
         f"selftest pass: worst_point={wf['point']:.4f} "
@@ -333,6 +404,10 @@ def main() -> int:
         )
     # HN-FPR is the Day-3 win condition; always bootstrap at 1% FPR.
     report["hard_negative_fpr_at_1pct"] = bootstrap_hard_negative_fpr(
+        preds, target_fpr=0.01, resamples=args.resamples,
+        confidence=args.confidence, seed=args.seed,
+    )
+    report["v5_adv_error"] = bootstrap_v5_adv_error(
         preds, target_fpr=0.01, resamples=args.resamples,
         confidence=args.confidence, seed=args.seed,
     )

@@ -10,5 +10,14 @@
     "opaque": 5002,
     "full": 5002
   },
-  "max_gate_magnitude": null
+  "max_gate_magnitude": null,
+  "n_train_loss_records": 0,
+  "final_eval_loss": null,
+  "final_eval_auc": {
+    "stripped": null,
+    "opaque": null,
+    "full": null
+  },
+  "gate_trajectory_n_records": 0,
+  "train_runtime_seconds": null
 }

@@ -3,7 +3,7 @@
 Renamed from train_lora_text_only.py for v4. The v3 lora_text baseline
 started from RAW Qwen3-8B (no CPT-light merge), which made it not
 apples-to-apples with structured_as_text / xattn (both of which start
-from qwen3-8b-cpt-light-merged). v4 drops that ambiguity:
+from qwen3-8b-cpt-light-v4-merged). v4 drops that ambiguity:
 
   - In v4, this trainer starts from `qwen3-8b-cpt-light-v4-merged`
     (the shared base used by structured_as_text_v4 and xattn_v4),
@@ -73,7 +73,7 @@ def main():
     # apples-to-apples. (Per-config `base_checkpoint` override still
     # honored; defaults to the v4 path.)
     model_id = train_cfg.get(
-        "base_checkpoint", "/workspace/checkpoints/qwen3-8b-cpt-light-merged",
+        "base_checkpoint", "/workspace/checkpoints/qwen3-8b-cpt-light-v4-merged",
     )
     tokenizer, n_new = prepare_tokenizer(model_id)
     model = AutoModelForCausalLM.from_pretrained(

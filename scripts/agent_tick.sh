@@ -67,10 +67,10 @@ Read the last 5 entries of src/auto_research/experiments.jsonl for history.
 If a halt condition is met, stop launching new experiments and write the
 Day-2 or Day-3 README section as appropriate.
 
-Otherwise, propose the next experiment by writing
-src/auto_research/runs/exp_NNN/config.yaml, then run:
+Otherwise, propose the next V5 queue experiment by writing
+src/auto_research/runs/<exp_id>/config.yaml, then run:
 
-    python scripts/run_next_experiment.py src/auto_research/runs/exp_NNN/config.yaml
+    python scripts/run_next_experiment.py src/auto_research/runs/<exp_id>/config.yaml
 
 When it completes, the launcher has ALREADY appended a record to
 src/auto_research/experiments.jsonl and updated src/auto_research/sweep_state.yaml.
@@ -78,18 +78,15 @@ Do NOT write either file from the agent side — the launcher owns them
 (review 013 finding #7; matches src/auto_research/AGENT_INSTRUCTIONS.md).
 Your job is to READ those files, plus the run'\''s metrics.json and
 ci_report.json, then decide what config to propose next. You may write
-src/auto_research/runs/exp_NNN/notes.md if you want to record your
+src/auto_research/runs/<exp_id>/notes.md if you want to record your
 reasoning for future reads.
 
-Ranking + halt: the launcher ranks experiments by worst-family
-hard-negative FPR (lower is better; tiebreaker is mean HN-FPR), not by
-AUC (AUC is saturated at 1.0 on every model variant — review 013
-finding #1). The auto-loop halts when worst-family HN-FPR has not
-improved by >= 0.005 absolute over the last 4 valid x-attn runs (after
-at least 6 valid x-attn runs have completed). Baselines (cpt_light,
-lora_text, structured_as_text, event_only) are recorded in
-experiments.jsonl for Day-3 comparison but do not count toward the
-x-attn sweep budget or convergence count.
+Ranking + halt: V5 ranks experiments by v5_adv_error (lower is better):
+mean(1-recall(phish_takeover), 1-recall(phish_takeover_mfa_phished),
+fpr(hn_recovery_high_amount)). Worst-family HN-FPR is the secondary
+tiebreak metric; AUC is sanity-only. Baseline seed rows are recorded in
+experiments.jsonl for comparison but do not count toward the x-attn
+sweep budget or convergence count.
 
 Before editing any source code file, run:
     git add -A && git commit -m "snapshot before <change description>"

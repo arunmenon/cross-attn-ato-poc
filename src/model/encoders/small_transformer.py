@@ -249,9 +249,94 @@ def _build_encoder_module(hidden_dim: int, n_heads: int, n_layers: int,
             x = self.embedder(event_type_ids, bucket_ids)              # (B, N, H)
             # PyTorch's src_key_padding_mask expects True where PAD.
             key_pad = ~attention_mask.bool()
-            return self.encoder(x, src_key_padding_mask=key_pad)       # (B, N, H)
+            out = self.encoder(x, src_key_padding_mask=key_pad)        # (B, N, H)
+            return out * attention_mask.to(dtype=out.dtype).unsqueeze(-1)
 
     return _SmallTransformerEncoder()
+
+
+def _build_pooled_mlp_module(hidden_dim: int, dropout: float, vocab_size: int):
+    """Cheap event encoder: per-event MLP plus masked global context."""
+    import torch
+    import torch.nn as nn
+
+    class _PooledMLPEncoder(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.token_emb = nn.Embedding(vocab_size, hidden_dim, padding_idx=EventVocab.PAD_ID)
+            self.event_mlp = nn.Sequential(
+                nn.Linear(2 * hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim),
+            )
+            self.context_mlp = nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+
+        def forward(self, event_type_ids, bucket_ids, attention_mask):
+            et = self.token_emb(event_type_ids)
+            bk = self.token_emb(bucket_ids).sum(dim=2)
+            x = self.event_mlp(torch.cat([et, bk], dim=-1))
+            mask = attention_mask.to(dtype=x.dtype).unsqueeze(-1)
+            denom = mask.sum(dim=1).clamp_min(1.0)
+            pooled = (x * mask).sum(dim=1) / denom
+            context = self.context_mlp(pooled).unsqueeze(1)
+            return (x + context) * mask
+
+    return _PooledMLPEncoder()
+
+
+def _build_ft_transformer_module(
+    hidden_dim: int,
+    n_heads: int,
+    n_layers: int,
+    dim_feedforward: int,
+    dropout: float,
+    vocab_size: int,
+    n_bucket_families: int,
+):
+    """Feature-token transformer.
+
+    Each event becomes F+1 feature tokens: event type plus one token per
+    bucket family. A small transformer mixes those feature tokens inside
+    each event, then pooled feature states form the event embedding.
+    """
+    import torch
+    import torch.nn as nn
+
+    class _FTTransformerEncoder(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.n_features = n_bucket_families + 1
+            self.token_emb = nn.Embedding(vocab_size, hidden_dim, padding_idx=EventVocab.PAD_ID)
+            self.feature_pos = nn.Parameter(torch.zeros(1, self.n_features, hidden_dim))
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=hidden_dim,
+                nhead=n_heads,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                batch_first=True,
+                activation="gelu",
+                norm_first=True,
+            )
+            self.feature_encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+            self.out_norm = nn.LayerNorm(hidden_dim)
+
+        def forward(self, event_type_ids, bucket_ids, attention_mask):
+            bsz, n_events = event_type_ids.shape
+            feature_ids = torch.cat([event_type_ids.unsqueeze(-1), bucket_ids], dim=-1)
+            x = self.token_emb(feature_ids) + self.feature_pos.to(dtype=self.token_emb.weight.dtype)
+            x = x.reshape(bsz * n_events, self.n_features, -1)
+            x = self.feature_encoder(x)
+            x = x.mean(dim=1).reshape(bsz, n_events, -1)
+            x = self.out_norm(x)
+            return x * attention_mask.to(dtype=x.dtype).unsqueeze(-1)
+
+    return _FTTransformerEncoder()
 
 
 def SmallTransformerEncoder(
@@ -272,6 +357,45 @@ def SmallTransformerEncoder(
         hidden_dim=hidden_dim, n_heads=n_heads, n_layers=n_layers,
         dim_feedforward=dim_feedforward, dropout=dropout,
         vocab_size=vocab.vocab_size, n_bucket_families=n_families,
+    )
+
+
+def PooledMLPEncoder(
+    *,
+    hidden_dim: int = 256,
+    dropout: float = 0.1,
+    vocab: EventVocab | None = None,
+    **_: object,
+):
+    """Factory for the cheap feature-only pooled MLP encoder."""
+    vocab = vocab or EventVocab()
+    return _build_pooled_mlp_module(
+        hidden_dim=hidden_dim,
+        dropout=dropout,
+        vocab_size=vocab.vocab_size,
+    )
+
+
+def FTTransformerEncoder(
+    *,
+    hidden_dim: int = 256,
+    n_heads: int = 4,
+    n_layers: int = 2,
+    dim_feedforward: int = 1024,
+    dropout: float = 0.1,
+    vocab: EventVocab | None = None,
+    **_: object,
+):
+    """Factory for the feature-token-aware event encoder."""
+    vocab = vocab or EventVocab()
+    return _build_ft_transformer_module(
+        hidden_dim=hidden_dim,
+        n_heads=n_heads,
+        n_layers=n_layers,
+        dim_feedforward=dim_feedforward,
+        dropout=dropout,
+        vocab_size=vocab.vocab_size,
+        n_bucket_families=len(BUCKET_FAMILIES),
     )
 
 
@@ -316,13 +440,22 @@ def _self_test() -> None:
               "(runs on the pod)")
         return
 
-    enc = SmallTransformerEncoder(hidden_dim=64, n_heads=4, n_layers=2)
     et = torch.tensor([toks["event_type_ids"]])               # (1, 8)
     bk = torch.tensor([toks["bucket_ids"]])                   # (1, 8, F)
     am = torch.tensor([toks["attention_mask"]])               # (1, 8)
-    out = enc(et, bk, am)
-    assert out.shape == (1, 8, 64), f"expected (1, 8, 64), got {out.shape}"
-    print(f"encoder forward OK; output shape {tuple(out.shape)}")
+    for name, factory in {
+        "small_transformer": SmallTransformerEncoder,
+        "pooled_mlp": PooledMLPEncoder,
+        "ft_transformer": FTTransformerEncoder,
+    }.items():
+        enc = factory(hidden_dim=64, n_heads=4, n_layers=2)
+        out = enc(et, bk, am)
+        assert out.shape == (1, 8, 64), f"{name}: expected (1, 8, 64), got {out.shape}"
+        assert torch.isfinite(out).all(), f"{name}: output contains NaN/Inf"
+        assert torch.allclose(out[:, 3:], torch.zeros_like(out[:, 3:])), (
+            f"{name}: padded positions should be zeroed"
+        )
+        print(f"{name} forward OK; output shape {tuple(out.shape)}")
 
 
 if __name__ == "__main__":

@@ -37,7 +37,7 @@ PLAN.md sweep dial:
   insertion_pattern ∈ {every_4, every_8, late_only}
   gate_init        ∈ {zero, small_0.01}
   resampler_slots  ∈ {64, 128}
-  encoder          ∈ {small_transformer}
+  encoder          ∈ {small_transformer, pooled_mlp, ft_transformer}
   lora_r_on_q      = 16
 """
 
@@ -47,9 +47,7 @@ import sys
 from typing import Sequence
 
 from src.model.cross_attn_block import GatedCrossAttnDense, GATE_INIT_VALUES
-from src.model.encoders.small_transformer import (
-    EventVocab, SmallTransformerEncoder, tokenize_events,
-)
+from src.model.encoders import EventVocab, available_encoders, build_event_encoder, tokenize_events
 from src.model.resampler import PerceiverResampler
 
 
@@ -68,6 +66,7 @@ def estimate_wrapper_trainable_params(
     encoder_hidden_dim: int = 256,
     encoder_n_layers: int = 6,
     encoder_n_heads: int = 4,
+    encoder_name: str = "small_transformer",
     resampler_n_layers: int = 2,
     resampler_n_heads: int = 8,
     n_slots: int = 64,
@@ -106,16 +105,30 @@ def estimate_wrapper_trainable_params(
     else:
         kv_projection = 0
 
-    # Encoder rough estimate. For typical (encoder_hidden_dim=256,
-    # n_layers=6, n_heads=4), this is ~5M. Compute as the dominant
-    # transformer-block cost × n_layers.
-    enc_per_layer = 4 * encoder_hidden_dim * encoder_hidden_dim  # MHA q/k/v/o
-    enc_per_layer += 8 * encoder_hidden_dim * encoder_hidden_dim  # FFN (dim_ff=4×)
-    encoder_approx = (
-        encoder_n_layers * enc_per_layer
-        + 4 * encoder_hidden_dim * encoder_hidden_dim  # event embedder MLP
-        + 40 * encoder_hidden_dim  # vocab embeddings (~40 tokens)
-    )
+    if encoder_name == "pooled_mlp":
+        encoder_approx = (
+            6 * encoder_hidden_dim * encoder_hidden_dim
+            + 40 * encoder_hidden_dim
+        )
+    elif encoder_name == "ft_transformer":
+        enc_per_layer = 4 * encoder_hidden_dim * encoder_hidden_dim
+        enc_per_layer += 8 * encoder_hidden_dim * encoder_hidden_dim
+        encoder_approx = (
+            encoder_n_layers * enc_per_layer
+            + 40 * encoder_hidden_dim
+            + 10 * encoder_hidden_dim
+        )
+    else:
+        # Encoder rough estimate. For typical (encoder_hidden_dim=256,
+        # n_layers=6, n_heads=4), this is ~5M. Compute as the dominant
+        # transformer-block cost × n_layers.
+        enc_per_layer = 4 * encoder_hidden_dim * encoder_hidden_dim  # MHA q/k/v/o
+        enc_per_layer += 8 * encoder_hidden_dim * encoder_hidden_dim  # FFN (dim_ff=4×)
+        encoder_approx = (
+            encoder_n_layers * enc_per_layer
+            + 4 * encoder_hidden_dim * encoder_hidden_dim  # event embedder MLP
+            + 40 * encoder_hidden_dim  # vocab embeddings (~40 tokens)
+        )
 
     # Resampler rough estimate: K latents + N layers × (cross-attn + self-attn + FFN)
     res_per_layer = (
@@ -186,6 +199,7 @@ def _build_wrapper(
     encoder_hidden_dim: int,
     encoder_n_layers: int,
     encoder_n_heads: int,
+    encoder_name: str,
     resampler_n_layers: int,
     resampler_n_heads: int,
     vocab: EventVocab,
@@ -195,7 +209,8 @@ def _build_wrapper(
     import torch.nn as nn
 
     hidden_size = base_model.config.hidden_size
-    encoder = SmallTransformerEncoder(
+    encoder = build_event_encoder(
+        encoder_name,
         hidden_dim=encoder_hidden_dim,
         n_heads=encoder_n_heads,
         n_layers=encoder_n_layers,
@@ -229,6 +244,7 @@ def _build_wrapper(
                 p.requires_grad = False
 
             self.encoder = encoder
+            self.encoder_name = encoder_name
             self.resampler = resampler
             self.kv_projection = kv_projection
             self.xattn_blocks = xattn_blocks
@@ -413,6 +429,7 @@ def QwenXAttnWrapper(
     encoder_hidden_dim: int = 256,
     encoder_n_layers: int = 6,
     encoder_n_heads: int = 4,
+    encoder_name: str = "small_transformer",
     resampler_n_layers: int = 2,
     resampler_n_heads: int = 8,
     vocab: EventVocab | None = None,
@@ -425,6 +442,7 @@ def QwenXAttnWrapper(
       insertion_pattern: 'every_4' | 'every_8' | 'late_only'.
       n_slots: Perceiver-Resampler K (64 or 128 per PLAN.md sweep).
       gate_init: 'zero' | 'small_0.01' (per PLAN.md sweep).
+      encoder_name: one of small_transformer, pooled_mlp, ft_transformer.
       encoder_*, resampler_*: side-stream encoder / resampler shapes.
       vocab: EventVocab instance (auto-created if None).
 
@@ -435,6 +453,11 @@ def QwenXAttnWrapper(
         raise ValueError(
             f"unknown gate_init: {gate_init!r}; "
             f"allowed: {sorted(GATE_INIT_VALUES)}"
+        )
+    if encoder_name not in available_encoders():
+        raise ValueError(
+            f"unknown encoder_name: {encoder_name!r}; "
+            f"allowed: {list(available_encoders())}"
         )
 
     vocab = vocab or EventVocab()
@@ -455,6 +478,7 @@ def QwenXAttnWrapper(
         encoder_hidden_dim=encoder_hidden_dim,
         encoder_n_layers=encoder_n_layers,
         encoder_n_heads=encoder_n_heads,
+        encoder_name=encoder_name,
         resampler_n_layers=resampler_n_layers,
         resampler_n_heads=resampler_n_heads,
         vocab=vocab,

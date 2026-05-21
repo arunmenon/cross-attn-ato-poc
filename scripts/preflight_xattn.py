@@ -4,7 +4,7 @@ Goal: catch integration bugs in the wrapper / merged-checkpoint /
 event-tensor path BEFORE we sink ~1.5 hr of Stage-1 GPU into the first
 training run. Specifically verifies:
 
-  1. /workspace/checkpoints/qwen3-8b-cpt-light-merged loads via
+  1. /workspace/checkpoints/qwen3-8b-cpt-light-v4-merged loads via
      AutoModelForCausalLM (review 010 finding about resize compat).
   2. Vocab size matches len(tokenizer) after custom_tokens.install
      (no token-row drift from the merge).
@@ -27,6 +27,8 @@ from pathlib import Path
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--merged-checkpoint", required=True, type=Path)
+    parser.add_argument("--encoder", default="small_transformer",
+                        choices=["small_transformer", "pooled_mlp", "ft_transformer"])
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--seq-len", type=int, default=512,
                         help="short for the smoke; real training uses 2048")
@@ -80,12 +82,16 @@ def main() -> int:
         base.resize_token_embeddings(len(tokenizer))
 
     # 3) Wrap
-    print(f"[xa-pre] wrapping with QwenXAttnWrapper (every_4, slots=64, small_0.01)")
+    print(
+        f"[xa-pre] wrapping with QwenXAttnWrapper "
+        f"(every_4, slots=64, small_0.01, encoder={args.encoder})"
+    )
     wrapper = QwenXAttnWrapper(
         base_model=base,
         insertion_pattern="every_4",
         n_slots=64,
         gate_init="small_0.01",
+        encoder_name=args.encoder,
         encoder_hidden_dim=256,
         encoder_n_layers=6,
         encoder_n_heads=4,

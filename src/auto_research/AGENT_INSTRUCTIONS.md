@@ -8,7 +8,7 @@ Read this file in full at every loop iteration.
 
 ## Mission
 
-Find the best cross-attention configuration on a synthetic ATO dataset given a 12-cell sweep space and a 10-12 experiment budget, then write a leakage-safe, CI-defended end-of-POC synthesis comparing cross-attn against four baselines. The journey log matters as much as the result.
+Find the best V5 cross-attention configuration on the v4 synthetic ATO dataset and shared v4 merged base. The specific questions are whether routing/training changes beat `exp_xattn_v4_001`, and whether `pooled_mlp` or `ft_transformer` improves over `small_transformer`. The journey log matters as much as the result.
 
 ---
 
@@ -45,7 +45,7 @@ Find the best cross-attention configuration on a synthetic ATO dataset given a 1
 
 1. **Read state.** Read this file, `sweep_state.yaml`, last 5 lines of `experiments.jsonl`, the four baseline entries. If `sweep_state.yaml` or `experiments.jsonl` is missing (gitignored runtime state — fresh clone or just-reset), treat it as zero completed runs and proceed to step 2 normally. The first launcher invocation will create both files. If you're uncertain whether the missing-file case is intentional, run `python scripts/init_auto_research_state.py` to create empty state files (idempotent; does not overwrite non-empty state).
 2. **Check halt status.** `sweep_state.yaml` exposes `halted: true/false` and `halt_reason: <string or null>`. If halted: skip to "Daily writeup" below.
-3. **Propose next config.** Apply the proposer heuristic (next section). Write to `src/auto_research/runs/exp_NNN/config.yaml` where NNN is the next free slot.
+3. **Propose next config.** Apply the active V5 queue below. Write to `src/auto_research/runs/<exp_id>/config.yaml` using the queue's exact `exp_id`.
 4. **Launch.** Run:
    ```bash
    python scripts/run_next_experiment.py src/auto_research/runs/exp_NNN/config.yaml
@@ -56,7 +56,7 @@ Find the best cross-attention configuration on a synthetic ATO dataset given a 1
    - `src/auto_research/runs/exp_NNN/ci_report.json` (aggregate; sections per eval mode)
    - `src/auto_research/runs/exp_NNN/gate_trajectory.json`
    - `src/auto_research/runs/exp_NNN/leakage_report.json` (if trainer wrote one)
-6. **Write notes.** Write a one-paragraph natural-language summary to `src/auto_research/runs/exp_NNN/notes.md` (template below). This is your only write of run-level content; you do NOT touch `experiments.jsonl` or `sweep_state.yaml`.
+6. **Write notes.** Write a one-paragraph natural-language summary to `src/auto_research/runs/<exp_id>/notes.md` (template below). This is your only write of run-level content; you do NOT touch `experiments.jsonl` or `sweep_state.yaml`.
 7. **Decide.** Re-read `sweep_state.yaml`. If `halted` → daily writeup. Otherwise → return to step 1.
 
 ---
@@ -99,52 +99,61 @@ Take the top-1. Propose ONE stress run with `stress_run: true` (steps=3000, seq_
 |---|---|---|
 | NaN cascade | 2 consecutive experiments with NaN final loss | Halt new launches. Write Day-2 or Day-3 writeup. |
 | Zero gates | 2 consecutive x-attn runs with max gate magnitude < 0.05 at step 1500 | Halt. Report as a finding: "gates failed to open on configs X, Y". |
-| Convergence | ≥6 valid x-attn runs AND no worst-family HN-FPR improvement ≥ 0.005 (absolute) over the last 4 valid runs | Halt. Top-1 is the winner; proceed to top-3 medium eval. |
+| Convergence | Disabled for V5 until Phase 1 completes; if re-enabled, it tracks `v5_adv_error` improvement ≥ 0.005 over the last 4 valid V5 x-attn rows | Halt. Top-1 is the winner. |
 | Budget exhausted | `max_experiments` or `max_gpu_hours` reached | Halt. |
 
 When halted, **do not propose new experiments**. Write the daily section of the README, then stop.
 
 ---
 
-## Expanded Sweep directive (post-Day-3, 2026-05-18)
+## V5 directive (2026-05-21)
 
-**This section SUPERSEDES the Round 1/2/3 proposer heuristic above for the current phase.** Both the smoke sweep (Round 1) and the gate_init=zero perturbation pass (Round 2) are complete; the canonical plan for what runs next lives in `.claude/tasks/xattn-expanded-sweep-plan.md`. The phase queue below is the agent-facing summary — work through it in order, applying the duplicate guard and early-exit rule.
+**This section SUPERSEDES the Round 1/2/3 proposer heuristic above for the current phase.** V5 uses the v4 dataset and merged base only. Do not regenerate data, do not retrain Stage-0, and do not rerun `exp_xattn_v4_001`.
+
+Primary ranking metric: `v5_adv_error` (lower is better), the mean of:
+- `1 - recall(phish_takeover)`
+- `1 - recall(phish_takeover_mfa_phished)`
+- `fpr(hn_recovery_high_amount)`
+
+Secondary metric: `hn_fpr_worst_stripped`, then `hn_fpr_mean_stripped`. AUC is sanity-only.
+
+Seed rows in V5 state:
+- `exp_text_only_v4_001`: control baseline
+- `exp_xattn_v4_001`: current x-attn leader and Phase 1 starting point
+
+Shared V5 paths:
+- base: `/workspace/checkpoints/qwen3-8b-cpt-light-v4-merged`
+- data: `/workspace/data/train_llm_narrated_v4`
 
 ### Phase queue (proceed in order; skip exact-tuple duplicates)
 
-**Phase 1 — Training-dial sweep around current best** (`every_8 / small_0.01 / 64 / encoder=small_transformer / lora_r=16`):
+**Phase 1 — Routing and training sweep.** Keep `encoder=small_transformer`. Base hyperparameters come from `exp_xattn_v4_001` unless a queue item overrides them.
 
 ```text
-exp_xa_lr_009    lr=3e-4   warmup=100   steps=1500   seq_len=2048
-exp_xa_lr_010    lr=3e-4   warmup=500   steps=1500   seq_len=2048
-exp_xa_lr_011    lr=3e-5   warmup=500   steps=1500   seq_len=2048
+exp_v5_p1_every4_64   insertion_pattern=every_4   gate_init=small_0.01   resampler_slots=64
+exp_v5_p1_late_64     insertion_pattern=late_only gate_init=small_0.01   resampler_slots=64
+exp_v5_p1_zero_64     insertion_pattern=every_8   gate_init=zero         resampler_slots=64
+exp_v5_p1_slots128    insertion_pattern=every_8   gate_init=small_0.01   resampler_slots=128
+exp_v5_p1_slots32     insertion_pattern=every_8   gate_init=small_0.01   resampler_slots=32
+exp_v5_p1_fastlr      base = best of first five; lr=3e-4; warmup_steps=100
+exp_v5_p1_slowlr      base = best of first five; lr=3e-5; warmup_steps=500
+exp_v5_p1_rank32      base = best so far; lora_r_on_q=32
 ```
 
-**Phase 2 — One stress run on best config so far:**
+Phase 1 winner = lowest `v5_adv_error`; tie-break with `hn_fpr_worst_stripped`.
+
+**Phase 2 — Event encoder sweep.** Only run this phase after Phase 1 completes and the encoder registry is present in `train_xattn.py`.
 
 ```text
-exp_xa_stress_012   stress_run=true   steps=3000   seq_len=4096
-                    base = best config from Phase 1 (or round1_002 if Phase 1 didn't beat it)
+exp_v5_p2_pooled_mlp              base = Phase 1 winner; encoder=pooled_mlp
+exp_v5_p2_ft_transformer          base = Phase 1 winner; encoder=ft_transformer
+exp_v5_p2_best_encoder_slots      base = better Phase 2 encoder; toggle slots (64<->128, 32->64)
+exp_v5_p2_best_encoder_rank_or_long
+                                  base = better Phase 2 encoder; if rank=16 try rank=32,
+                                  otherwise try steps=3000 and seq_len=2048
 ```
 
-**Phase 3 — Finish non-duplicate original-grid cells:**
-
-```text
-exp_xa_grid_013    late_only / zero       / 64
-exp_xa_grid_014    every_8   / small_0.01 / 128   (retry of failed round1_005; one retry allowed)
-exp_xa_grid_015    every_4   / zero       / 128
-exp_xa_grid_016    every_8   / zero       / 128
-exp_xa_grid_017    late_only / zero       / 128
-```
-
-**Phase 4 — Rank capacity (CONDITIONAL — only if `max_gpu_hours - gpu_hours_used >= 1.5`):**
-
-```text
-exp_xa_rank_018    lora_r_on_q=32
-exp_xa_rank_019    lora_r_on_q=64
-```
-
-Use the best completed config at time of dispatch as the base for Phase 4. Vary only `lora_r_on_q`.
+Stop Phase 2 if neither `pooled_mlp` nor `ft_transformer` beats the Phase 1 winner by at least `0.005` absolute `v5_adv_error`.
 
 ### Dedup tuple (mandatory pre-write check)
 
@@ -168,7 +177,7 @@ The launcher's `canonical_hash` catches exact-hash duplicates as a safety net (e
 If any run records BOTH:
 
 1. `max_gate_magnitude >= 0.05` (the original PLAN.md "gates open" threshold; current sweep has never satisfied it), AND
-2. `hn_fpr_worst_stripped` beats `current_best.hn_fpr_worst_stripped` with **non-overlapping** 95% CIs. Concretely: `new_row.hn_fpr_ci_stripped.worst_family.ci_hi < current_best.hn_fpr_ci_stripped.worst_family.ci_lo`.
+2. `v5_adv_error` beats `current_best.v5_adv_error` by at least `0.005` absolute. If `v5_adv_error_ci_stripped` is present, prefer non-overlap on that CI.
 
 → **STOP the mechanical queue.** Skip the rest of Phase 1-4.
 
@@ -186,20 +195,20 @@ Record the early-exit in `runs/exp_NNN/notes.md`: which trigger fired (gate or H
 
 Stop and write final synthesis when ANY of:
 
-1. `max_gpu_hours >= 18` (the cost cap; budget.yaml).
-2. All Phase 1-3 queue items completed-or-failed (Phase 4 optional per its conditional gate).
-3. Early-exit rule fired AND local-perturbation queue exhausts or 3 perturbations show no further improvement.
+1. `max_gpu_hours >= 12` or `max_experiments >= 14` (budget.yaml).
+2. Phase 1 and the allowed Phase 2 queue items completed-or-failed.
+3. Phase 2 stop rule fires because no encoder variant beats Phase 1 by `0.005` absolute `v5_adv_error`.
 
 When you stop, append (or rewrite) the README "Final synthesis" section answering:
 
-1. Did any non-duplicate x-attn config beat structured_as_text_v2 (HN-FPR-worst = 0.0507 [0.0408, 0.0635]) with non-overlapping CIs?
-2. Did LR/warmup/rank/longer training change the gate story (did max_gate ever reach 0.05+)?
-3. Was the Day-3 "ceiling is upstream of architecture" finding confirmed or refuted?
-4. Day-4 recommendation: more x-attn variants, harder synthetic data, or pivot to structured-as-text concat?
+1. Did any V5 config beat `exp_xattn_v4_001`?
+2. Did encoder architecture matter?
+3. Were gains concentrated in the adversarial families?
+4. Is the next step more x-attn tuning, data redesign, or production-style eval?
 
 ---
 
-## Notes template (one markdown file per run at `runs/exp_NNN/notes.md`)
+## Notes template (one markdown file per run at `runs/<exp_id>/notes.md`)
 
 After the launcher completes, write a one-paragraph natural-language summary to `runs/exp_NNN/notes.md`. The launcher has already recorded the structured fields (AUC, CI, gates, wall-clock) in `experiments.jsonl` — your job is the *interpretation*.
 
@@ -208,19 +217,16 @@ After the launcher completes, write a one-paragraph natural-language summary to 
 
 Config: every_4 / slots=64 / gate=zero / small_transformer
 
-Trained cleanly. Gates opened to ~0.21 by step 600 and held. Worst-family
-HN-FPR-stripped 0.018 with CI [0.012, 0.026] (worst family: hn_travel) beats
-CPT-light (0.041, CI [0.033, 0.050]) by non-overlapping CIs. Ties
-structured-as-text concat (0.021, CI [0.015, 0.029]) within overlapping CIs —
-no decisive lift there yet. Mean HN-FPR-stripped 0.011 (tiebreak metric, same
-ordering). AUC-stripped 1.000 (saturated, sanity-only). Per-journey: strong on
-sim_swap and mule_chain, weaker on phish_takeover.
+Trained cleanly. V5 adversarial error 0.012, driven by phish_takeover recall
+0.99, phish_takeover_mfa_phished recall 0.98, and hn_recovery_high_amount FPR
+0.04. Worst-family HN-FPR-stripped 0.018 with CI [0.012, 0.026] remains the
+secondary risk metric. Gates opened to ~0.21 by step 600 and held. AUC-stripped
+1.000 is saturated and sanity-only.
 
-Next: try every_4/slots=64/gate=zero with longer training to see if SAS gap
-widens on worst-family HN-FPR.
+Next: continue the V5 queue with the next non-duplicate item.
 ```
 
-Keep it specific: gates story, baseline deltas (with CI overlap status), per-journey signal, what to try next. The Day-2 and Day-3 README writeups will join your notes with the launcher's structured records.
+Keep it specific: V5 adversarial-family movement, HN-FPR movement, gate story, and the next queue item.
 
 ---
 
