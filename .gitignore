@@ -83,3 +83,8 @@ data/train_llm_narrated_v4/build.log
 
 # Balance poller log (local-only operational artifact)
 /balance.log
+
+# LibreOffice artifacts in the whitepaper figures directory (lock files +
+# intermediate temp files left behind by soffice --convert-to png/pdf).
+whitepaper/figures/.~lock.*
+whitepaper/figures/*.tmp

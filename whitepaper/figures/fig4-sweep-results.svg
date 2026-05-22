@@ -1,0 +1,246 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 900" font-family="Inter, Helvetica, Arial, sans-serif">
+  <style>
+    .H { font-size: 24px; fill: #1E2761; font-weight: 700; }
+    .h { font-size: 16px; fill: #1E2761; font-weight: 700; }
+    .t { font-size: 13px; fill: #1E293B; }
+    .m { font-size: 12px; fill: #64748B; font-style: italic; }
+    .lbl { font-size: 12px; fill: #475569; }
+    .lblb { font-size: 13px; fill: #1E2761; font-weight: 700; }
+    .axis { stroke: #94A3B8; stroke-width: 1; }
+    .grid { stroke: #E2E8F0; stroke-width: 0.5; stroke-dasharray: 2 3; }
+    .ax { font-size: 12px; fill: #475569; }
+    .acc { font-size: 12px; fill: #F59E0B; font-weight: 700; letter-spacing: 1px; }
+  </style>
+
+  <text x="700" y="40" class="H" text-anchor="middle">Figure 4. v5 sweep leaderboard  ·  adversarial-error decomposition</text>
+  <text x="700" y="66" class="m" text-anchor="middle">11 cross-attention runs across Phase 1 (training-dial + arch sweep) and Phase 2 (encoder sweep).  Lower is better.</text>
+
+  <!-- ============== PANEL A: bar chart with CIs ============== -->
+  <g transform="translate(60, 110)">
+    <text x="0" y="0" class="h">A.  v5_adv_error  =  ⅓ · ( phish_takeover_miss  +  phish_takeover_mfa_phished_miss  +  hn_recovery_high_amount_fpr )</text>
+
+    <!-- Plot area: 1280 x 360 -->
+    <g transform="translate(0, 30)">
+      <rect width="1280" height="360" fill="#FFFFFF"/>
+      <!-- y-axis 0 ... 0.8 -->
+      <line x1="60" y1="0" x2="60" y2="360" class="axis"/>
+      <line x1="60" y1="360" x2="1280" y2="360" class="axis"/>
+      <!-- gridlines + labels at 0.0, 0.1, ..., 0.8 -->
+      <g>
+        <line x1="60" y1="360" x2="1280" y2="360" class="grid"/><text x="54" y="364" class="ax" text-anchor="end">0.0</text>
+        <line x1="60" y1="315" x2="1280" y2="315" class="grid"/><text x="54" y="319" class="ax" text-anchor="end">0.1</text>
+        <line x1="60" y1="270" x2="1280" y2="270" class="grid"/><text x="54" y="274" class="ax" text-anchor="end">0.2</text>
+        <line x1="60" y1="225" x2="1280" y2="225" class="grid"/><text x="54" y="229" class="ax" text-anchor="end">0.3</text>
+        <line x1="60" y1="180" x2="1280" y2="180" class="grid"/><text x="54" y="184" class="ax" text-anchor="end">0.4</text>
+        <line x1="60" y1="135" x2="1280" y2="135" class="grid"/><text x="54" y="139" class="ax" text-anchor="end">0.5</text>
+        <line x1="60" y1="90"  x2="1280" y2="90"  class="grid"/><text x="54" y="94"  class="ax" text-anchor="end">0.6</text>
+        <line x1="60" y1="45"  x2="1280" y2="45"  class="grid"/><text x="54" y="49"  class="ax" text-anchor="end">0.7</text>
+        <line x1="60" y1="0"   x2="1280" y2="0"   class="grid"/><text x="54" y="4"   class="ax" text-anchor="end">0.8</text>
+      </g>
+      <text x="20" y="180" class="ax" text-anchor="middle" transform="rotate(-90 20,180)" font-weight="600">v5_adv_error  ·  lower is better</text>
+
+      <!--
+        y(v) = 360 - v * 450     (0.0 -> 360,  0.8 -> 0)
+        bar width 70, gap 30
+        x-positions: 90, 190, 290, 390, 490, 590, 690, 790, 890, 990, 1090
+      -->
+
+      <!-- Bar 1: v4 seed -->
+      <g transform="translate(90, 0)">
+        <rect x="0" y="288" width="70" height="72" fill="#94A3B8"/>
+        <line x1="35" y1="272" x2="35" y2="301" stroke="#1E2761" stroke-width="2"/>
+        <line x1="25" y1="272" x2="45" y2="272" stroke="#1E2761" stroke-width="2"/>
+        <line x1="25" y1="301" x2="45" y2="301" stroke="#1E2761" stroke-width="2"/>
+        <text x="35" y="265" class="lblb" text-anchor="middle">0.160</text>
+      </g>
+
+      <!-- Bar 2: every_4 -->
+      <g transform="translate(190, 0)">
+        <rect x="0" y="292" width="70" height="68" fill="#1E2761"/>
+        <line x1="35" y1="275" x2="35" y2="302" stroke="#1E2761" stroke-width="2"/>
+        <line x1="25" y1="275" x2="45" y2="275" stroke="#1E2761" stroke-width="2"/>
+        <line x1="25" y1="302" x2="45" y2="302" stroke="#1E2761" stroke-width="2"/>
+        <text x="35" y="268" class="lblb" text-anchor="middle">0.151</text>
+      </g>
+
+      <!-- Bar 3: late_only -->
+      <g transform="translate(290, 0)">
+        <rect x="0" y="290" width="70" height="70" fill="#1E2761"/>
+        <line x1="35" y1="273" x2="35" y2="302" stroke="#1E2761" stroke-width="2"/>
+        <line x1="25" y1="273" x2="45" y2="273" stroke="#1E2761" stroke-width="2"/>
+        <line x1="25" y1="302" x2="45" y2="302" stroke="#1E2761" stroke-width="2"/>
+        <text x="35" y="267" class="lblb" text-anchor="middle">0.155</text>
+      </g>
+
+      <!-- Bar 4: zero_64 ★ WINNER -->
+      <g transform="translate(390, 0)">
+        <rect x="0" y="292" width="70" height="68" fill="#0D9488"/>
+        <line x1="35" y1="275" x2="35" y2="302" stroke="#0D9488" stroke-width="2.5"/>
+        <line x1="25" y1="275" x2="45" y2="275" stroke="#0D9488" stroke-width="2.5"/>
+        <line x1="25" y1="302" x2="45" y2="302" stroke="#0D9488" stroke-width="2.5"/>
+        <text x="35" y="268" class="lblb" text-anchor="middle" fill="#0D9488">0.151</text>
+        <text x="35" y="246" class="acc" text-anchor="middle" fill="#0D9488">★ WINNER</text>
+      </g>
+
+      <!-- Bar 5: slots=128 -->
+      <g transform="translate(490, 0)">
+        <rect x="0" y="291" width="70" height="69" fill="#1E2761"/>
+        <line x1="35" y1="275" x2="35" y2="302" stroke="#1E2761" stroke-width="2"/>
+        <line x1="25" y1="275" x2="45" y2="275" stroke="#1E2761" stroke-width="2"/>
+        <line x1="25" y1="302" x2="45" y2="302" stroke="#1E2761" stroke-width="2"/>
+        <text x="35" y="268" class="lblb" text-anchor="middle">0.153</text>
+      </g>
+
+      <!-- Bar 6: slots=32 -->
+      <g transform="translate(590, 0)">
+        <rect x="0" y="285" width="70" height="75" fill="#1E2761"/>
+        <line x1="35" y1="269" x2="35" y2="297" stroke="#1E2761" stroke-width="2"/>
+        <line x1="25" y1="269" x2="45" y2="269" stroke="#1E2761" stroke-width="2"/>
+        <line x1="25" y1="297" x2="45" y2="297" stroke="#1E2761" stroke-width="2"/>
+        <text x="35" y="262" class="lblb" text-anchor="middle">0.166</text>
+      </g>
+
+      <!-- Bar 7: lora_r=32 -->
+      <g transform="translate(690, 0)">
+        <rect x="0" y="287" width="70" height="73" fill="#1E2761"/>
+        <line x1="35" y1="271" x2="35" y2="299" stroke="#1E2761" stroke-width="2"/>
+        <line x1="25" y1="271" x2="45" y2="271" stroke="#1E2761" stroke-width="2"/>
+        <line x1="25" y1="299" x2="45" y2="299" stroke="#1E2761" stroke-width="2"/>
+        <text x="35" y="264" class="lblb" text-anchor="middle">0.162</text>
+      </g>
+
+      <!-- Bar 8: lr=3e-5 (slowlr) -->
+      <g transform="translate(790, 0)">
+        <rect x="0" y="269" width="70" height="91" fill="#F59E0B"/>
+        <line x1="35" y1="250" x2="35" y2="285" stroke="#F59E0B" stroke-width="2"/>
+        <line x1="25" y1="250" x2="45" y2="250" stroke="#F59E0B" stroke-width="2"/>
+        <line x1="25" y1="285" x2="45" y2="285" stroke="#F59E0B" stroke-width="2"/>
+        <text x="35" y="244" class="lblb" text-anchor="middle" fill="#F59E0B">0.202</text>
+      </g>
+
+      <!-- Bar 9: pooled_mlp (P2) -->
+      <g transform="translate(890, 0)">
+        <rect x="0" y="290" width="70" height="70" fill="#0D9488" opacity="0.65"/>
+        <line x1="35" y1="273" x2="35" y2="302" stroke="#0D9488" stroke-width="2"/>
+        <line x1="25" y1="273" x2="45" y2="273" stroke="#0D9488" stroke-width="2"/>
+        <line x1="25" y1="302" x2="45" y2="302" stroke="#0D9488" stroke-width="2"/>
+        <text x="35" y="266" class="lblb" text-anchor="middle">0.155</text>
+        <text x="35" y="246" class="acc" text-anchor="middle" fill="#0D9488">P2</text>
+      </g>
+
+      <!-- Bar 10: ft_transformer (P2) -->
+      <g transform="translate(990, 0)">
+        <rect x="0" y="282" width="70" height="78" fill="#0D9488" opacity="0.65"/>
+        <line x1="35" y1="265" x2="35" y2="295" stroke="#0D9488" stroke-width="2"/>
+        <line x1="25" y1="265" x2="45" y2="265" stroke="#0D9488" stroke-width="2"/>
+        <line x1="25" y1="295" x2="45" y2="295" stroke="#0D9488" stroke-width="2"/>
+        <text x="35" y="258" class="lblb" text-anchor="middle">0.174</text>
+        <text x="35" y="246" class="acc" text-anchor="middle" fill="#0D9488">P2</text>
+      </g>
+
+      <!-- Bar 11: lr=3e-4 catastrophic -->
+      <g transform="translate(1090, 0)">
+        <rect x="0" y="22" width="70" height="338" fill="#DC2626"/>
+        <line x1="35" y1="12" x2="35" y2="30" stroke="#DC2626" stroke-width="2"/>
+        <line x1="25" y1="12" x2="45" y2="12" stroke="#DC2626" stroke-width="2"/>
+        <line x1="25" y1="30" x2="45" y2="30" stroke="#DC2626" stroke-width="2"/>
+        <text x="35" y="6" class="lblb" text-anchor="middle" fill="#DC2626">0.752</text>
+      </g>
+
+      <!-- X-axis labels: row 1 (top label = the run name) and row 2 (config detail) -->
+      <g transform="translate(0, 380)">
+        <text x="125" y="0" class="ax" text-anchor="middle" font-weight="700">v4 seed</text>
+        <text x="225" y="0" class="ax" text-anchor="middle" font-weight="700">every_4</text>
+        <text x="325" y="0" class="ax" text-anchor="middle" font-weight="700">late_only</text>
+        <text x="425" y="0" class="ax" text-anchor="middle" font-weight="700" fill="#0D9488">zero_64</text>
+        <text x="525" y="0" class="ax" text-anchor="middle" font-weight="700">slots=128</text>
+        <text x="625" y="0" class="ax" text-anchor="middle" font-weight="700">slots=32</text>
+        <text x="725" y="0" class="ax" text-anchor="middle" font-weight="700">lora_r=32</text>
+        <text x="825" y="0" class="ax" text-anchor="middle" font-weight="700" fill="#F59E0B">lr = 3e-5</text>
+        <text x="925" y="0" class="ax" text-anchor="middle" font-weight="700">pooled_mlp</text>
+        <text x="1025" y="0" class="ax" text-anchor="middle" font-weight="700">ft_tx</text>
+        <text x="1125" y="0" class="ax" text-anchor="middle" font-weight="700" fill="#DC2626">lr = 3e-4</text>
+      </g>
+
+      <!-- Row 2: smaller subtitle -->
+      <g transform="translate(0, 400)" font-size="11">
+        <text x="125" y="0" class="ax" text-anchor="middle">every_8 · 64 · α=.01</text>
+        <text x="225" y="0" class="ax" text-anchor="middle">every_4 · 64</text>
+        <text x="325" y="0" class="ax" text-anchor="middle">late_only · 64</text>
+        <text x="425" y="0" class="ax" text-anchor="middle" fill="#0D9488">every_8 · α=zero</text>
+        <text x="525" y="0" class="ax" text-anchor="middle">128 slots</text>
+        <text x="625" y="0" class="ax" text-anchor="middle">32 slots</text>
+        <text x="725" y="0" class="ax" text-anchor="middle">rank 32</text>
+        <text x="825" y="0" class="ax" text-anchor="middle" fill="#F59E0B">slow LR</text>
+        <text x="925" y="0" class="ax" text-anchor="middle">encoder swap</text>
+        <text x="1025" y="0" class="ax" text-anchor="middle">encoder swap</text>
+        <text x="1125" y="0" class="ax" text-anchor="middle" fill="#DC2626">catastrophic</text>
+      </g>
+
+      <!-- Phase brackets -->
+      <line x1="100" y1="430" x2="780" y2="430" stroke="#1E2761" stroke-width="2"/>
+      <text x="440" y="452" class="ax" text-anchor="middle" font-weight="700" fill="#1E2761">Phase 1   ·   training + architecture dial sweep</text>
+
+      <line x1="800" y1="430" x2="1060" y2="430" stroke="#0D9488" stroke-width="2"/>
+      <text x="930" y="452" class="ax" text-anchor="middle" font-weight="700" fill="#0D9488">Phase 2   ·   encoder</text>
+
+      <line x1="1080" y1="430" x2="1160" y2="430" stroke="#DC2626" stroke-width="2"/>
+      <text x="1120" y="452" class="ax" text-anchor="middle" font-weight="700" fill="#DC2626">regress</text>
+    </g>
+  </g>
+
+  <!-- ============== PANEL B: decomposition of winner ============== -->
+  <g transform="translate(60, 660)">
+    <text x="0" y="0" class="h">B.  Decomposition of v5_adv_error for the Phase-1 winner  (exp_v5_p1_zero_64)</text>
+    <text x="0" y="20" class="m">97 % of the error comes from one family. No architectural dial moved hn_recovery_high_amount.</text>
+
+    <!-- Stacked bar with proportional widths -->
+    <g transform="translate(0, 40)">
+      <!-- Total bar bg -->
+      <rect x="0" y="0" width="1280" height="50" fill="#F1F5F9" stroke="#94A3B8"/>
+
+      <!--
+        Total v5_adv_error = 0.452 (sum of the three: 0.000 + 0.014 + 0.438)
+        Bar width 1280 represents the sum:
+          phish_takeover_miss        = 0 / 0.452 = 0  → 0px
+          phish_takeover_mfa_phished = 0.014 / 0.452 = 0.0310 → 40px
+          hn_recovery_high_amount    = 0.438 / 0.452 = 0.9690 → 1240px
+      -->
+
+      <!-- Segment 1: phish_takeover_miss (negligible) -->
+      <!-- omitted: 0 width -->
+
+      <!-- Segment 2: phish_takeover_mfa_phished_miss = 40px -->
+      <rect x="0" y="0" width="40" height="50" fill="#F59E0B"/>
+
+      <!-- Segment 3: hn_recovery_high_amount = 1240px -->
+      <rect x="40" y="0" width="1240" height="50" fill="#DC2626"/>
+
+      <!-- Label INSIDE the dominant segment -->
+      <text x="660" y="30" fill="#FFFFFF" font-size="16" font-weight="700" text-anchor="middle">hn_recovery_high_amount FPR  =  0.4377   ·   contributes ~ 97 % of v5_adv_error</text>
+    </g>
+
+    <!-- Legend BELOW the bar (no overlap) -->
+    <g transform="translate(0, 110)">
+      <g>
+        <rect width="16" height="16" fill="#1E2761"/>
+        <text x="24" y="12" class="t" font-weight="700">phish_takeover_miss</text>
+        <text x="24" y="30" class="m">= 0.000   ·  recall 100 % on every config</text>
+      </g>
+
+      <g transform="translate(360, 0)">
+        <rect width="16" height="16" fill="#F59E0B"/>
+        <text x="24" y="12" class="t" font-weight="700">phish_takeover_mfa_phished_miss</text>
+        <text x="24" y="30" class="m">= 0.014   ·  recall 98.6 %  —  the dial-sensitive family</text>
+      </g>
+
+      <g transform="translate(820, 0)">
+        <rect width="16" height="16" fill="#DC2626"/>
+        <text x="24" y="12" class="t" font-weight="700">hn_recovery_high_amount_fpr</text>
+        <text x="24" y="30" class="m">= 0.438   ·  CI [0.360, 0.545]  —  stuck across non-pathological v5 runs</text>
+      </g>
+    </g>
+
+    <text x="0" y="180" class="m">v5_adv_error = (0.000 + 0.014 + 0.438) / 3 = 0.151.   Architecture sweep cannot move the dominant term — the ceiling is upstream in the data generator's hn_recovery_high_amount template.</text>
+  </g>
+</svg>

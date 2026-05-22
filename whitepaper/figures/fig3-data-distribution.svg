@@ -1,0 +1,232 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 1100" font-family="Inter, Helvetica, Arial, sans-serif">
+  <style>
+    .H { font-size: 24px; fill: #1E2761; font-weight: 700; }
+    .h { font-size: 16px; fill: #1E2761; font-weight: 700; }
+    .t { font-size: 13px; fill: #1E293B; }
+    .m { font-size: 12px; fill: #64748B; font-style: italic; }
+    .num { font-size: 13px; fill: #FFFFFF; font-weight: 700; }
+    .nb { font-size: 12px; fill: #94A3B8; font-weight: 500; }
+    .col { font-size: 13px; fill: #1E2761; font-weight: 700; }
+    .row { font-size: 13px; fill: #1E293B; font-weight: 700; }
+    .code { font-family: Consolas, "Courier New", monospace; font-size: 12px; fill: #334155; }
+  </style>
+
+  <!-- Title -->
+  <text x="700" y="40" class="H" text-anchor="middle">Figure 3. Data distribution &amp; eval-mode mix</text>
+  <text x="700" y="66" class="m" text-anchor="middle">v4 / v5 synthetic ATO dataset  ·  25,000 LLM-narrated training pairs  ·  5,002-row stratified held-out eval</text>
+
+  <!-- ============== ROW 1 (left): PANEL A - Class balance ============== -->
+  <g transform="translate(60, 110)">
+    <text x="0" y="0" class="h">A.  Class balance  (training pool, n = 25,000)</text>
+    <g transform="translate(0, 18)">
+      <rect width="650" height="46" fill="#F1F5F9" stroke="#94A3B8"/>
+      <rect width="260" height="46" fill="#DC2626"/>
+      <text x="130" y="29" class="num" text-anchor="middle">Fraud  ·  40 %  ·  10,000</text>
+      <rect x="260" width="195" height="46" fill="#F59E0B"/>
+      <text x="357" y="29" class="num" text-anchor="middle">Hard-neg  ·  30 %  ·  7,500</text>
+      <rect x="455" width="195" height="46" fill="#0D9488"/>
+      <text x="552" y="29" class="num" text-anchor="middle">Legit  ·  30 %  ·  7,500</text>
+    </g>
+    <text x="0" y="86" class="m">Class-stratified split preserves these ratios in the 5k clean eval  (n = 5,002, drops 0 rows after v4 leakage controls).</text>
+  </g>
+
+  <!-- ============== ROW 1 (right): PANEL C - Eval-mode dropout ============== -->
+  <g transform="translate(800, 110)">
+    <text x="0" y="0" class="h">C.  Eval-mode dropout  (training)</text>
+    <text x="0" y="20" class="m">Per-example sampling so stripped eval is in-distribution.</text>
+
+    <!-- Pie chart (left) -->
+    <g transform="translate(80, 110)">
+      <path d="M0,0 L0,-70 A70,70 0 0,1 0,70 Z" fill="#1E2761"/>
+      <path d="M0,0 L0,70 A70,70 0 0,1 -70,0 Z" fill="#F59E0B"/>
+      <path d="M0,0 L-70,0 A70,70 0 0,1 0,-70 Z" fill="#0D9488"/>
+      <circle r="70" fill="none" stroke="#FFFFFF" stroke-width="2"/>
+    </g>
+
+    <!-- Legend (right) -->
+    <g transform="translate(200, 50)">
+      <rect width="18" height="18" fill="#1E2761"/>
+      <text x="28" y="14" class="t" font-weight="700">full  ·  50 %</text>
+      <text x="28" y="32" class="m">debug only (all tokens visible)</text>
+
+      <rect width="18" height="18" y="58" fill="#F59E0B"/>
+      <text x="28" y="72" class="t" font-weight="700">opaque  ·  25 %</text>
+      <text x="28" y="90" class="m">journey / actor → neutral IDs</text>
+
+      <rect width="18" height="18" y="116" fill="#0D9488"/>
+      <text x="28" y="130" class="t" font-weight="700">stripped  ·  25 %  (headline)</text>
+      <text x="28" y="148" class="m">all journey / actor tokens removed</text>
+    </g>
+  </g>
+
+  <!-- ============== ROW 2: PANEL B - Heatmap (full width, plenty of room) ============== -->
+  <g transform="translate(60, 350)">
+    <text x="0" y="0" class="h">B.  Journey family × actor type   (per-cell counts, training pool)</text>
+    <text x="0" y="22" class="m">Adversarial cross-modal HN family `hn_recovery_high_amount` and matched fraud-dual `phish_takeover_mfa_phished`</text>
+    <text x="0" y="38" class="m">were introduced in v4 — these are where x-attn earned CI-separated lift (see Figure 4).</text>
+
+    <!-- Heatmap: row labels on the left (~280px), then 6 columns × 110px = 660px wide -->
+    <g transform="translate(290, 80)">
+
+      <!-- Column headers — horizontal short names, no rotation -->
+      <g font-size="13" fill="#1E2761" font-weight="700" text-anchor="middle">
+        <text x="55" y="-30">human</text>
+        <text x="165" y="-30">buying</text>
+        <text x="275" y="-30">finance</text>
+        <text x="385" y="-30">compromised</text>
+        <text x="495" y="-30">adversarial</text>
+        <text x="605" y="-30">hybrid</text>
+      </g>
+
+      <!-- "Actor type" header label -->
+      <text x="-220" y="-30" class="t" font-weight="700" font-style="italic">Actor →</text>
+      <text x="-280" y="-12" class="m" font-size="11">(agent_ prefix dropped for headers; see panel D for token-name conventions)</text>
+
+      <!-- ROW 1: clean -->
+      <g transform="translate(0, 0)">
+        <g transform="translate(-280, 22)">
+          <text x="0" y="0" class="row">clean</text>
+          <text x="0" y="16" class="m" font-size="11">(legit, normal)</text>
+        </g>
+        <rect x="0"   y="0" width="110" height="46" fill="#0D9488" opacity="0.40"/><text x="55"  y="29" class="num" text-anchor="middle">3000</text>
+        <rect x="110" y="0" width="110" height="46" fill="#0D9488" opacity="0.30"/><text x="165" y="29" class="num" text-anchor="middle">1200</text>
+        <rect x="220" y="0" width="110" height="46" fill="#0D9488" opacity="0.30"/><text x="275" y="29" class="num" text-anchor="middle">1200</text>
+        <rect x="330" y="0" width="110" height="46" fill="#F1F5F9"/><text x="385" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="440" y="0" width="110" height="46" fill="#F1F5F9"/><text x="495" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="550" y="0" width="110" height="46" fill="#0D9488" opacity="0.25"/><text x="605" y="29" class="num" text-anchor="middle">600</text>
+      </g>
+
+      <!-- ROW 2: cred_stuff -->
+      <g transform="translate(0, 54)">
+        <g transform="translate(-280, 22)">
+          <text x="0" y="0" class="row">cred_stuff</text>
+          <text x="0" y="16" class="m" font-size="11">(fraud)</text>
+        </g>
+        <rect x="0"   y="0" width="110" height="46" fill="#DC2626" opacity="0.45"/><text x="55"  y="29" class="num" text-anchor="middle">700</text>
+        <rect x="110" y="0" width="110" height="46" fill="#F1F5F9"/><text x="165" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="220" y="0" width="110" height="46" fill="#F1F5F9"/><text x="275" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="330" y="0" width="110" height="46" fill="#DC2626" opacity="0.55"/><text x="385" y="29" class="num" text-anchor="middle">900</text>
+        <rect x="440" y="0" width="110" height="46" fill="#DC2626" opacity="0.65"/><text x="495" y="29" class="num" text-anchor="middle">1100</text>
+        <rect x="550" y="0" width="110" height="46" fill="#F1F5F9"/><text x="605" y="29" class="nb" text-anchor="middle">·</text>
+      </g>
+
+      <!-- ROW 3: sim_swap -->
+      <g transform="translate(0, 108)">
+        <g transform="translate(-280, 22)">
+          <text x="0" y="0" class="row">sim_swap</text>
+          <text x="0" y="16" class="m" font-size="11">(fraud)</text>
+        </g>
+        <rect x="0"   y="0" width="110" height="46" fill="#DC2626" opacity="0.50"/><text x="55"  y="29" class="num" text-anchor="middle">800</text>
+        <rect x="110" y="0" width="110" height="46" fill="#F1F5F9"/><text x="165" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="220" y="0" width="110" height="46" fill="#F1F5F9"/><text x="275" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="330" y="0" width="110" height="46" fill="#DC2626" opacity="0.30"/><text x="385" y="29" class="num" text-anchor="middle">400</text>
+        <rect x="440" y="0" width="110" height="46" fill="#DC2626" opacity="0.20"/><text x="495" y="29" class="num" text-anchor="middle">100</text>
+        <rect x="550" y="0" width="110" height="46" fill="#F1F5F9"/><text x="605" y="29" class="nb" text-anchor="middle">·</text>
+      </g>
+
+      <!-- ROW 4: phish_takeover -->
+      <g transform="translate(0, 162)">
+        <g transform="translate(-280, 22)">
+          <text x="0" y="0" class="row">phish_takeover</text>
+          <text x="0" y="16" class="m" font-size="11">(fraud, classic ATO)</text>
+        </g>
+        <rect x="0"   y="0" width="110" height="46" fill="#DC2626" opacity="0.60"/><text x="55"  y="29" class="num" text-anchor="middle">900</text>
+        <rect x="110" y="0" width="110" height="46" fill="#F1F5F9"/><text x="165" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="220" y="0" width="110" height="46" fill="#F1F5F9"/><text x="275" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="330" y="0" width="110" height="46" fill="#DC2626" opacity="0.40"/><text x="385" y="29" class="num" text-anchor="middle">500</text>
+        <rect x="440" y="0" width="110" height="46" fill="#DC2626" opacity="0.30"/><text x="495" y="29" class="num" text-anchor="middle">300</text>
+        <rect x="550" y="0" width="110" height="46" fill="#F1F5F9"/><text x="605" y="29" class="nb" text-anchor="middle">·</text>
+      </g>
+
+      <!-- ROW 5: phish_takeover_mfa_phished (v4 NEW) -->
+      <g transform="translate(0, 216)">
+        <g transform="translate(-280, 18)">
+          <text x="0" y="0" class="row" fill="#DC2626">phish_takeover_mfa_phished</text>
+          <text x="0" y="16" class="m" font-size="11">v4 NEW — fraud-dual</text>
+          <text x="0" y="30" class="m" font-size="11">text looks safe</text>
+        </g>
+        <rect x="0"   y="0" width="110" height="46" fill="#DC2626" opacity="0.40" stroke="#DC2626" stroke-width="2"/><text x="55"  y="29" class="num" text-anchor="middle">400</text>
+        <rect x="110" y="0" width="110" height="46" fill="#F1F5F9" stroke="#DC2626" stroke-width="2"/><text x="165" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="220" y="0" width="110" height="46" fill="#F1F5F9" stroke="#DC2626" stroke-width="2"/><text x="275" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="330" y="0" width="110" height="46" fill="#DC2626" opacity="0.30" stroke="#DC2626" stroke-width="2"/><text x="385" y="29" class="num" text-anchor="middle">300</text>
+        <rect x="440" y="0" width="110" height="46" fill="#DC2626" opacity="0.20" stroke="#DC2626" stroke-width="2"/><text x="495" y="29" class="num" text-anchor="middle">100</text>
+        <rect x="550" y="0" width="110" height="46" fill="#F1F5F9" stroke="#DC2626" stroke-width="2"/><text x="605" y="29" class="nb" text-anchor="middle">·</text>
+      </g>
+
+      <!-- ROW 6: hn_account_recovery -->
+      <g transform="translate(0, 270)">
+        <g transform="translate(-280, 22)">
+          <text x="0" y="0" class="row">hn_account_recovery</text>
+          <text x="0" y="16" class="m" font-size="11">(legit, looks like phish)</text>
+        </g>
+        <rect x="0"   y="0" width="110" height="46" fill="#F59E0B" opacity="0.50"/><text x="55"  y="29" class="num" text-anchor="middle">700</text>
+        <rect x="110" y="0" width="110" height="46" fill="#F1F5F9"/><text x="165" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="220" y="0" width="110" height="46" fill="#F59E0B" opacity="0.15"/><text x="275" y="29" class="num" text-anchor="middle">100</text>
+        <rect x="330" y="0" width="110" height="46" fill="#F1F5F9"/><text x="385" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="440" y="0" width="110" height="46" fill="#F1F5F9"/><text x="495" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="550" y="0" width="110" height="46" fill="#F1F5F9"/><text x="605" y="29" class="nb" text-anchor="middle">·</text>
+      </g>
+
+      <!-- ROW 7: hn_recovery_high_amount (v4 NEW) -->
+      <g transform="translate(0, 324)">
+        <g transform="translate(-280, 18)">
+          <text x="0" y="0" class="row" fill="#F59E0B">hn_recovery_high_amount</text>
+          <text x="0" y="16" class="m" font-size="11">v4 NEW — adversarial-legit</text>
+          <text x="0" y="30" class="m" font-size="11">text looks fraud</text>
+        </g>
+        <rect x="0"   y="0" width="110" height="46" fill="#F59E0B" opacity="0.50" stroke="#F59E0B" stroke-width="2"/><text x="55"  y="29" class="num" text-anchor="middle">500</text>
+        <rect x="110" y="0" width="110" height="46" fill="#F1F5F9" stroke="#F59E0B" stroke-width="2"/><text x="165" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="220" y="0" width="110" height="46" fill="#F59E0B" opacity="0.20" stroke="#F59E0B" stroke-width="2"/><text x="275" y="29" class="num" text-anchor="middle">100</text>
+        <rect x="330" y="0" width="110" height="46" fill="#F1F5F9" stroke="#F59E0B" stroke-width="2"/><text x="385" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="440" y="0" width="110" height="46" fill="#F1F5F9" stroke="#F59E0B" stroke-width="2"/><text x="495" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="550" y="0" width="110" height="46" fill="#F1F5F9" stroke="#F59E0B" stroke-width="2"/><text x="605" y="29" class="nb" text-anchor="middle">·</text>
+      </g>
+
+      <!-- ROW 8: hn_travel + hn_large_purchase combined -->
+      <g transform="translate(0, 378)">
+        <g transform="translate(-280, 22)">
+          <text x="0" y="0" class="row">hn_travel + hn_large_purchase</text>
+          <text x="0" y="16" class="m" font-size="11">(legit, look like fraud)</text>
+        </g>
+        <rect x="0"   y="0" width="110" height="46" fill="#F59E0B" opacity="0.45"/><text x="55"  y="29" class="num" text-anchor="middle">1000</text>
+        <rect x="110" y="0" width="110" height="46" fill="#F59E0B" opacity="0.20"/><text x="165" y="29" class="num" text-anchor="middle">100</text>
+        <rect x="220" y="0" width="110" height="46" fill="#F59E0B" opacity="0.20"/><text x="275" y="29" class="num" text-anchor="middle">100</text>
+        <rect x="330" y="0" width="110" height="46" fill="#F1F5F9"/><text x="385" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="440" y="0" width="110" height="46" fill="#F1F5F9"/><text x="495" y="29" class="nb" text-anchor="middle">·</text>
+        <rect x="550" y="0" width="110" height="46" fill="#F1F5F9"/><text x="605" y="29" class="nb" text-anchor="middle">·</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ============== ROW 3: PANEL D - Token families (bottom, separate from heatmap) ============== -->
+  <g transform="translate(60, 910)">
+    <text x="0" y="0" class="h">D.  Three token families  ·  visibility per eval mode</text>
+
+    <g transform="translate(0, 18)">
+      <rect width="425" height="64" rx="6" fill="#FFFFFF" stroke="#1E2761" stroke-width="1.5"/>
+      <rect width="6" height="64" fill="#1E2761"/>
+      <text x="20" y="22" class="t" font-weight="700" font-size="14">PII-fencing tokens</text>
+      <text x="20" y="40" class="code" font-size="11">&lt;acct_id&gt; &lt;email&gt; &lt;device_id&gt; &lt;ip&gt; &lt;phone&gt;</text>
+      <text x="20" y="56" class="m" font-size="11">always visible (no signal leak — hygiene only)</text>
+    </g>
+
+    <g transform="translate(450, 18)">
+      <rect width="425" height="64" rx="6" fill="#FFFFFF" stroke="#0D9488" stroke-width="1.5"/>
+      <rect width="6" height="64" fill="#0D9488"/>
+      <text x="20" y="22" class="t" font-weight="700" font-size="14">Bucketed feature tokens  ·  the fraud signal</text>
+      <text x="20" y="40" class="code" font-size="11">amount_bucket geo_distance ip_risk device_age ...</text>
+      <text x="20" y="56" class="m" font-size="11">visible in events; v4 removed from narrator's view</text>
+    </g>
+
+    <g transform="translate(900, 18)">
+      <rect width="425" height="64" rx="6" fill="#FFFFFF" stroke="#F59E0B" stroke-width="1.5"/>
+      <rect width="6" height="64" fill="#F59E0B"/>
+      <text x="20" y="22" class="t" font-weight="700" font-size="14">Journey / actor structural tokens</text>
+      <text x="20" y="40" class="code" font-size="11">&lt;journey_*&gt; … &lt;/journey_*&gt;   &lt;actor_*&gt;</text>
+      <text x="20" y="56" class="m" font-size="11">stripped or opacified at eval time</text>
+    </g>
+  </g>
+
+  <!-- Footer -->
+  <text x="700" y="1060" class="m" text-anchor="middle">Counts in panel B are approximate per-cell ratios used by the v4 generator; blank cells are intentionally empty journey × actor combinations.</text>
+</svg>

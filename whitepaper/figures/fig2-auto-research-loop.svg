@@ -1,0 +1,194 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 900" font-family="Inter, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1E2761"/>
+    </marker>
+    <marker id="arr2A" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#F59E0B"/>
+    </marker>
+    <marker id="arr2T" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0D9488"/>
+    </marker>
+  </defs>
+  <style>
+    .H { font-size: 24px; fill: #1E2761; font-weight: 700; }
+    .h { font-size: 16px; fill: #1E2761; font-weight: 700; }
+    .t { font-size: 13px; fill: #1E293B; }
+    .m { font-size: 12px; fill: #64748B; font-style: italic; }
+    .code { font-family: Consolas, "Courier New", monospace; font-size: 12px; fill: #334155; }
+    .codeb { font-family: Consolas, "Courier New", monospace; font-size: 13px; fill: #1E2761; font-weight: 700; }
+    .acc { font-size: 12px; fill: #F59E0B; font-weight: 700; letter-spacing: 1.5px; }
+  </style>
+
+  <!-- Title -->
+  <text x="700" y="40" class="H" text-anchor="middle">Figure 2. Auto-research loop dataflow</text>
+  <text x="700" y="64" class="m" text-anchor="middle">Agent proposes; deterministic launcher enforces.  Single-writer-per-file invariant on every artifact.</text>
+
+  <!-- ============== ROW 1: cron → agent → launcher → state (well-spaced) ============== -->
+
+  <!-- Cron + agent_tick wrapper -->
+  <g transform="translate(40, 130)">
+    <rect width="220" height="100" rx="8" fill="#1E2761"/>
+    <text x="110" y="32" text-anchor="middle" fill="#F59E0B" class="acc">CRON  ·  EVERY 30 MIN</text>
+    <text x="110" y="58" text-anchor="middle" fill="#FFFFFF" font-size="14" font-weight="700">agent_tick.sh</text>
+    <text x="110" y="78" text-anchor="middle" fill="#CADCFC" font-size="11" font-style="italic">lock pre-check</text>
+    <text x="110" y="92" text-anchor="middle" fill="#CADCFC" font-size="11" font-style="italic">180-min timeout</text>
+  </g>
+
+  <!-- Arrow cron -> agent, with "wakes" label above the line -->
+  <text x="290" y="172" class="m" text-anchor="middle">wakes</text>
+  <line x1="265" y1="180" x2="315" y2="180" stroke="#1E2761" stroke-width="2" marker-end="url(#arr2)"/>
+
+  <!-- Agent box -->
+  <g transform="translate(320, 130)">
+    <rect width="280" height="240" rx="8" fill="#EFF6FF" stroke="#1E2761" stroke-width="1.5"/>
+    <rect width="280" height="38" rx="8" fill="#1E2761"/>
+    <text x="14" y="25" fill="#F59E0B" class="acc">AGENT  ·  Claude Code / Codex</text>
+
+    <text x="14" y="64" class="h" font-size="14">Reads</text>
+    <text x="14" y="84" class="code">AGENT_INSTRUCTIONS.md</text>
+    <text x="14" y="100" class="code">sweep_state.yaml</text>
+    <text x="14" y="116" class="code">experiments.jsonl  (last 5)</text>
+    <text x="14" y="132" class="code">runs/exp_*/notes.md</text>
+
+    <text x="14" y="160" class="h" font-size="14">Writes  (only)</text>
+    <text x="14" y="180" class="code">runs/exp_NNN/config.yaml</text>
+    <text x="14" y="196" class="code">runs/exp_NNN/notes.md</text>
+    <text x="14" y="212" class="code">README.md  (journey log)</text>
+  </g>
+
+  <!-- Arrow agent -> launcher, with "invokes" label CLEARLY above the line -->
+  <text x="630" y="245" class="m" text-anchor="middle">invokes</text>
+  <line x1="605" y1="252" x2="655" y2="252" stroke="#1E2761" stroke-width="2" marker-end="url(#arr2)"/>
+
+  <!-- Launcher box -->
+  <g transform="translate(660, 130)">
+    <rect width="500" height="500" rx="8" fill="#FFFFFF" stroke="#1E2761" stroke-width="2"/>
+    <rect width="500" height="40" rx="8" fill="#F59E0B"/>
+    <text x="14" y="27" style="fill: #1E2761; font-size: 13px; font-weight: 700; letter-spacing: 1.5px;">LAUNCHER  ·  run_next_experiment.py</text>
+
+    <!-- 10 steps with large per-row spacing -->
+    <g font-size="13" fill="#1E293B" transform="translate(0, 60)">
+      <text x="14" y="0"  class="codeb"> 1. validate</text>      <text x="180" y="0"  class="t">— reject unknown config keys (whitelist)</text>
+      <text x="14" y="22" class="codeb"> 2. dedup</text>         <text x="180" y="22" class="t">— canonical_hash; exit 2 if duplicate</text>
+      <text x="14" y="44" class="codeb"> 3. halt-check</text>    <text x="180" y="44" class="t">— exit if sweep_state.halted</text>
+      <text x="14" y="66" class="codeb"> 4. lock</text>          <text x="180" y="66" class="t">— /workspace/.gpu.lock (PID file)</text>
+      <text x="14" y="88" class="codeb"> 5. accelerate launch</text> <text x="180" y="88" class="t">— train_xattn.py with pinned env</text>
+      <text x="14" y="110" class="codeb"> 6. parse_metrics</text> <text x="180" y="110" class="t">— stdout + W&amp;B → metrics.json</text>
+      <text x="14" y="132" class="codeb"> 7. bootstrap_ci</text>  <text x="180" y="132" class="t">— 1000 resamples, tie-aware</text>
+      <text x="14" y="154" class="codeb"> 8. atomic write</text>  <text x="180" y="154" class="t">— .tmp → rename (no partial syncs)</text>
+      <text x="14" y="176" class="codeb"> 9. append</text>        <text x="180" y="176" class="t">— one JSON row to experiments.jsonl</text>
+      <text x="14" y="198" class="codeb">10. refresh</text>       <text x="180" y="198" class="t">— re-derive sweep_state.yaml</text>
+    </g>
+
+    <!-- Halt conditions -->
+    <line x1="14" y1="290" x2="486" y2="290" stroke="#E2E8F0"/>
+    <text x="14" y="312" class="h">Halt conditions  (configurable per phase)</text>
+    <g transform="translate(14, 322)">
+      <rect width="14" height="14" fill="#DC2626" y="2"/>
+      <text x="24" y="14" class="t">NaN cascade  —  2 consecutive runs with NaN final loss</text>
+      <rect width="14" height="14" fill="#F59E0B" y="26"/>
+      <text x="24" y="38" class="t">Zero-gate activation  —  2 runs with max_gate &lt; floor</text>
+      <rect width="14" height="14" fill="#64748B" y="50"/>
+      <text x="24" y="62" class="t">Convergence  —  no Δ &gt; ε over window  (disabled in v3+)</text>
+      <rect width="14" height="14" fill="#0D9488" y="74"/>
+      <text x="24" y="86" class="t">Budget  —  max_experiments / max_gpu_hours</text>
+    </g>
+
+    <!-- v5 expansion rule -->
+    <line x1="14" y1="430" x2="486" y2="430" stroke="#E2E8F0"/>
+    <text x="14" y="452" class="h">v5 expansion: early-exit-on-success</text>
+    <text x="14" y="474" class="m">max_gate ≥ 0.05  AND  CI-separated win  →  pivot to local perturbations</text>
+  </g>
+
+  <!-- Arrow launcher -> state -->
+  <line x1="1165" y1="380" x2="1215" y2="380" stroke="#F59E0B" stroke-width="2.5" marker-end="url(#arr2A)"/>
+  <text x="1190" y="372" class="m" text-anchor="middle" font-size="11">writes</text>
+
+  <!-- State box -->
+  <g transform="translate(1220, 130)">
+    <rect width="170" height="500" rx="8" fill="#1E2761"/>
+    <rect width="170" height="40" rx="8" fill="#1E2761"/>
+    <text x="85" y="26" text-anchor="middle" fill="#F59E0B" class="acc" font-size="12">STATE  ·  launcher-owned</text>
+    <line x1="10" y1="42" x2="160" y2="42" stroke="#3D4880"/>
+
+    <g fill="#FFFFFF" font-size="12">
+      <text x="10" y="70" class="codeb" fill="#FFFFFF">experiments.jsonl</text>
+      <text x="10" y="86" font-size="11" fill="#CADCFC">append-only history</text>
+      <text x="10" y="100" font-size="11" fill="#CADCFC">immutable rows</text>
+      <text x="10" y="114" font-size="11" fill="#CADCFC">metric_version: {2, 5}</text>
+
+      <text x="10" y="146" class="codeb" fill="#FFFFFF">sweep_state.yaml</text>
+      <text x="10" y="162" font-size="11" fill="#CADCFC">current_best, top_3</text>
+      <text x="10" y="176" font-size="11" fill="#CADCFC">gpu_hours_used</text>
+      <text x="10" y="190" font-size="11" fill="#CADCFC">halt status + reason</text>
+
+      <text x="10" y="222" class="codeb" fill="#FFFFFF">runs/exp_NNN/</text>
+      <text x="10" y="238" font-size="11" fill="#CADCFC">metrics.json</text>
+      <text x="10" y="252" font-size="11" fill="#CADCFC">ci_report.json</text>
+      <text x="10" y="266" font-size="11" fill="#CADCFC">gate_trajectory.json</text>
+      <text x="10" y="280" font-size="11" fill="#CADCFC" font-style="italic">(leakage state inline on jsonl)</text>
+      <text x="10" y="294" font-size="11" fill="#CADCFC">launcher.log</text>
+      <text x="10" y="308" font-size="11" fill="#CADCFC">train.log</text>
+    </g>
+
+    <line x1="10" y1="334" x2="160" y2="334" stroke="#3D4880"/>
+    <text x="85" y="356" text-anchor="middle" fill="#F59E0B" class="acc" font-size="11">DEDUP TUPLE</text>
+    <g fill="#FFFFFF" font-family="Consolas, monospace" font-size="10">
+      <text x="10" y="378">(insertion_pattern,</text>
+      <text x="10" y="392"> gate_init, slots,</text>
+      <text x="10" y="406"> encoder, lora_r_on_q,</text>
+      <text x="10" y="420"> lr, warmup, steps,</text>
+      <text x="10" y="434"> seq_len)</text>
+    </g>
+  </g>
+
+  <!-- Read-only flow: state → agent, ABOVE everything to avoid overlaps -->
+  <path d="M1300,130 C1300,100 700,90 460,100 C400,102 370,110 370,128" fill="none" stroke="#0D9488" stroke-width="1.8" stroke-dasharray="6 4" marker-end="url(#arr2T)"/>
+  <text x="850" y="92" class="m" text-anchor="middle" fill="#0D9488">read-only at every cron tick</text>
+
+  <!-- ============== BOTTOM: ownership invariant ============== -->
+  <g transform="translate(40, 680)">
+    <rect width="1320" height="180" rx="8" fill="#F8FAFC" stroke="#E2E8F0"/>
+    <text x="20" y="32" class="h" font-size="18">Ownership invariant — single writer per file</text>
+
+    <g transform="translate(20, 50)">
+      <rect width="310" height="118" rx="6" fill="#FFFFFF" stroke="#F59E0B" stroke-width="1.5"/>
+      <rect width="6" height="118" fill="#F59E0B"/>
+      <text x="20" y="22" class="h" font-size="14">Agent owns  (writes only)</text>
+      <text x="20" y="46" class="code">runs/exp_NNN/config.yaml</text>
+      <text x="20" y="64" class="code">runs/exp_NNN/notes.md</text>
+      <text x="20" y="82" class="code">README.md  (Day-N + Final)</text>
+      <text x="20" y="106" class="m">never touches state/history files</text>
+    </g>
+
+    <g transform="translate(345, 50)">
+      <rect width="310" height="118" rx="6" fill="#FFFFFF" stroke="#1E2761" stroke-width="1.5"/>
+      <rect width="6" height="118" fill="#1E2761"/>
+      <text x="20" y="22" class="h" font-size="14">Launcher owns  (writes only)</text>
+      <text x="20" y="46" class="code">experiments.jsonl</text>
+      <text x="20" y="64" class="code">sweep_state.yaml</text>
+      <text x="20" y="82" class="code">metrics.json · ci_report.json</text>
+      <text x="20" y="100" class="code">gate_trajectory.json</text>
+    </g>
+
+    <g transform="translate(670, 50)">
+      <rect width="310" height="118" rx="6" fill="#FFFFFF" stroke="#0D9488" stroke-width="1.5"/>
+      <rect width="6" height="118" fill="#0D9488"/>
+      <text x="20" y="22" class="h" font-size="14">Either  ·  after git snapshot</text>
+      <text x="20" y="46" class="code">git add -A &amp;&amp; git commit</text>
+      <text x="20" y="66" class="m">src/  ·  scripts/  ·  eval/  ·  data/gen/</text>
+      <text x="20" y="88" class="m">deterministic modules require</text>
+      <text x="20" y="102" class="m">a revertible snapshot</text>
+    </g>
+
+    <g transform="translate(995, 50)">
+      <rect width="305" height="118" rx="6" fill="#1E2761"/>
+      <text x="20" y="26" fill="#F59E0B" class="acc">RESULT</text>
+      <text x="20" y="52" fill="#FFFFFF" font-size="14"><tspan font-weight="700">0</tspan> format-drift bugs</text>
+      <text x="20" y="74" fill="#FFFFFF" font-size="14"><tspan font-weight="700">0</tspan> concurrency races</text>
+      <text x="20" y="96" fill="#FFFFFF" font-size="14"><tspan font-weight="700">0</tspan> manual reconciliation</text>
+      <text x="20" y="114" fill="#CADCFC" font-size="11" font-style="italic">across 30+ runs, 3 sweep generations</text>
+    </g>
+  </g>
+</svg>

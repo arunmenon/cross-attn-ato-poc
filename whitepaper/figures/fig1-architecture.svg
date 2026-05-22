@@ -1,0 +1,253 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 900" font-family="Inter, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1E2761"/>
+    </marker>
+    <marker id="arrA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#F59E0B"/>
+    </marker>
+  </defs>
+  <style>
+    .t  { font-size: 13px; fill: #1E293B; }
+    .h  { font-size: 16px; fill: #1E2761; font-weight: 700; }
+    .H  { font-size: 24px; fill: #1E2761; font-weight: 700; }
+    .m  { font-size: 12px; fill: #64748B; font-style: italic; }
+    .lbl{ font-size: 13px; fill: #1E2761; font-weight: 600; }
+    .acc{ font-size: 11px; fill: #F59E0B; font-weight: 700; letter-spacing: 1.5px; }
+    .code { font-family: Consolas, "Courier New", monospace; font-size: 12px; fill: #334155; }
+  </style>
+
+  <!-- Title -->
+  <text x="700" y="40" class="H" text-anchor="middle">Figure 1. Cross-attention surgery on Qwen3-8B</text>
+  <text x="700" y="64" class="m" text-anchor="middle">Flamingo-style gated x-attn on a frozen LM, fed by a small side-stream encoder + Perceiver-Resampler</text>
+
+  <!-- ============== ROW 1: TEXT STREAM (top half) ============== -->
+
+  <!-- Text input -->
+  <g transform="translate(60, 130)">
+    <rect width="220" height="100" rx="8" fill="#EFF6FF" stroke="#1E2761" stroke-width="1.2"/>
+    <text x="14" y="24" class="lbl">Narrative + verdict footer</text>
+    <text x="14" y="48" class="code">"User logged in from a new</text>
+    <text x="14" y="64" class="code">device, reset password, then</text>
+    <text x="14" y="80" class="code">transferred $4,500 ..."</text>
+    <text x="14" y="95" class="m" font-size="11">text stream</text>
+  </g>
+
+  <line x1="285" y1="180" x2="335" y2="180" stroke="#1E2761" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Tokenizer + embedding -->
+  <g transform="translate(340, 145)">
+    <rect width="180" height="70" rx="8" fill="#FFFFFF" stroke="#94A3B8" stroke-width="1"/>
+    <text x="90" y="28" class="lbl" text-anchor="middle">Tokenizer</text>
+    <text x="90" y="48" class="m" text-anchor="middle">+ custom token</text>
+    <text x="90" y="62" class="m" text-anchor="middle">embeddings (avg-init)</text>
+  </g>
+
+  <line x1="525" y1="180" x2="575" y2="180" stroke="#1E2761" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- ============== ROW 2: STRUCTURED STREAM (lower half) ============== -->
+
+  <!-- Event input -->
+  <g transform="translate(60, 600)">
+    <rect width="220" height="100" rx="8" fill="#EFF6FF" stroke="#1E2761" stroke-width="1.2"/>
+    <text x="14" y="24" class="lbl">Structured event stream</text>
+    <text x="14" y="48" class="code">login geo=intl ip_risk=high</text>
+    <text x="14" y="64" class="code">device_add age=new</text>
+    <text x="14" y="80" class="code">txn amount=high rcpt=new</text>
+    <text x="14" y="95" class="m" font-size="11">side stream</text>
+  </g>
+
+  <line x1="285" y1="650" x2="335" y2="650" stroke="#1E2761" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Side encoder -->
+  <g transform="translate(340, 615)">
+    <rect width="180" height="70" rx="8" fill="#FFFFFF" stroke="#94A3B8" stroke-width="1"/>
+    <text x="90" y="28" class="lbl" text-anchor="middle">Side encoder</text>
+    <text x="90" y="48" class="m" text-anchor="middle">small_transformer (6L)</text>
+    <text x="90" y="62" class="m" text-anchor="middle">pooled_mlp · ft_transformer</text>
+  </g>
+
+  <line x1="525" y1="650" x2="575" y2="650" stroke="#1E2761" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Perceiver-Resampler -->
+  <g transform="translate(580, 595)">
+    <rect width="220" height="110" rx="8" fill="#FFFFFF" stroke="#0D9488" stroke-width="2"/>
+    <text x="110" y="28" class="lbl" text-anchor="middle">Perceiver-Resampler</text>
+    <text x="110" y="50" class="m" text-anchor="middle">N learned queries</text>
+    <text x="110" y="68" class="m" text-anchor="middle">cross-attend to encoder output</text>
+    <text x="110" y="92" class="lbl" text-anchor="middle" fill="#0D9488">N ∈ {32, 64, 128} slots</text>
+  </g>
+
+  <!-- Arrow: Resampler -> LM body (curves up into the LM) -->
+  <path d="M690,595 C690,500 690,400 800,400" fill="none" stroke="#F59E0B" stroke-width="2.5" marker-end="url(#arrA)"/>
+  <text x="695" y="510" class="acc">K / V SLOTS</text>
+
+  <!-- ============== CENTER: LM BODY ============== -->
+
+  <!-- Frozen-LM container -->
+  <g transform="translate(580, 130)">
+    <!-- Outer container, no hatching pattern (use solid pale color for legibility) -->
+    <rect width="600" height="440" rx="10" fill="#F1F5F9" stroke="#1E2761" stroke-width="2"/>
+
+    <!-- Title bar: spans full width, big -->
+    <rect width="600" height="48" rx="10" fill="#1E2761"/>
+    <text x="20" y="30" fill="#FFFFFF" font-weight="700" font-size="18">Qwen3-8B  ·  CPT-light merged  ·  FROZEN</text>
+
+    <!-- Subtitle on its own row below the title bar -->
+    <text x="20" y="74" class="m" fill="#475569">36 layers   ·   hidden 4096   ·   32 attention heads   ·   8 KV heads</text>
+
+    <!-- "Frozen base path" badge in top-right -->
+    <g transform="translate(440, 56)">
+      <rect width="140" height="22" rx="3" fill="#FFFFFF" stroke="#94A3B8"/>
+      <text x="70" y="15" font-size="11" fill="#64748B" text-anchor="middle" font-weight="600">FROZEN BASE PATH</text>
+    </g>
+
+    <!-- The five transformer blocks in a clean row, now labelled at the
+         actual layer indices used by every_8 (12, 20, 28) plus the
+         no-x-attn endpoints (Block 0 and Block 35) to show the
+         deliberate layer-12 offset. -->
+    <g transform="translate(20, 105)">
+      <text x="0" y="-4" class="m" font-weight="700" fill="#1E2761">Self-attention layers (5 of 36 shown — every_8 insertion pattern)</text>
+
+      <g transform="translate(0, 6)">
+        <!-- Block 0: NO x-attn (early-feature region; deliberately preserved) -->
+        <g>
+          <rect width="100" height="48" rx="5" fill="#F1F5F9" stroke="#94A3B8"/>
+          <text x="50" y="30" text-anchor="middle" class="lbl">Block 0</text>
+        </g>
+        <!-- Block 12: first x-attn insert (layer-12 offset) -->
+        <g transform="translate(115, 0)">
+          <rect width="100" height="48" rx="5" fill="#FFFFFF" stroke="#1E2761" stroke-width="1.6"/>
+          <text x="50" y="30" text-anchor="middle" class="lbl">Block 12</text>
+        </g>
+        <!-- Block 20: second x-attn insert -->
+        <g transform="translate(230, 0)">
+          <rect width="100" height="48" rx="5" fill="#FFFFFF" stroke="#1E2761" stroke-width="1.6"/>
+          <text x="50" y="30" text-anchor="middle" class="lbl">Block 20</text>
+        </g>
+        <!-- Block 28: third x-attn insert -->
+        <g transform="translate(345, 0)">
+          <rect width="100" height="48" rx="5" fill="#FFFFFF" stroke="#1E2761" stroke-width="1.6"/>
+          <text x="50" y="30" text-anchor="middle" class="lbl">Block 28</text>
+        </g>
+        <!-- Block 35: final layer, NO x-attn (post-fusion readout) -->
+        <g transform="translate(460, 0)">
+          <rect width="100" height="48" rx="5" fill="#F1F5F9" stroke="#94A3B8"/>
+          <text x="50" y="30" text-anchor="middle" class="lbl">Block 35</text>
+        </g>
+      </g>
+    </g>
+
+    <!-- Inserted x-attn row — only 3 pucks, under Block 12, 20, 28 -->
+    <g transform="translate(20, 185)">
+      <text x="0" y="-4" class="acc">INSERTED GATED CROSS-ATTENTION  ·  every_8 = {12, 20, 28}  ·  3 inserts  ·  layer-12 offset</text>
+
+      <g transform="translate(0, 8)">
+        <!-- No puck under Block 0 — show empty slot with a dashed outline -->
+        <g>
+          <rect width="100" height="52" rx="5" fill="none" stroke="#CBD5E1" stroke-dasharray="4 4"/>
+          <text x="50" y="32" text-anchor="middle" font-size="11" font-style="italic" fill="#94A3B8">no x-attn</text>
+        </g>
+        <!-- Puck under Block 12 -->
+        <g transform="translate(115, 0)">
+          <rect width="100" height="52" rx="5" fill="#F59E0B"/>
+          <text x="50" y="22" text-anchor="middle" font-size="13" font-weight="700" fill="#1E2761">x-attn</text>
+          <text x="50" y="40" text-anchor="middle" font-size="11" fill="#1E2761">+ gate α</text>
+        </g>
+        <!-- Puck under Block 20 -->
+        <g transform="translate(230, 0)">
+          <rect width="100" height="52" rx="5" fill="#F59E0B"/>
+          <text x="50" y="22" text-anchor="middle" font-size="13" font-weight="700" fill="#1E2761">x-attn</text>
+          <text x="50" y="40" text-anchor="middle" font-size="11" fill="#1E2761">+ gate α</text>
+        </g>
+        <!-- Puck under Block 28 -->
+        <g transform="translate(345, 0)">
+          <rect width="100" height="52" rx="5" fill="#F59E0B"/>
+          <text x="50" y="22" text-anchor="middle" font-size="13" font-weight="700" fill="#1E2761">x-attn</text>
+          <text x="50" y="40" text-anchor="middle" font-size="11" fill="#1E2761">+ gate α</text>
+        </g>
+        <!-- No puck under Block 35 — show empty slot with a dashed outline -->
+        <g transform="translate(460, 0)">
+          <rect width="100" height="52" rx="5" fill="none" stroke="#CBD5E1" stroke-dasharray="4 4"/>
+          <text x="50" y="32" text-anchor="middle" font-size="11" font-style="italic" fill="#94A3B8">no x-attn</text>
+        </g>
+      </g>
+    </g>
+
+    <!-- Residual-stream formula on its own clean white panel -->
+    <g transform="translate(20, 270)">
+      <rect width="560" height="38" rx="5" fill="#FFFFFF" stroke="#CBD5E1"/>
+      <text x="280" y="24" text-anchor="middle" font-size="13" fill="#1E2761" font-family="Consolas, monospace">
+        h' = h + tanh(α) · CrossAttention( Q = h_text,  K = resampler_out,  V = resampler_out )
+      </text>
+    </g>
+
+    <!-- LoRA-on-Q -->
+    <g transform="translate(20, 322)">
+      <rect width="560" height="50" rx="5" fill="#FFFFFF" stroke="#0D9488" stroke-width="1.5"/>
+      <text x="14" y="22" class="lbl">LoRA-on-Q   ·   r = 16   (32, 64 swept in v5)</text>
+      <text x="14" y="40" class="m">trainable adapter on self-attn query projection — the only base-touching trainable</text>
+    </g>
+
+    <!-- Output head -->
+    <g transform="translate(20, 386)">
+      <rect width="560" height="42" rx="5" fill="#1E2761"/>
+      <text x="280" y="20" text-anchor="middle" fill="#FFFFFF" font-size="14" font-weight="700">Risk verdict head</text>
+      <text x="280" y="36" text-anchor="middle" fill="#CADCFC" font-size="11" font-family="Consolas, monospace">score = logP(' fraud') − logP(' legit')</text>
+    </g>
+  </g>
+
+  <!-- ============== RIGHT: trainable inventory ============== -->
+  <g transform="translate(1210, 130)">
+    <rect width="150" height="440" rx="8" fill="#FFFFFF" stroke="#94A3B8" stroke-dasharray="4 4"/>
+    <rect width="150" height="36" rx="8" fill="#1E2761"/>
+    <text x="75" y="22" fill="#F59E0B" text-anchor="middle" class="acc" font-size="11">TRAINABLE   ·   STAGE 1</text>
+
+    <g font-family="Inter, Helvetica, Arial, sans-serif">
+      <text x="14" y="62" class="lbl" font-size="13">Side encoder</text>
+      <text x="14" y="80" class="m" font-size="12">~5M</text>
+
+      <text x="14" y="108" class="lbl" font-size="13">Resampler</text>
+      <text x="14" y="126" class="m" font-size="12">~2–3M</text>
+
+      <text x="14" y="154" class="lbl" font-size="13">x-attn blocks</text>
+      <text x="14" y="172" class="m" font-size="12">~33.6M / block</text>
+      <text x="14" y="188" class="m" font-size="12">× 3 / 4 / 6 inserts</text>
+
+      <text x="14" y="216" class="lbl" font-size="13">Gate scalars α</text>
+      <text x="14" y="234" class="m" font-size="12">one per block</text>
+
+      <text x="14" y="262" class="lbl" font-size="13">LoRA-on-Q</text>
+      <text x="14" y="280" class="m" font-size="12">~4.7M  (r = 16)</text>
+
+      <line x1="14" y1="302" x2="136" y2="302" stroke="#CBD5E1"/>
+
+      <text x="14" y="328" class="lbl" font-size="13">Total Stage-1</text>
+      <text x="14" y="350" class="t" font-size="14" font-weight="700">110 – 215 M</text>
+      <text x="14" y="372" class="m" font-size="11">of 8 B base params</text>
+      <text x="14" y="388" class="m" font-size="11">≈ 1.4 – 2.7 %</text>
+    </g>
+  </g>
+
+  <!-- ============== BOTTOM: legend (clean rows) ============== -->
+  <g transform="translate(60, 780)">
+    <rect width="1280" height="100" rx="6" fill="#F8FAFC" stroke="#E2E8F0"/>
+    <text x="14" y="22" class="h" font-size="14">Legend</text>
+
+    <g transform="translate(20, 42)">
+      <rect width="18" height="18" fill="#1E2761"/>
+      <text x="28" y="14" class="t">Frozen base — Qwen3-8B post-CPT-light merge (no gradient updates)</text>
+
+      <rect width="18" height="18" y="32" fill="#F59E0B"/>
+      <text x="28" y="46" class="t">Trainable Stage-1 cross-attention components (encoder, resampler, x-attn blocks, gates)</text>
+    </g>
+
+    <g transform="translate(640, 42)">
+      <rect width="18" height="18" fill="#FFFFFF" stroke="#0D9488" stroke-width="1.5"/>
+      <text x="28" y="14" class="t">Trainable adapter on the frozen path (LoRA-on-Q only)</text>
+
+      <line x1="0" y1="42" x2="18" y2="42" stroke="#F59E0B" stroke-width="3"/>
+      <text x="28" y="46" class="t">Side-stream K/V flow into the LM body via gated cross-attention</text>
+    </g>
+  </g>
+</svg>
