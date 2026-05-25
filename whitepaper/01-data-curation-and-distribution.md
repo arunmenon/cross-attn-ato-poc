@@ -1,6 +1,6 @@
 # Data Curation and Distribution
 
-**Whitepaper companion document · v1.1 · 2026-05-22**
+**Whitepaper companion document · v1.2 · 2026-05-22**
 
 This document covers the synthetic data pipeline that powered all three sweep generations (v3 → v4 → v5). It is one of four companion deep-dives behind the master whitepaper (`00-whitepaper-main.md`). The other three are the agentic harness (`02-agentic-experiment-harness.md`), the eval strategy (`03-eval-strategy.md`), and the cross-attention experiments (`04-cross-attention-experiments.md`).
 

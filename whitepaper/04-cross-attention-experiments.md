@@ -1,6 +1,6 @@
 # The Cross-Attention Experiments
 
-**Whitepaper companion document · v1.1 · 2026-05-22**
+**Whitepaper companion document · v1.2 · 2026-05-22**
 
 This document covers the cross-attention architecture, the training recipe, and the full set of experimental results across the three sweep generations (v3, v4, v5). It is the result-side counterpart to the methodology-side companions: data curation (`01-data-curation-and-distribution.md`), the agentic harness (`02-agentic-experiment-harness.md`), and the eval strategy (`03-eval-strategy.md`). The master narrative is in `00-whitepaper-main.md`.
 

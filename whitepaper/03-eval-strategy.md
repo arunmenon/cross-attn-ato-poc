@@ -1,6 +1,6 @@
 # The Eval Strategy
 
-**Whitepaper companion document · v1.1 · 2026-05-22**
+**Whitepaper companion document · v1.2 · 2026-05-22**
 
 This document covers the evaluation pipeline used across all three sweep generations (v3, v4, v5): the three eval modes, the three eval-set sizes, the headline metric and its three-generation evolution (`metric_version` 1 → 2 → 5), the tie-aware exact-target operating-point computation that anchors every CI bound, the bootstrap-CI derivation, and the leakage-control regime applied at eval time.
 
@@ -150,7 +150,7 @@ v5_adv_error                       = 0.1506  CI [0.1238, 0.1871]
   hn_recovery_high_amount_fpr      = 0.4377  CI [0.3601, 0.5449]
 ```
 
-97% of the composite metric comes from a single family — `hn_recovery_high_amount` (Figure 4B). This is the headline v5 finding: no architectural dial moves this component.
+97% of the composite metric comes from a single family — `hn_recovery_high_amount` (Figure 4B). This is the headline v5 finding: within the 11-run v5 sweep on the 5k clean eval (this family has n=78, per-family CI width ~0.18), no tested architectural dial moved this component beyond bootstrap-CI noise. The strength of the "ceiling" claim is bounded by the small per-family sample; the recommended next test is to score the v5 winner on the 50k LLM-narrated eval at `data/eval_medium_50k_llm/`, which tightens the per-family CI ~3×.
 
 ![Figure 4. v5 sweep leaderboard with adversarial-error decomposition](figures/fig4-sweep-results.svg)
 

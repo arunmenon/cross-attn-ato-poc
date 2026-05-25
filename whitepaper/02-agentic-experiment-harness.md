@@ -1,6 +1,6 @@
 # The Agentic Experiment Harness
 
-**Whitepaper companion document · v1.1 · 2026-05-22**
+**Whitepaper companion document · v1.2 · 2026-05-22**
 
 This document covers the Karpathy-style **agent-proposes / deterministic-launcher-enforces** experiment harness that drove all 30 cross-attention and baseline runs across the three sweep generations. It is one of four companion deep-dives behind the master whitepaper (`00-whitepaper-main.md`). The other three are data curation (`01-data-curation-and-distribution.md`), the eval strategy (`03-eval-strategy.md`), and the cross-attention experiments (`04-cross-attention-experiments.md`).
 
