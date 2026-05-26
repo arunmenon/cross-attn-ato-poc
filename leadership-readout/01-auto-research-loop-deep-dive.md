@@ -119,7 +119,7 @@ The following components are intentionally written to be domain-independent and 
 - **`eval/leakage_checks.py`** — train/eval leakage detector. The structured-events-hash + text-hash dedup pattern generalizes to any paired-stream dataset.
 - **`scripts/preflight_check.py`** — GPU, VRAM, model-download, tokenizer-roundtrip, writable-volume gate. Catches environmental issues before they cost training time. The Blackwell-image patch in this script (item 1 in the integration-friction catalog) saved ~2× throughput before anyone noticed it was missing.
 
-The recommendation in the executive summary — *invest in the loop; validate cross-attention through data, not blind sweeps* — is grounded in this list. The architecture-specific code in the POC (cross-attention block, resampler, qwen wrapper) is single-use. The loop is multi-use.
+The recommendation in the executive summary — *invest in the loop; validate cross-attention through data and replay, not blind architecture sweeps* — is grounded in this list. The architecture-specific code in the POC (cross-attention block, resampler, qwen wrapper) is single-use. The loop is multi-use.
 
 ## Open questions for the leadership team
 

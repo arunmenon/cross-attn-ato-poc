@@ -88,9 +88,9 @@ Per-family hard-negative FPR @ 1% legit FPR:
 | `hn_account_recovery` | 488 | 0.0024 | 0.0000 |
 | `hn_large_purchase` | 496 | 0.0014 | 0.0000 |
 | `hn_travel` | ~280 | 0.0000 | 0.0000 |
-| **`hn_recovery_high_amount`** (adversarial-legitimate, v4-new) | 78 | **0.99** | **1.00** |
+| **`hn_recovery_high_amount`** (adversarial-legitimate, v4-new) | 78 | **0.42** [0.34, 0.51] | **0.45** [0.37, 0.56] |
 
-The v4 architectural win is concentrated on the two adversarial fraud families where the modality gap matters. The hardest adversarial-legitimate family is catastrophic for both arms — foreshadowing the v5 ceiling.
+The v4 architectural win is concentrated on the two adversarial fraud families where the modality gap matters. The hardest adversarial-legitimate family (`hn_recovery_high_amount`) sits at ~0.42–0.45 FPR for both arms with overlapping CIs — cross-attention is +0.03 *worse* on the point estimate but statistically tied. This is the data-shaped ceiling that v5 then confirmed is architecture-immutable across 11 variations.
 
 **Gates at v4:** `max_gate_magnitude = 0.0221` on the v4 architecture-winner, above the 0.011 v3 ceiling but well below the Flamingo "open" target of ~0.1. The gates are **sparse but effective** — the LM does most of the discrimination; the gate opens narrowly only where the side stream resolves a textual ambiguity. The +0.97 swing in `phish_takeover_mfa_phished` recall is achieved with `tanh(α) ≈ 0.022` per inserted block, summed over 3 blocks (every_8 configuration).
 
@@ -136,7 +136,7 @@ Phase 2 stop rule fired: neither encoder alternative beat the Phase-1 winner by 
 
 ## 5. The strategic call
 
-**Invest in the loop; validate cross-attention through data, not blind sweeps.**
+**Invest in the loop; validate cross-attention through data and replay, not blind architecture sweeps.**
 
 The cross-attention finding is no longer "doesn't earn its keep." It's "validated synthetic case study — production validation is the next gate."
 

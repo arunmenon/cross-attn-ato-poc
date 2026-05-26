@@ -30,7 +30,7 @@ This is no longer a "we ran 8 experiments and found nothing" briefing. The work 
 
 ## The strategic recommendation
 
-**Invest in the loop; validate cross-attention through data, not blind sweeps.**
+**Invest in the loop; validate cross-attention through data and replay, not blind architecture sweeps.**
 
 The cross-attention finding is no longer a clean negative result. v3 was a data-confounded null, v4 produced a CI-separated synthetic win, v5 exposed a data-shaped ceiling. The next dollar should go into:
 
