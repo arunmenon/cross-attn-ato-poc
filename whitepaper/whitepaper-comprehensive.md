@@ -24,6 +24,35 @@ header-includes:
   - \fancyhead[R]{Cross-Attention for ATO · v1.2}
   - \fancyfoot[C]{\thepage}
   - \renewcommand{\headrulewidth}{0.4pt}
+  # --- Table rendering: shrink to footnotesize and allow long-pipe-table cells
+  # to wrap on underscores in monospace identifiers (the v4/v5 result tables
+  # are the worst offenders: phish_takeover_mfa_phished + multi-CI columns
+  # overflow the page at the default size).
+  - \usepackage{longtable}
+  - \AtBeginEnvironment{longtable}{\footnotesize}
+  - \AtBeginEnvironment{tabular}{\footnotesize}
+  # Make underscores in monospace identifiers a line-break opportunity so
+  # column-wrap defects (e.g., "phish_takeover_mfa phishedtakeover recall")
+  # no longer happen.  This relies on \seqsplit from the seqsplit package.
+  - \usepackage{seqsplit}
+  # --- Landscape pages for the widest leaderboard tables (v3, v5 Phase-1)
+  # — these have 6–7 columns including long CI strings and overflow at any
+  # portrait font size. The landscape wrapper is injected by merge_whitepaper.py
+  # only for the comprehensive PDF (source markdown stays unaffected).
+  - \usepackage{pdflscape}
+  # --- Code blocks: switch to fvextra so long lines wrap instead of clipping
+  # off the right margin (multiple bash commands and JSON paths were
+  # truncated in the previous build).
+  - \usepackage{fvextra}
+  - \fvset{breaklines=true,breakanywhere=true,fontsize=\small}
+  # Also shrink the plain `verbatim` environment that pandoc uses for
+  # indented code blocks (fvextra does NOT patch base LaTeX's verbatim).
+  # The narrator-event sample lines are ~107 chars wide; scriptsize fits
+  # comfortably in a 6.5" text width.
+  - \AtBeginEnvironment{verbatim}{\scriptsize}
+  # --- Figures: a little extra room above captions so the auto-numbered
+  # "Figure N:" doesn't crowd the alt text.
+  - \setlength{\abovecaptionskip}{6pt}
 ---
 
 \thispagestyle{empty}
@@ -42,7 +71,11 @@ Foundation Science · PayPal \\[1em]
 \large\textbf{Abstract}
 \end{center}
 
-We report on a three-generation study (v3 → v4 → v5) of Flamingo-style gated cross-attention applied to **synthetic** account-takeover (ATO) detection on a single PayPal-internal H100 GPU. All results in this paper are on synthetic data modeled on PayPal session schemas; production transfer is explicitly out of scope and not claimed. The work has two contributions. First, we present a Karpathy-style **agentic experiment harness** in which an LLM agent proposes the next experiment and a deterministic Python launcher validates, locks, runs, parses, computes bootstrap confidence intervals, and writes one immutable row to history — with a strict single-writer-per-file ownership invariant. The harness ran 30 experiments across three sweep generations with zero format drift, zero concurrency races, and zero manual reconciliation. Second, we use the harness to surface, diagnose, and correct two design pathologies that hid the architecture's signal — a synthetic-data pipeline in which the narrator paraphrased the side-stream into the text (collapsing the modality gap), and deterministic feature signatures in hard-negative templates (making the eval surface label-deterministic in observed support). After the v4 data pivot, the same cross-attention configuration that ranked as null in v3 produced a confidence-interval-separated lift on adversarial cross-modal fraud families: text-only achieved 0.000 recall on `phish_takeover_mfa_phished` against cross-attention's 0.972 (95% bootstrap CI [0.931, 1.000]). The v5 expansion confirmed the win is dial-robust across 11 configurations and surfaced a data-shaped ceiling on the `hn_recovery_high_amount` adversarial-legitimate family that no architectural dial moved within the sweep. The methodology — agentic loop + bootstrap-CI eval + iteratively repaired synthetic data — generalizes beyond this architecture and task.
+**The question.** Account-takeover (ATO) detection has two natural views of every session — an analyst-style narrative of what happened, and a chronological log of structured behavioral events (logins, transactions, device changes, with bucketed features such as `amount_bucket=high`). Language models read narratives well; the event stream is where the fraud signal historically lives. This paper asks whether **Flamingo-style gated cross-attention** — a frozen LM that attends to a side stream of structured events through inserted gated layers — can bridge that modality gap, on a **synthetic** ATO dataset modeled on PayPal session schemas. All results are on synthetic data; production transfer is explicitly out of scope.
+
+**The arc.** The work went through three sweep generations, which we label v3, v4, and v5 throughout the paper. **v3** was the original 3-day proof-of-concept; it returned a null result — no architectural lift over the baseline. **v4** was a redesign of the synthetic dataset, after a code audit revealed that v3's null was caused by the way the data was generated, not by the architecture (the LLM that wrote the narratives could see the structured events and ended up describing them in the text — so the two views the architecture was meant to combine ended up carrying the same information). **v5** then ran 11 variations of the architecture on the v4 data to test whether the win held up — it did, robustly — and exposed a new data-side bottleneck. The labels track on-disk artifacts (experiments.jsonl rows, dataset versions, metric schemas) so every claim is reproducible against a specific generation.
+
+**What the paper contributes.** *First, the research system itself.* An AI agent picks the next experiment to run, and a strict Python script does everything else — validates the config, locks the GPU, launches the job, parses the metrics, computes confidence intervals, and writes one tamper-proof line to a history log. Only one piece of code is ever allowed to write to that log, so the records can't get scrambled even when the agent retries or several runs queue up. The system ran 30 experiments across the three generations with no scrambled records, no clashing writes, and no manual cleanup. *Second, what we discovered with that system about the v3 synthetic data.* Two flaws in how the data was generated had quietly made v3 unable to test what it was supposed to test: (a) the LLM that wrote the narratives could see the structured events, so it copied the fraud-signal features into the text — leaving the two views the architecture was meant to combine carrying the same information; (b) the hard-negative templates used fixed feature combinations, so a simple feature-only classifier could already separate fraud from legitimate at near-perfect accuracy — meaning the benchmark cross-attention was being compared against wasn't measuring model capability, it was measuring a template artifact. Once both flaws were fixed in the v4 data pivot, the same cross-attention configuration that produced a null result in v3 produced a clear win on adversarial cross-modal fraud. On `phish_takeover_mfa_phished` — a deliberately hard scenario family we built into the eval, where the phisher has also captured the victim's MFA code, so the narrative reads like a routine login — the **text-only baseline** (the same frozen LM reading only the narrative, with no access to the structured events) caught 0% of cases and cross-attention caught 97.2% (95% confidence interval [93.1%, 100%]; the bracketed range is the band where the true detection rate most likely sits, and its lower bound sitting well above zero is what makes the win statistically reliable rather than a lucky run). The v5 sweep then ran 11 variations of the architecture and confirmed the win held up across all of them, while revealing one stubborn family of cases (large-amount legitimate account recoveries) where no architectural change moved the false-positive rate — a data-side problem, not a model problem. The general recipe — agent-driven experiment loop, honest confidence intervals on every number, and synthetic data that gets fixed when it misleads — applies well beyond this architecture and task.
 
 \textbf{The cross-attention finding is the worked example; the loop is the reusable artifact.}
 
@@ -68,11 +101,12 @@ We report on a three-generation study (v3 → v4 → v5) of Flamingo-style gated
 
 A one-page take for non-research readers; the rest of the paper supports each line.
 
-- **What we built.** An agentic research loop with hard-edge guardrails — an LLM agent proposes the next experiment, a deterministic Python launcher validates, locks, runs, parses, computes bootstrap CIs, and writes one immutable row to history. Paired with a leakage-safe synthetic-data pipeline and a tie-aware exact-target operating-point eval, this is the **reusable artifact**.
-- **What we tested.** Flamingo-style gated cross-attention on a frozen Qwen3-8B language model, with a side-stream encoder over a structured event timeline gated into the LM stack via a Perceiver-Resampler and per-layer scalar gates. Account-takeover (ATO) on a synthetic dataset modeled on PayPal session schemas — the **worked example**.
-- **What happened.** v3 returned a null result; a code audit traced it to a synthetic-data leak where the narrator paraphrased the event signal into the text. v4 fixed the data pipeline; the same cross-attention configuration produced a confidence-interval-separated win on adversarial cross-modal fraud (`phish_takeover` recall 0.11 → 1.00; `phish_takeover_mfa_phished` recall 0.00 → 0.97). v5 expanded the sweep to 11 cells; the win is dial-robust, and within that sweep no tested architecture dial moved a separate data-shaped ceiling on the hardest adversarial-legitimate family beyond CI noise — bounded by the family's small per-eval sample (n=78), which the next 50k-eval test would tighten ~3×.
-- **What we learned.** The loop is portable: harness + leakage-safe data + bootstrap-CI eval generalize beyond this architecture and task. The architecture works **when given a problem it can solve**; on this synthetic surface, it solves adversarial cross-modal fraud and hits a data ceiling on one adversarial-legitimate family.
-- **What's next.** Real-data replay on an anonymized production window (§8.1 roadmap), bottleneck-family data redesign, and a non-LLM tabular baseline (XGBoost on bucketed events) for fraud-audience defensibility. Production transfer is **not claimed** in this paper.
+- **What we built.** A research system where an AI agent picks the next experiment to run, and a strict Python script does everything else around it — checks the config, makes sure the GPU isn't already busy, launches the training job, parses the metrics, computes the statistics, and writes one tamper-proof line to an experiment log file. We paired it with two things we built carefully: a synthetic dataset for account-takeover (ATO) detection, and an evaluation pipeline that reports honest confidence intervals on every number. This system is the **reusable artifact** — the part of the work that should outlive the specific model we tested.
+- **What we tested.** Whether a frozen language model (Qwen3-8B) can do better at spotting fraud when it has access to two views of every session simultaneously: an analyst-style narrative of what happened, and the raw log of structured events that produced that narrative. The mechanism for combining the two views is *gated cross-attention* (the recipe from DeepMind's Flamingo, originally designed for vision-language models). This is the **worked example** that puts the loop to use.
+- **How the test is set up.** Each session in the synthetic dataset comes as a *pair* — the structured event timeline (logins, transactions, device changes, password resets, with bucketed features like `amount_bucket=high`) on one side, and the analyst-style narrative on the other. The dataset has ~25,000 paired sessions for training and a held-out eval of ~5,000 sessions. Every session belongs to a *scenario family* — legitimate logins, legitimate account recoveries, phishing-driven takeovers, and so on — and the eval is stratified so each family is represented in proportion. The **baseline depends on generation**. In **v3**, the load-bearing comparison was against `structured-as-text` — the same frozen LM with the structured event stream serialized into the prompt as plain text. In **v4 and v5**, after the trainer-input contract was repaired so all arms receive byte-identical LM prompts, the clean architectural comparison is `text-only` vs. cross-attention, where the only difference between arms is access to the structured side stream (text-only reads only the narrative; cross-attention also attends to the structured events through inserted gated layers). When we say cross-attention "wins over the baseline" in v4/v5, we mean: holding everything else constant, giving the model access to the structured event stream through cross-attention changes its answer for the better.
+- **What happened.** **v3** ran 18 cross-attention configurations and showed no separation from the `structured-as-text` baseline (cross-attention 0.0524 vs. baseline 0.0507 on worst-family HN-FPR; confidence intervals overlap heavily) — across all 18 configurations, no measurable improvement (this is the "null result"). A code audit then traced that null to a bug in how the synthetic data was generated: the LLM that wrote the narratives could see the structured events, so it ended up describing them in the text — leaving cross-attention with no extra information to fetch from the structured side. **v4** fixed the data pipeline and also added two intentionally hard scenario families to the dataset — `phish_takeover` and `phish_takeover_mfa_phished` (the harder of the two: a phishing-driven account takeover where the attacker has also captured the victim's MFA code, so the narrative on the surface still reads like a routine login, and only the structured events reveal the fraud). The same architecture, re-run on the fixed data, produced a clean win on both families: detection jumped from 11% to 100% on the first and from 0% to 97% on the second. Both improvements were statistically clean — the confidence intervals around the old and new numbers don't overlap, which is the standard test for "this is a real change, not random noise." **v5** then ran 11 variations of the architecture (different gate settings, layer placements, resampler sizes, etc.) — and the win held up across all of them. But v5 also exposed a new problem: one specific group of legitimate sessions (large-amount account-recovery transactions) looks too much like fraud no matter what model we use; this is a *data* problem, not a model problem. The eval set has only 78 examples in this group, so our certainty is limited — a 50k-example eval set we've already built would tighten the numbers ~3× and is the recommended next test.
+- **What we learned.** The system is portable. Three pieces of it — the AI-agent + strict-Python-script split, the careful synthetic data pipeline, and the honest-CI evaluation — generalize to other research questions, other architectures, other tasks. The cross-attention architecture itself works *when the test is set up correctly*: on this synthetic surface it cleanly solves the adversarial cross-modal fraud cases, and it hits a wall on a different kind of case where the data itself doesn't carry enough disambiguating signal.
+- **What's next.** Three things, in order of priority: (1) test the v4 winner on a held-out window of real anonymized PayPal traffic (§8.1 has the roadmap); (2) regenerate the `hn_recovery_high_amount` examples (the legitimate big-money account-recoveries that currently look indistinguishable from fraud) so the events carry richer disambiguating signal — device-trust history, step-up-auth chain, etc.; (3) add a strong non-LLM baseline (XGBoost or LightGBM on the bucketed event features) so any future "cross-attention beats fraud baselines" claim is properly defended. Production transfer is **not claimed** in this paper.
 
 **Bottom line.** *The cross-attention finding is the worked example; the loop is the reusable artifact.*
 
@@ -86,21 +120,19 @@ The paper is organized for three audience types and you can take any of them as 
 
 ---
 
-## Abstract
-
-We report on a three-generation study (v3 → v4 → v5) of Flamingo-style gated cross-attention applied to **synthetic** account-takeover (ATO) detection on a single PayPal-internal H100 GPU. All results in this paper are on synthetic data modeled on PayPal session schemas; production transfer is explicitly out of scope and not claimed (§7, §8.1). A frozen Qwen3-8B language model (post-light continued pre-training) reads an analyst-style narrative while a side-stream encoder over a structured event timeline is gated into the LM stack via a small Perceiver-Resampler and per-layer scalar gates. The work has two contributions. First, we present a Karpathy-style **agentic experiment harness** in which an LLM agent proposes the next experiment and a deterministic Python launcher validates, locks, runs, parses, computes bootstrap confidence intervals, and writes one immutable row to history — with a strict single-writer-per-file ownership invariant. The harness ran 30 cross-attention and baseline configurations end-to-end across the three sweep generations with zero format-drift, zero concurrency races, and zero manual reconciliation. Second, we use the harness to surface, diagnose, and correct two design pathologies that hid the architecture's signal: (a) a synthetic-data pipeline in which the narrator paraphrased the structured side-stream into the text (collapsing the modality gap that cross-attention was designed to exploit) and (b) deterministic feature signatures in hard-negative templates that made the eval surface label-deterministic in observed support. Once both pathologies were repaired in the v4 data pivot, the same cross-attention configuration that ranked as null in v3 produced a confidence-interval-separated lift on adversarial cross-modal fraud families: text-only achieved 0.000 recall on `phish_takeover_mfa_phished` against cross-attention's 0.972 (95% bootstrap CI [0.931, 1.000]). The v5 expansion (11 runs across training-dial and encoder sweeps) confirmed the win was robust to gate initialization, insertion density, resampler capacity, LoRA rank, and side-stream encoder family, and surfaced a new data-shaped ceiling on the `hn_recovery_high_amount` adversarial-legitimate family at ~44% false-positive rate: within the 11-run v5 sweep on the 5k clean eval (this family has n=78, per-family CI width ~0.18), **no tested architecture dial moved the bottleneck beyond bootstrap-CI noise**. A 50k LLM-narrated eval would tighten this claim ~3× and is recommended as the next test. We argue the methodology — agentic loop + tie-aware bootstrap-CI evaluation + iteratively repaired synthetic data — generalizes beyond this specific architecture and task. The cross-attention finding is the worked example; the loop is the reusable artifact.
-
-**Keywords.** Cross-attention, Flamingo-style adapter, frozen language model, account-takeover detection, agentic experiment harness, auto-research loop, bootstrap confidence intervals, tie-aware operating-point metrics, synthetic-data evaluation, structured-stream encoding.
-
----
-
 ## 1. Introduction
 
 A line of recent work — Flamingo (Alayrac et al., 2022) and its descendants — frames non-textual modalities as side documents that a frozen language model attends to through inserted gated cross-attention layers. This has worked for images and video; the obvious question for risk and fraud teams is whether it works for structured behavioral event streams. The application domain is account-takeover (ATO) detection at PayPal: each session has two natural views — an analyst-style narrative of what happened, and a chronological log of structured events (logins, transactions, device changes, password resets, with bucketed features such as `amount_bucket=high` and `geo_distance=international`). Self-attention reads the narrative well; the event stream is where the fraud signal historically lives. Cross-attention is the obvious bridge.
 
 This whitepaper documents three sweep generations of that hypothesis, the agentic experiment harness that drove every run, and the data and eval design that made the results credible. The headline outcome is twofold: a methodology contribution (the harness and the bootstrap-CI-defended evaluation pipeline that comes with it) and a result contribution (a CI-separated architectural win on adversarial cross-modal fraud, conditional on a data pipeline that does not paraphrase the side stream into the text — and a finding that, within the 11-run v5 sweep on the 5k eval, no tested architecture dial moved a separate data-shaped ceiling on the hardest adversarial-legitimate family beyond bootstrap-CI noise). Figure 2 (below) shows the loop that drove every run; it is the artifact this paper claims is most reusable beyond the specific cross-attention case study.
 
-![Figure 2. Auto-research loop dataflow](figures/fig2-auto-research-loop.svg)
+
+
+\setcounter{figure}{1}
+
+![Auto-research loop dataflow](figures/fig2-auto-research-loop.svg){ width=100% }
+
+
 
 The full arc is summarized in §2 (related work), §3 (method — including a deeper walk-through of the harness in §3.2), §4 (the v3 → v4 → v5 experimental arc), §5 (results), §6 (discussion), §7 (limitations), §8 (conclusion). Four companion documents go deeper on each pillar: Part II (Data Curation and Distribution), Part III (Agentic Experiment Harness), Part IV (Eval Strategy), and Part V (Cross-Attention Experiments). Four figures accompany the set: an architecture diagram (Figure 1), the loop's dataflow (Figure 2, above), data distribution and eval-mode design (Figure 3), and the v5 sweep leaderboard with bootstrap-CI decomposition (Figure 4).
 
@@ -156,7 +188,13 @@ Every quantitative claim in this paper, classified by strength. Read this table 
 
 ### 3.1 Data
 
-![Figure 3. Data distribution & eval-mode mix](figures/fig3-data-distribution.svg)
+
+
+\setcounter{figure}{2}
+
+![Data distribution & eval-mode mix](figures/fig3-data-distribution.svg){ width=100% }
+
+
 
 The synthetic ATO dataset has three token families (Figure 3D):
 
@@ -210,7 +248,7 @@ Three eval modes are applied symmetrically during training (via per-example drop
 - **`opaque`** — journey/actor tokens replaced with neutral random IDs. Secondary.
 - **`full`** — all tokens visible. Debug only; never reported as a win condition.
 
-Three eval-set sizes form a ladder: 5k LLM-narrated (per-experiment), 15k LLM-narrated (diagnostic, used to confirm saturation is not eval-size-specific), and 50k templated medium-eval (built but unused in v3 due to the convergence halt; the v4 and v5 runs evaluated on the 5k surface).
+Four eval-set sizes form a ladder: 5k LLM-narrated (per-experiment), 15k LLM-narrated (diagnostic, used to confirm saturation is not eval-size-specific), 50k templated medium-eval at `data/eval_medium_50k/` (free backstop; built but unused in v3/v4/v5), and 50k LLM-narrated medium-eval at `data/eval_medium_50k_llm/` (built but not yet scored on the v5 winner; the **recommended next test** to tighten the per-family CI on `hn_recovery_high_amount` ~3×). The v4 and v5 runs evaluated on the 5k surface.
 
 **Primary scoring** is `score = logP(' fraud' | prefix) − logP(' legit' | prefix)` where the prefix is the narrative + `<risk_verdict>\nlabel:` portion of the example. AUC over this score against ground truth is the sanity-only column (it saturated at 1.0 on every variant by v3 Day-1, so it cannot rank). The headline metric pivoted three times across the sweep:
 
@@ -230,7 +268,13 @@ Full metric derivations, CI computations, and the train/eval leakage-control reg
 
 ### 3.4 Architecture
 
-![Figure 1. Cross-attention surgery on Qwen3-8B](figures/fig1-architecture.svg)
+
+
+\setcounter{figure}{0}
+
+![Cross-attention surgery on Qwen3-8B](figures/fig1-architecture.svg){ width=100% }
+
+
 
 We follow Flamingo (Alayrac et al., 2022) with the minimal adaptations required to swap images for structured event streams. Figure 1 illustrates.
 
@@ -292,7 +336,13 @@ The two adversarial fraud families are CI-separated. Cross-attention catches the
 
 ### 4.3 v5 — scaling and the data-shaped ceiling
 
-![Figure 4. v5 sweep leaderboard with adversarial-error decomposition](figures/fig4-sweep-results.svg)
+
+
+\setcounter{figure}{3}
+
+![v5 sweep leaderboard with adversarial-error decomposition](figures/fig4-sweep-results.svg){ width=100% }
+
+
 
 The v5 expansion ran 11 cross-attention configurations across two phases against the new `v5_adv_error` primary metric (§3.3) on the v4 dataset using the `qwen3-8b-cpt-light-v4-merged` base:
 
@@ -313,7 +363,7 @@ Full results are in Figure 4A and tabulated in Part V (Cross-Attention Experimen
 
 `pooled_mlp` ties within CI — a learned attention-over-events encoder confers no measurable advantage over mean/max-pooling + MLP on this task. `ft_transformer` actively regressed on `phish_takeover_mfa_phished` recall (0.9296 vs 0.9859). The Phase-2 stop rule fired after both alternatives.
 
-**Finding 3: the data-shaped ceiling on `hn_recovery_high_amount`.** Within the 11-run v5 sweep on the 5k clean eval (`hn_recovery_high_amount` n=78, per-family CI width ~0.18), no architectural dial moved the bottleneck beyond CI noise. Across the non-pathological v5 x-attn runs, the FPR stayed in the band [0.4377, 0.4505] — a maximum spread of 0.0128, well below the run-to-run bootstrap CI width. The one excursion is `exp_v5_p1_fastlr` at 0.4249, which dropped below the band only because the 1%-legit-FPR operating point shifted after `phish_takeover_mfa_phished` recall collapsed to ~0 — not a real architectural movement of the ceiling. The component contributes ~97% of the total `v5_adv_error` for the Phase-1 winner (0.146 of 0.151; Figure 4B). The data generator's `hn_recovery_high_amount` template appears to produce examples that are indistinguishable from fraud at the signal level visible to the model. **Caveat on strength of claim:** the per-family CI is wide because only 78 rows land in this family in the 5k clean eval; a 50k LLM-narrated eval (already built at `data/eval_medium_50k_llm/`, not yet scored on the v5 winner) would tighten the per-family CI ~3× and is the recommended next test before declaring the ceiling structural. Either the generator needs richer contrastive features (device-trust history, step-up-auth chain, out-of-band verification), or the framing should change — the production analog of `hn_recovery_high_amount` is plausibly a "route to step-up auth" case rather than a binary fraud/legit classification target, and the model is being asked an unanswerable question.
+**Finding 3: the data-shaped ceiling on `hn_recovery_high_amount`.** Within the 11-run v5 sweep on the 5k clean eval (`hn_recovery_high_amount` n=78, per-family CI width ~0.18), no architectural dial moved the bottleneck beyond CI noise. Across the non-pathological v5 x-attn runs, the FPR stayed in the band [0.4377, 0.4505] — a maximum spread of 0.0128, well below the run-to-run bootstrap CI width. The one excursion is `exp_v5_p1_fastlr` at 0.4249, which dropped below the band only because the 1%-legit-FPR operating point shifted after `phish_takeover_mfa_phished` recall collapsed to ~0 — not a real architectural movement of the ceiling. The component contributes ~97% of the total `v5_adv_error` for the Phase-1 winner (0.146 of 0.151; Figure 4B). The data generator's `hn_recovery_high_amount` template appears to produce examples that are indistinguishable from fraud at the signal level visible to the model. **Caveat on strength of claim:** the per-family CI is wide because only 78 rows land in this family in the 5k clean eval. Two 50k eval surfaces have been built — a *templated* medium-eval at `data/eval_medium_50k/` (deterministic per-journey template generator, no LLM calls; built for cost-controlled CI tightening) and a *LLM-narrated* medium-eval at `data/eval_medium_50k_llm/` (matches the training distribution exactly). **The next CI-tightening test is to score the v5 Phase-1 winner on the 50k LLM-narrated eval at `data/eval_medium_50k_llm/`, which is expected to tighten the `hn_recovery_high_amount` per-family CI by roughly 3×.** This is the recommended next experiment before declaring the ceiling structural. Either the generator needs richer contrastive features (device-trust history, step-up-auth chain, out-of-band verification), or the framing should change — the production analog of `hn_recovery_high_amount` is plausibly a "route to step-up auth" case rather than a binary fraud/legit classification target, and the model is being asked an unanswerable question.
 
 ---
 
@@ -391,7 +441,7 @@ We presented a three-generation cross-attention POC for synthetic ATO detection 
 
 ### 8.1 Real-data validation roadmap
 
-Production transfer is **not claimed** by this paper. The 5k LLM-narrated and 50k templated eval surfaces are both synthetic, and the bottleneck family `hn_recovery_high_amount` is constructed by template, not observed in real traffic. To move any claim in this paper from "Strong within synthetic eval" to "Strong on production data," the following six steps are the concrete next experiment:
+Production transfer is **not claimed** by this paper. The 5k LLM-narrated, 50k templated, and 50k LLM-narrated eval surfaces are all synthetic, and the bottleneck family `hn_recovery_high_amount` is constructed by template, not observed in real traffic. To move any claim in this paper from "Strong within synthetic eval" to "Strong on production data," the following six steps are the concrete next experiment:
 
 1. **Anonymized held-out window.** A real fraud-and-legit traffic slice of 10k–50k sessions, scoped through PayPal's data-engineering and privacy-clearance process. Schema-mapped to the synthetic journey/actor schema so the v5 Phase-1 winner can run inference without re-training; mismatch rows are dropped or flagged.
 2. **Temporal split, not random.** Train cutoff and eval cutoff must respect production label-delay realities. Label-delay handling: include only sessions whose fraud label has matured (typically 30–90 days post-session); rolling-window eval to surface temporal drift.
@@ -680,7 +730,14 @@ Each trainer constructs its arm-specific input by composing canonical fields:
 
 ## 4. Data distribution as of v4 / v5
 
-![Figure 3. Data distribution & eval-mode mix](figures/fig3-data-distribution.svg)
+
+
+\begin{center}
+\includegraphics[width=\textwidth]{figures/fig3-data-distribution.svg}\\[0.3em]
+\textit{Repeated from Figure 3 — Data distribution \& eval-mode mix.}
+\end{center}
+
+
 
 Figure 3 summarizes the four key views: class balance (panel A), the journey × actor heatmap (panel B), the eval-mode dropout mix during training (panel C), and the three token families with their visibility regimes (panel D). Detailed numbers below.
 
@@ -692,7 +749,7 @@ The training pool is 25,000 LLM-narrated paired examples. Class balance:
 - **Hard negatives — 30% (7,500 rows).** Distributed across `hn_travel`, `hn_large_purchase`, `hn_account_recovery`, `hn_recovery_high_amount` (v4 new).
 - **Legit — 30% (7,500 rows).** The `clean` journey family.
 
-The 5k held-out eval (n = 5,002 after v4 leakage controls) is class-stratified to preserve these ratios. The 50k templated medium-eval (`data/eval_medium_50k/`, present but not exercised in v5) is templated-narrative rather than LLM-narrated; it preserves the same class balance with broader coverage.
+The 5k held-out eval (n = 5,002 after v4 leakage controls) is class-stratified to preserve these ratios. Two 50k medium-eval surfaces exist alongside it: a templated medium-eval at `data/eval_medium_50k/` (free to produce — no LLM calls — preserves the same class balance with broader coverage) and an LLM-narrated medium-eval at `data/eval_medium_50k_llm/` (built but not yet scored on the v5 winner; the recommended next test for tightening per-family confidence intervals).
 
 ### 4.2 Journey × actor distribution
 
@@ -798,7 +855,14 @@ The harness is the methodology contribution we believe will most generalize beyo
 
 **Agent proposes, deterministic script enforces.** An LLM agent (Claude Code or Codex) reads sweep state, the experiment history, and a written playbook, then proposes the next experiment as a YAML configuration. A deterministic Python launcher (`scripts/run_next_experiment.py`) does everything else: validates the proposal against a whitelist, dedups it against history, acquires a GPU lockfile, runs `accelerate launch`, parses metrics, computes 1000-resample bootstrap confidence intervals with tie-aware exact-target operating-point computation, writes atomic outputs, and appends one immutable row to `experiments.jsonl`.
 
-![Figure 2. Auto-research loop dataflow](figures/fig2-auto-research-loop.svg)
+
+
+\begin{center}
+\includegraphics[width=\textwidth]{figures/fig2-auto-research-loop.svg}\\[0.3em]
+\textit{Repeated from Figure 2 — Auto-research loop dataflow.}
+\end{center}
+
+
 
 The decomposition is summarized in Figure 2 above and detailed in §3 below.
 
@@ -1087,7 +1151,7 @@ Specific to the cross-attention POC and not directly transferable:
 - The journey/actor schema in `data/gen/journey_templates.py`.
 - The `v5_adv_error` metric in `eval/score_risk.py` (a specific composition for the v4 adversarial-family setup).
 
-The recommendation in the master whitepaper — *invest in the loop, not the architecture* — is grounded in this split. The architecture-specific code is single-use. The harness is multi-use.
+The recommendation in the master whitepaper — *invest in the loop; validate cross-attention through data, not blind architecture sweeps* — is grounded in this split. The architecture-specific code is single-use. The harness is multi-use.
 
 ---
 
@@ -1145,13 +1209,14 @@ Three eval sets form a ladder, used at different points in the experimental cycl
 |---|---|---|---|
 | **Fast** | 5,000 (v3) / 5,002 (v4/v5) | Stratified slice of the LLM-narrated training pool | Every experiment: AUC, R@FPR@1%, worst-family HN-FPR |
 | **Diagnostic** | 15,000 | LLM-narrated, eval-only generation | Used in v3 Day-1 to confirm AUC saturation was not eval-size-specific |
-| **Medium** | 50,000 | Templated-narrative + verdict footer (no LLM calls) | Built but not exercised in v3/v4/v5 — the convergence halt fired before medium-eval was scheduled |
+| **Medium-templated** | 50,000 | Templated-narrative + verdict footer (no LLM calls) | Backstop; built but not exercised in v3/v4/v5 |
+| **Medium-LLM-narrated** | 50,000 | LLM-narrated, eval-only generation (same generator as the 5k fast eval, scaled 10×) | Recommended next test for the v5 Phase-1 winner |
 
-The fast eval is the only per-run surface. The 50k templated medium-eval is a backstop for the top-3 round-2 comparison; we explicitly recommend running the v5 Phase-1 winner against the medium-eval as the next experimental step (see Part V (Cross-Attention Experiments) §8).
+**Two 50k surfaces exist.** A *templated* medium eval at `data/eval_medium_50k/` (free to produce — no LLM calls) and an *LLM-narrated* medium eval at `data/eval_medium_50k_llm/` (built but not yet scored on the v5 winner). The recommended next test is to score the v5 Phase-1 winner on the **LLM-narrated** 50k eval; that is the surface that would tighten the per-family CI on `hn_recovery_high_amount` from ~0.18 width to ~0.06 width (roughly 3× tighter), and is the most direct way to defend the v5 ceiling claim under a larger sample. The templated 50k remains as a free, broader-coverage backstop.
 
-Why three sizes? Two reasons. First, the 5k LLM-narrated surface is expensive to produce (~$2.03 for the 25k training pool at `gpt-5-nano-2025-08-07` rates; a 50k LLM-narrated eval would be ~2× that). The 50k templated medium-eval is free (no LLM calls; uses a deterministic per-journey template generator). The size ladder is a cost-controlled CI-tightening strategy. Second, the templated medium-eval has subtly different distribution properties than the LLM-narrated fast eval — the templated narratives are more uniform in style — so it's important to use both: the fast eval for per-experiment ranking, the medium eval for the final cross-architecture comparison.
+Why four sizes (5k LLM + 15k LLM + 50k templated + 50k LLM-narrated)? Two reasons. First, the 5k LLM-narrated surface is expensive to produce (~$2.03 for the 25k training pool at `gpt-5-nano-2025-08-07` rates; the 50k LLM-narrated eval cost ~$4 to build). The 50k templated medium-eval is free (no LLM calls; uses a deterministic per-journey template generator). The size ladder is a cost-controlled CI-tightening strategy. Second, the templated medium-eval has subtly different distribution properties than the LLM-narrated fast eval — the templated narratives are more uniform in style — so the LLM-narrated 50k is the right surface for tightening the v5 ceiling claim with statistical confidence.
 
-The v3 plan documented all three sizes; v3 only used the fast and diagnostic. v4 and v5 used only the fast. The 50k medium-eval remains in `data/eval_medium_50k/` for the next sweep generation.
+The v3 plan documented the three smaller sizes; v3 only used the fast and diagnostic. v4 and v5 used only the fast. Both 50k surfaces are available for the next sweep generation; the LLM-narrated 50k is the recommended next test.
 
 ---
 
@@ -1265,7 +1330,14 @@ v5_adv_error                       = 0.1506  CI [0.1238, 0.1871]
 
 97% of the composite metric comes from a single family — `hn_recovery_high_amount` (Figure 4B). This is the headline v5 finding: within the 11-run v5 sweep on the 5k clean eval (this family has n=78, per-family CI width ~0.18), no tested architectural dial moved this component beyond bootstrap-CI noise. The strength of the "ceiling" claim is bounded by the small per-family sample; the recommended next test is to score the v5 winner on the 50k LLM-narrated eval at `data/eval_medium_50k_llm/`, which tightens the per-family CI ~3×.
 
-![Figure 4. v5 sweep leaderboard with adversarial-error decomposition](figures/fig4-sweep-results.svg)
+
+
+\begin{center}
+\includegraphics[width=\textwidth]{figures/fig4-sweep-results.svg}\\[0.3em]
+\textit{Repeated from Figure 4 — v5 sweep leaderboard with adversarial-error decomposition.}
+\end{center}
+
+
 
 ### 3.5 Why this is the right composite
 
@@ -1315,7 +1387,7 @@ Hard-negative families (FPR at 1% legit FPR):
 Three things to read off this table:
 
 1. **AUC saturation and per-journey breakdown.** On the `stripped` mode, per-journey AUC is uninformative — every non-HN family saturates at 1.000. The discrimination is decided entirely on the three hard-negative families. This is true across the v3, v4, and v5 generations.
-2. **Per-family CI tightness.** The bootstrap CI on `hn_recovery_high_amount` for this run is `[0.3601, 0.5449]` — a width of 0.18, much wider than the composite CI of `[0.1238, 0.1871]`. This is the small-sample noise on the 78-row hard-negative family in the 5k eval. A 50k medium-eval would tighten the per-family CI ~3×.
+2. **Per-family CI tightness.** The bootstrap CI on `hn_recovery_high_amount` for this run is `[0.3601, 0.5449]` — a width of 0.18, much wider than the composite CI of `[0.1238, 0.1871]`. This is the small-sample noise on the 78-row hard-negative family in the 5k eval. The **LLM-narrated 50k eval** at `data/eval_medium_50k_llm/` (already built, not yet scored on the v5 winner) would tighten the per-family CI roughly 3×.
 3. **The composite hides nothing.** v5_adv_error is the mean of three error rates, and the per-family report shows exactly which family is driving the composite. No "the metric went up but I don't know why" failure mode.
 
 ---
@@ -1427,7 +1499,14 @@ This document covers the cross-attention architecture, the training recipe, and 
 
 ## 1. Architecture
 
-![Figure 1. Cross-attention surgery on Qwen3-8B](figures/fig1-architecture.svg)
+
+
+\begin{center}
+\includegraphics[width=\textwidth]{figures/fig1-architecture.svg}\\[0.3em]
+\textit{Repeated from Figure 1 — Cross-attention surgery on Qwen3-8B.}
+\end{center}
+
+
 
 The architecture is Flamingo (Alayrac et al., 2022) applied verbatim to a different modality — structured behavioral event streams instead of images. Figure 1 summarizes the full surgery. Five components:
 
@@ -1530,18 +1609,29 @@ The training recipe is unchanged across v3, v4, and v5 except for the LR/warmup 
 
 Eighteen valid cross-attention runs were recorded in v3 across two sweep phases (Round-1: 6 grid cells; Round-2: 2 perturbations) and the v3 expansion (`xattn-expanded-sweep-plan.md`: Phase 1, Phase 2, Phase 3 grid completion, Phase 4 rank capacity). Headline numbers (`metric_version: 2`, clean eval `n = 4,466`, 95% bootstrap CIs):
 
-| Run | Config | Worst-family HN-FPR [CI] | Mean HN-FPR | Worst family | Max gate |
-|---|---|---|---|---|---|
-| `exp_xa_round1_002` (v3 leader) | every_8 / 64 / 0.01 | 0.0524 [0.0420, 0.0647] | 0.0262 | hn_account_recovery | 0.0112 |
-| `exp_baseline_structured_as_text_v2` | (concat baseline) | 0.0507 [0.0408, 0.0635] | 0.0262 | hn_account_recovery | n/a |
-| `exp_xa_round1_001` | every_4 / 64 / 0.01 | 0.0572 [0.0455, 0.0691] | 0.0258 | hn_account_recovery | 0.0106 |
-| `exp_xa_round1_003` | late_only / 64 / 0.01 | 0.0586 [0.0460, 0.0683] | 0.0256 | hn_account_recovery | 0.0109 |
-| `exp_xa_round2_008` | every_4 / 64 / zero | 0.0594 [0.0470, 0.0708] | 0.0256 | hn_account_recovery | 0.0041 |
-| `exp_xa_round1_006` | late_only / 128 / 0.01 | 0.0604 [0.0472, 0.0709] | 0.0255 | hn_account_recovery | 0.0109 |
-| `exp_xa_round1_004` | every_4 / 128 / 0.01 | 0.0608 [0.0481, 0.0724] | 0.0254 | hn_account_recovery | 0.0112 |
-| `exp_xa_round2_007` | every_8 / 64 / zero | 0.0608 [0.0475, 0.0716] | 0.0254 | hn_account_recovery | 0.0039 |
-| `exp_baseline_lora_text_v2` | (LoRA text-only) | 0.0701 [0.0564, 0.0847] | 0.0291 | hn_large_purchase | n/a |
-| `exp_baseline_event_only_v2` | (event-only classifier) | 0.0730 [0.0667, 0.0799] | 0.0243 | hn_account_recovery | n/a |
+
+\begin{landscape}
+\begin{center}
+\scriptsize
+\begin{tabular}{llllll}
+\hline
+\textbf{Run} & \textbf{Config} & \textbf{Worst-family HN-FPR [CI]} & \textbf{Mean HN-FPR} & \textbf{Worst family} & \textbf{Max gate} \\
+\hline
+\texttt{exp\_xa\_round1\_002} (v3 leader) & every\_8 / 64 / 0.01 & 0.0524 [0.0420, 0.0647] & 0.0262 & hn\_account\_recovery & 0.0112 \\
+\texttt{exp\_baseline\_structured\_as\_text\_v2} & (concat baseline) & 0.0507 [0.0408, 0.0635] & 0.0262 & hn\_account\_recovery & n/a \\
+\texttt{exp\_xa\_round1\_001} & every\_4 / 64 / 0.01 & 0.0572 [0.0455, 0.0691] & 0.0258 & hn\_account\_recovery & 0.0106 \\
+\texttt{exp\_xa\_round1\_003} & late\_only / 64 / 0.01 & 0.0586 [0.0460, 0.0683] & 0.0256 & hn\_account\_recovery & 0.0109 \\
+\texttt{exp\_xa\_round2\_008} & every\_4 / 64 / zero & 0.0594 [0.0470, 0.0708] & 0.0256 & hn\_account\_recovery & 0.0041 \\
+\texttt{exp\_xa\_round1\_006} & late\_only / 128 / 0.01 & 0.0604 [0.0472, 0.0709] & 0.0255 & hn\_account\_recovery & 0.0109 \\
+\texttt{exp\_xa\_round1\_004} & every\_4 / 128 / 0.01 & 0.0608 [0.0481, 0.0724] & 0.0254 & hn\_account\_recovery & 0.0112 \\
+\texttt{exp\_xa\_round2\_007} & every\_8 / 64 / zero & 0.0608 [0.0475, 0.0716] & 0.0254 & hn\_account\_recovery & 0.0039 \\
+\texttt{exp\_baseline\_lora\_text\_v2} & (LoRA text-only) & 0.0701 [0.0564, 0.0847] & 0.0291 & hn\_large\_purchase & n/a \\
+\texttt{exp\_baseline\_event\_only\_v2} & (event-only classifier) & 0.0730 [0.0667, 0.0799] & 0.0243 & hn\_account\_recovery & n/a \\
+\hline
+\end{tabular}
+\end{center}
+\end{landscape}
+
 
 The v3 leader is `exp_xa_round1_002` at worst HN-FPR = 0.0524. The load-bearing baseline `structured_as_text_v2` is at 0.0507. CIs heavily overlap; cross-attention is +0.0017 absolute **worse** on the point estimate. **No CI-separated win.** The same pattern held across every architectural dial: insertion pattern (3 variants ranged 0.052–0.061), resampler slots (64 vs 128 tied within CI), gate init (small_0.01 vs zero produced ~3× gate-magnitude difference with statistically tied HN-FPR).
 
@@ -1590,7 +1680,14 @@ The v4 result is what cross-attention was designed to do: catch the cross-modal 
 
 ## 5. The v5 result — dial-robust, with a data-shaped ceiling
 
-![Figure 4. v5 sweep leaderboard with adversarial-error decomposition](figures/fig4-sweep-results.svg)
+
+
+\begin{center}
+\includegraphics[width=\textwidth]{figures/fig4-sweep-results.svg}\\[0.3em]
+\textit{Repeated from Figure 4 — v5 sweep leaderboard with adversarial-error decomposition.}
+\end{center}
+
+
 
 The v5 sweep ran 11 cross-attention configurations across two phases (Figure 4A; full numbers in `experiments.jsonl`):
 
@@ -1598,17 +1695,28 @@ The v5 sweep ran 11 cross-attention configurations across two phases (Figure 4A;
 
 Eight cells, varying one dial at a time around the v4 seed (all values from `runs/exp_*/ci_report.json::stripped.v5_adv_error`):
 
-| exp_id | Config | v5_adv_error [CI] | mfa_phished miss | hn_recovery FPR | max_gate |
-|---|---|---|---|---|---|
-| `exp_xattn_v4_001` (seed) | every_8 / 64 / 0.01 | 0.1596 [0.1306, 0.1945] | 0.0282 | 0.4505 | 0.0221 |
-| `exp_v5_p1_every4_64` | every_4 / 64 / 0.01 | 0.1506 [0.1235, 0.1886] | 0.0141 | 0.4377 | 0.0171 |
-| `exp_v5_p1_late_64` | late_only / 64 / 0.01 | 0.1549 [0.1279, 0.1927] | 0.0141 | 0.4505 | 0.0179 |
-| **`exp_v5_p1_zero_64`** ★ | **every_8 / 64 / zero** | **0.1506 [0.1238, 0.1871]** | **0.0141** | **0.4377** | **0.0128** |
-| `exp_v5_p1_slots128` | every_8 / 128 / 0.01 | 0.1526 [0.1278, 0.1893] | 0.0201 | 0.4377 | 0.0212 |
-| `exp_v5_p1_slots32` | every_8 / 32 / 0.01 | 0.1656 [0.1410, 0.2017] | 0.0463 | 0.4505 | 0.0182 |
-| `exp_v5_p1_rank32` | every_8 / 64 / 0.01 / r=32 | 0.1617 [0.1347, 0.1979] | 0.0347 | 0.4505 | 0.0089 |
-| `exp_v5_p1_slowlr` | lr=3e-5 / warmup=500 | 0.2015 [0.1670, 0.2435] | 0.1539 | 0.4505 | 0.0165 |
-| `exp_v5_p1_fastlr` | lr=3e-4 / warmup=100 | **0.7516 [0.7208, 0.7828]** (catastrophic) | 0.9998 | 0.4249 | 0.0058 |
+
+\begin{landscape}
+\begin{center}
+\scriptsize
+\begin{tabular}{llllll}
+\hline
+\textbf{exp\_id} & \textbf{Config} & \textbf{v5\_adv\_error [CI]} & \textbf{mfa\_phished miss} & \textbf{hn\_recovery FPR} & \textbf{max\_gate} \\
+\hline
+\texttt{exp\_xattn\_v4\_001} (seed) & every\_8 / 64 / 0.01 & 0.1596 [0.1306, 0.1945] & 0.0282 & 0.4505 & 0.0221 \\
+\texttt{exp\_v5\_p1\_every4\_64} & every\_4 / 64 / 0.01 & 0.1506 [0.1235, 0.1886] & 0.0141 & 0.4377 & 0.0171 \\
+\texttt{exp\_v5\_p1\_late\_64} & late\_only / 64 / 0.01 & 0.1549 [0.1279, 0.1927] & 0.0141 & 0.4505 & 0.0179 \\
+\textbf{\texttt{exp\_v5\_p1\_zero\_64}} ★ & \textbf{every\_8 / 64 / zero} & \textbf{0.1506 [0.1238, 0.1871]} & \textbf{0.0141} & \textbf{0.4377} & \textbf{0.0128} \\
+\texttt{exp\_v5\_p1\_slots128} & every\_8 / 128 / 0.01 & 0.1526 [0.1278, 0.1893] & 0.0201 & 0.4377 & 0.0212 \\
+\texttt{exp\_v5\_p1\_slots32} & every\_8 / 32 / 0.01 & 0.1656 [0.1410, 0.2017] & 0.0463 & 0.4505 & 0.0182 \\
+\texttt{exp\_v5\_p1\_rank32} & every\_8 / 64 / 0.01 / r=32 & 0.1617 [0.1347, 0.1979] & 0.0347 & 0.4505 & 0.0089 \\
+\texttt{exp\_v5\_p1\_slowlr} & lr=3e-5 / warmup=500 & 0.2015 [0.1670, 0.2435] & 0.1539 & 0.4505 & 0.0165 \\
+\texttt{exp\_v5\_p1\_fastlr} & lr=3e-4 / warmup=100 & \textbf{0.7516 [0.7208, 0.7828]} (catastrophic) & 0.9998 & 0.4249 & 0.0058 \\
+\hline
+\end{tabular}
+\end{center}
+\end{landscape}
+
 
 **Phase-1 winner:** `exp_v5_p1_zero_64` (every_8 / slots=64 / gate=zero / small_transformer / lora_r=16). `v5_adv_error = 0.1506 [CI 0.1238, 0.1871]`. The v4 seed had 0.1596 [CI 0.1306, 0.1945]. Point improvement: −0.0090 absolute. **CIs overlap** ((winner_hi = 0.1871) > (seed_lo = 0.1306)). No statistically robust separation.
 

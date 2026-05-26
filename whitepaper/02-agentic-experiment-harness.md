@@ -301,7 +301,7 @@ Specific to the cross-attention POC and not directly transferable:
 - The journey/actor schema in `data/gen/journey_templates.py`.
 - The `v5_adv_error` metric in `eval/score_risk.py` (a specific composition for the v4 adversarial-family setup).
 
-The recommendation in the master whitepaper — *invest in the loop, not the architecture* — is grounded in this split. The architecture-specific code is single-use. The harness is multi-use.
+The recommendation in the master whitepaper — *invest in the loop; validate cross-attention through data, not blind architecture sweeps* — is grounded in this split. The architecture-specific code is single-use. The harness is multi-use.
 
 ---
 

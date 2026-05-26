@@ -223,7 +223,7 @@ The training pool is 25,000 LLM-narrated paired examples. Class balance:
 - **Hard negatives — 30% (7,500 rows).** Distributed across `hn_travel`, `hn_large_purchase`, `hn_account_recovery`, `hn_recovery_high_amount` (v4 new).
 - **Legit — 30% (7,500 rows).** The `clean` journey family.
 
-The 5k held-out eval (n = 5,002 after v4 leakage controls) is class-stratified to preserve these ratios. The 50k templated medium-eval (`data/eval_medium_50k/`, present but not exercised in v5) is templated-narrative rather than LLM-narrated; it preserves the same class balance with broader coverage.
+The 5k held-out eval (n = 5,002 after v4 leakage controls) is class-stratified to preserve these ratios. Two 50k medium-eval surfaces exist alongside it: a templated medium-eval at `data/eval_medium_50k/` (free to produce — no LLM calls — preserves the same class balance with broader coverage) and an LLM-narrated medium-eval at `data/eval_medium_50k_llm/` (built but not yet scored on the v5 winner; the recommended next test for tightening per-family confidence intervals).
 
 ### 4.2 Journey × actor distribution
 
